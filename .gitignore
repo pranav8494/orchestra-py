@@ -25,3 +25,36 @@ replay_pid*
 
 # Kotlin Gradle plugin data, see https://kotlinlang.org/docs/whatsnew20.html#new-directory-for-kotlin-data-in-gradle-projects
 .kotlin/
+
+# idea files
+.idea/
+
+## Documents
+*.pdf
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# Tool caches
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# NOTE: uv.lock is committed deliberately — see CONVENTIONS.md §13.
+
+# Runtime data (CONVENTIONS.md §9 — user data lives under ~/.orchestra/)
+.orchestra/
+artifacts/
+*.env
+.env.*
+
+# macOS
+.DS_Store

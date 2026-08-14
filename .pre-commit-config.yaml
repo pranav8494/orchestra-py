@@ -1,0 +1,62 @@
+# Quality gates for orchestra-py. See CONVENTIONS.md §14.
+#
+# The toolchain hooks run through `uv run` rather than pre-commit's own managed
+# environments, so their versions come from uv.lock — one source of truth shared
+# by local runs, pre-commit, and CI. Pinned mirror revs would drift from it.
+#
+# Install once:  uv run pre-commit install
+# Run manually:  uv run pre-commit run --all-files
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: [--maxkb=512]
+      - id: detect-private-key          # CONVENTIONS.md §9 — secrets never committed
+
+  - repo: local
+    hooks:
+      # Lint. Also enforces the layer rule (§3.2) via banned imports, the
+      # no-print rule (§5) via T20, and dead-code rules (F401/F841/ARG/ERA)
+      # that catch the residue duplication leaves behind.
+      - id: ruff-check
+        name: ruff check
+        entry: uv run ruff check --fix --force-exclude
+        language: system
+        types_or: [python, pyi]
+        require_serial: true
+
+      - id: ruff-format
+        name: ruff format
+        entry: uv run ruff format --force-exclude
+        language: system
+        types_or: [python, pyi]
+        require_serial: true
+
+      # Types. Strict on core/, relaxed at provider adapters (§7, §14.2).
+      # Runs over the whole package, not per-file — mypy needs the full graph.
+      - id: mypy
+        name: mypy
+        entry: uv run mypy
+        language: system
+        types_or: [python, pyi]
+        pass_filenames: false
+        require_serial: true
+
+      # THE DUPLICATE GATE (§14.4).
+      # pylint's R0801 detects mechanical copy-paste across modules. It cannot
+      # detect a reimplementation under a different name — that is what the
+      # search protocol in CONVENTIONS.md §2 is for. This is the backstop.
+      - id: duplicate-code
+        name: duplicate-code (pylint R0801)
+        entry: uv run pylint src/orchestra
+        language: system
+        types: [python]
+        pass_filenames: false
+        require_serial: true
