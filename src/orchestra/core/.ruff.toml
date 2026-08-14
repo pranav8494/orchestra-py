@@ -1,0 +1,27 @@
+# Layer enforcement for core/. See CONVENTIONS.md §3.2 and §14.3.
+#
+# core/ is the pure centre of the application: state, events, permission,
+# logging, errors. It must import nothing from the layers above it and no
+# vendor SDK, so that it stays trivially testable and portable to a different
+# front end. Ruff resolves the nearest config file per directory, so these
+# bans apply to core/ only.
+
+extend = "../../../pyproject.toml"
+
+[lint.flake8-tidy-imports]
+banned-module-level-imports = [
+    # Presentation — core/ never renders.
+    "rich",
+    "typer",
+    "click",
+    # Vendor SDKs — quarantined behind providers/ (CONVENTIONS.md §6).
+    "anthropic",
+    "openai",
+    # Upward imports — dependencies point inward, never out.
+    "orchestra.app",
+    "orchestra.cli",
+    "orchestra.agents",
+    "orchestra.tools",
+    "orchestra.providers",
+    "orchestra.prompts",
+]
