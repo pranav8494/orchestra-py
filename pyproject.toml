@@ -3,7 +3,7 @@ name = "orchestra-py"
 version = "0.1.0"
 description = "A CLI multi-agent orchestrator that decomposes plain-language business requests into subtasks, routes them to role-specialised agents, and streams live progress."
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 license = { file = "LICENSE" }
 
 dependencies = [
@@ -12,6 +12,8 @@ dependencies = [
     "pydantic>=2.7",
     "pydantic-settings>=2.3",
     "anthropic>=0.34",
+    "pandas>=3.0",          # tabular analysis for the analytics agent
+    "plotly>=6.9",          # chart generation for the visualization agent
 ]
 
 [project.scripts]
@@ -41,7 +43,7 @@ packages = ["src/orchestra"]
 # ---------------------------------------------------------------------------
 [tool.ruff]
 line-length = 100
-target-version = "py311"
+target-version = "py312"
 src = ["src", "tests"]
 # ruff formats Python blocks inside Markdown. Documentation snippets are
 # deliberately elided pseudo-code, and the pre-commit hook only passes
@@ -92,7 +94,9 @@ convention = "google"
 # See CONVENTIONS.md §7 and §14.2.
 # ---------------------------------------------------------------------------
 [tool.mypy]
-python_version = "3.11"
+# Matches `requires-python`, `.python-version`, and CONVENTIONS.md line 3. At 3.11
+# mypy rejects the PEP 695 `type` statements in numpy's stubs, which pandas pulls in.
+python_version = "3.12"
 strict = true
 files = ["src/orchestra", "tests"]
 plugins = ["pydantic.mypy"]
