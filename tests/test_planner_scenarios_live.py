@@ -30,6 +30,10 @@ except ConfigError:
 pytestmark = [
     pytest.mark.live,
     pytest.mark.skipif(CONFIG is None, reason="live scenarios need ANTHROPIC_API_KEY"),
+    # `Provider` has no close, so the SDK's pooled sockets outlive the run and
+    # `filterwarnings = ["error"]` fails teardown whatever the assertions did. Suppressed
+    # here rather than worked around; the fix is provider lifecycle on the port (#23).
+    pytest.mark.filterwarnings("ignore::ResourceWarning"),
 ]
 
 
