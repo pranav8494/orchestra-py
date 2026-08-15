@@ -4,6 +4,8 @@ Isolation from the shell and from any real `.env` is provided by the autouse
 `_isolated_env` fixture in `conftest.py`; these tests only add what they need.
 """
 
+import traceback
+
 import pytest
 
 from orchestra.config import DEFAULT_MODEL, load_config
@@ -82,3 +84,25 @@ def test_load_config_error_message_omits_pydantic_input_echo(
     message = str(exc_info.value)
     assert "input_value" not in message
     assert "errors.pydantic.dev" not in message
+
+
+def test_load_config_error_drops_the_pydantic_cause(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression: keeping the chain let `--debug` print what `_explain()` redacts.
+
+    The boundary renders the traceback under `--debug`, and a chained
+    `ValidationError` carries `input_value=<the key>` into it (§9).
+    """
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+
+    with pytest.raises(ConfigError) as exc_info:
+        load_config()
+
+    exc = exc_info.value
+    # `__context__` stays set — implicit chaining always records it. What both the
+    # stdlib and Rich honour when rendering is `__suppress_context__`, so that is the
+    # invariant, and the rendered traceback is the proof.
+    assert exc.__cause__ is None
+    assert exc.__suppress_context__ is True
+    rendered = "".join(traceback.format_exception(exc))
+    assert "input_value" not in rendered
+    assert "errors.pydantic.dev" not in rendered

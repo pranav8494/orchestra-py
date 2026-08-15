@@ -46,7 +46,9 @@ def error_boundary(*, debug: bool = False) -> Iterator[None]:
         raise
     except OrchestraError as exc:
         # Already user-facing — errors carry the message, they never format themselves.
-        err_console.print(str(exc))
+        # markup=False: an error naming a bracketed token ("[not_found_error]") would
+        # otherwise be parsed as a style tag and silently deleted from the message.
+        err_console.print(str(exc), markup=False, highlight=False)
         if debug:
             err_console.print_exception()
         raise typer.Exit(exc.exit_code) from exc
@@ -55,7 +57,7 @@ def error_boundary(*, debug: bool = False) -> Iterator[None]:
         raise typer.Exit(ExitCode.INTERRUPTED) from exc
     except Exception as exc:
         # Outside the taxonomy, so it is a bug, not a condition the user can fix.
-        err_console.print(f"Unexpected error: {exc}")
+        err_console.print(f"Unexpected error: {exc}", markup=False, highlight=False)
         if debug:
             err_console.print_exception()
         raise typer.Exit(ExitCode.UNHANDLED) from exc

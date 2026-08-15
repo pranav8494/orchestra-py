@@ -12,9 +12,13 @@ styled is emitted down a pipe. Call sites still gate *layout* on `console.is_ter
 
 from rich.console import Console
 
-# soft_wrap: with no tty, rich assumes 80 columns and hard-wraps — which would break a
-# long result line or a JSON document mid-token. stdout has to survive a pipe (§5).
-console = Console(soft_wrap=True)
+# stdout has to survive a pipe intact (§5), which takes three settings, not one:
+# soft_wrap, because with no tty rich assumes 80 columns and hard-wraps a long result
+# line or a JSON document mid-token; markup=False, because a bracketed token inside a
+# result ("[link=...]", "[DEBUG]") would be parsed as a style tag and deleted; and
+# highlight=False, so rich does not colourise numbers and quotes inside a document a
+# script is about to parse. Renderables still style normally — only string markup is off.
+console = Console(soft_wrap=True, markup=False, highlight=False)
 
 # Diagnostics, progress, and errors. Wrapping is wanted here: this stream is for eyes,
 # never for a parser.

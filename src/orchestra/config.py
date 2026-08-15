@@ -51,7 +51,10 @@ def load_config() -> Config:
     try:
         return Config()  # fields come from env/.env, not from arguments
     except ValidationError as exc:
-        raise ConfigError(_explain(exc)) from exc
+        # `from None`, not `from exc`: pydantic's rendering echoes the rejected input,
+        # so keeping the chain would let `--debug`'s traceback print the key that
+        # `_explain()` exists to keep out of the message (§9).
+        raise ConfigError(_explain(exc)) from None
 
 
 def _explain(exc: ValidationError) -> str:

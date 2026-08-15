@@ -12,6 +12,7 @@ from typer.testing import CliRunner
 
 from orchestra import __version__
 from orchestra.cli.app import app, error_boundary
+from orchestra.cli.console import console
 from orchestra.config import load_config
 from orchestra.core.errors import ConfigError, ExitCode, ProviderError
 
@@ -141,3 +142,30 @@ def test_error_boundary_with_debug_includes_traceback(
     stderr = capsys.readouterr().err
     assert "ANTHROPIC_API_KEY is not set." in stderr
     assert "Traceback" in stderr
+
+
+@pytest.mark.parametrize("raised", [ConfigError, ValueError], ids=["known", "unexpected"])
+def test_error_boundary_preserves_bracketed_text_in_message(
+    raised: type[Exception],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Regression: Rich markup is on by default, so `[not_found_error]` was deleted.
+
+    §8 promises the message, the cause, and the fix. A provider error naming a
+    bracketed token silently lost it — on both boundary arms.
+    """
+    with pytest.raises(typer.Exit), error_boundary():
+        raise raised("model [claude-x] rejected: [not_found_error]")
+
+    stderr = capsys.readouterr().err
+    assert "[claude-x]" in stderr
+    assert "[not_found_error]" in stderr
+
+
+def test_console_stdout_does_not_mangle_markup_in_results() -> None:
+    """§5: stdout carries documents a script parses — Rich must not eat part of one."""
+    payload = '{"note": "see [link=http://x]here[/link]", "n": 1}'
+    with console.capture() as captured:
+        console.print(payload)
+
+    assert captured.get().strip() == payload
