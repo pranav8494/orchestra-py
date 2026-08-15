@@ -135,17 +135,21 @@ class ExecutionEngine:
                     break  # nothing running and nothing left that could become ready
                 await finished.wait()
 
+        done = sum(1 for subtask in plan.subtasks if subtask.status is SubtaskStatus.DONE)
+
         if capped:
+            # Says what finished rather than promising "partial results": this path
+            # raises, so the CLI renders the error and never prints a report. The
+            # artifacts are on disk; reporting them is #8's.
             message = (
                 f"Step cap of {self._step_cap} exceeded; the plan is too large to run. "
-                "Stopped with partial results."
+                f"{done} of {len(plan.subtasks)} subtasks finished before stopping."
             )
             # Emitted before raising: a subscriber that never sees `run_finished` spins
             # forever, and "the run stopped" is exactly what it needs to hear.
             await self._emit(state, EventKind.RUN_FINISHED, message=message)
             raise TaskFailure(message)
 
-        done = sum(1 for subtask in plan.subtasks if subtask.status is SubtaskStatus.DONE)
         await self._emit(
             state,
             EventKind.RUN_FINISHED,

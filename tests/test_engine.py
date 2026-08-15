@@ -343,6 +343,9 @@ async def test_run_stops_when_the_step_cap_is_exceeded() -> None:
         published = _drain(queue)
 
     assert exc_info.value.exit_code is ExitCode.TASK_FAILURE
+    # Says what finished: this path raises, so nothing else reports the work that did.
+    assert "2 of 3 subtasks finished before stopping" in str(exc_info.value)
+    assert _statuses(state)["chart_trends"] is SubtaskStatus.PENDING
     # Still emitted, so a subscriber learns the run stopped instead of spinning.
     assert _kinds(published)[-1] is EventKind.RUN_FINISHED
 
