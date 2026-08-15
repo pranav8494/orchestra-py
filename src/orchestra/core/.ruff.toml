@@ -19,6 +19,9 @@ banned-module-level-imports = [
     "openai",
     # Upward imports — dependencies point inward, never out.
     "orchestra.app",
+    # config imports core.errors, so a core module importing it is a cycle. §6's
+    # "no os.environ outside config.py" makes core reaching for Config the likely slip.
+    "orchestra.config",
     "orchestra.cli",
     "orchestra.agents",
     "orchestra.tools",
