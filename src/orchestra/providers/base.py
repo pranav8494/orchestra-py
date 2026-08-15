@@ -70,6 +70,16 @@ class Provider(Protocol):
         """
         ...
 
+    async def aclose(self) -> None:
+        """Release the connections the provider holds. Idempotent.
+
+        On the port because the sockets are the vendor's, so only the adapter can close
+        them and no caller can reach past `Provider` to do it. A process that exits drops
+        them anyway; a long-lived one, or a test suite that turns `ResourceWarning` into
+        an error, does not. Callers should use `contextlib.aclosing`.
+        """
+        ...
+
 
 def create_provider(*, api_key: SecretStr, model: str) -> Provider:
     """Build the provider for `model` — the one place a vendor is chosen (§3.3).

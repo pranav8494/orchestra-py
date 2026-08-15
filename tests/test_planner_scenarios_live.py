@@ -12,6 +12,8 @@ Config is read at import, before `conftest._isolated_env` cuts the environment o
 through `load_config()` rather than `os.environ` (§6).
 """
 
+from contextlib import aclosing
+
 import pytest
 
 from orchestra.agents.planner import Planner
@@ -30,10 +32,6 @@ except ConfigError:
 pytestmark = [
     pytest.mark.live,
     pytest.mark.skipif(CONFIG is None, reason="live scenarios need ANTHROPIC_API_KEY"),
-    # `Provider` has no close, so the SDK's pooled sockets outlive the run and
-    # `filterwarnings = ["error"]` fails teardown whatever the assertions did. Suppressed
-    # here rather than worked around; the fix is provider lifecycle on the port (#23).
-    pytest.mark.filterwarnings("ignore::ResourceWarning"),
 ]
 
 
@@ -41,8 +39,12 @@ pytestmark = [
 @pytest.mark.parametrize("scenario", SCENARIOS, ids=_id)
 async def test_the_planner_shapes_a_real_plan_to_the_request(scenario: Scenario) -> None:
     assert CONFIG is not None  # guaranteed by the skipif; narrows the type for mypy
-    provider = create_provider(api_key=CONFIG.anthropic_api_key, model=CONFIG.anthropic_model)
 
-    plan = await Planner(provider).create_plan(TaskState(user_request=scenario.prompt))
+    # Unclosed, the SDK's pooled sockets outlive the test and `filterwarnings = ["error"]`
+    # fails teardown whatever the assertions did.
+    async with aclosing(
+        create_provider(api_key=CONFIG.anthropic_api_key, model=CONFIG.anthropic_model)
+    ) as provider:
+        plan = await Planner(provider).create_plan(TaskState(user_request=scenario.prompt))
 
     assert_plan_shape(plan, scenario.shape)
