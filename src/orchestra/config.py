@@ -9,12 +9,24 @@ The API key is a `SecretStr` so it cannot leak through a repr, a log record, or 
 pydantic traceback (§8).
 """
 
-from pydantic import Field, SecretStr, ValidationError
+from pathlib import Path
+
+from pydantic import Field, SecretStr, ValidationError, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from orchestra.core.errors import ConfigError
 
 DEFAULT_MODEL = "claude-opus-5"
+
+
+def default_artifact_dir() -> Path:
+    """`~/.orchestra/artifacts` — §9's home for user data, never the working directory.
+
+    Decided here because `Path.home()` reads $HOME, and only config.py may (§6). A
+    function, not a constant, so it resolves at load rather than at import.
+    """
+    return Path.home() / ".orchestra" / "artifacts"
+
 
 _FIX_HINT = (
     "Fix: copy .env.example to .env and set ANTHROPIC_API_KEY=<your-key>, "
@@ -37,6 +49,14 @@ class Config(BaseSettings):
     # which would otherwise validate as "" and fail later as a provider auth error.
     anthropic_api_key: SecretStr = Field(min_length=1)
     anthropic_model: str = DEFAULT_MODEL
+    artifact_dir: Path = Field(default_factory=default_artifact_dir)
+
+    @field_validator("artifact_dir")
+    @classmethod
+    def _absolute_path(cls, value: Path) -> Path:
+        """Taken as given, `ARTIFACT_DIR=~/x` makes a directory named `~` and a relative
+        path follows the shell — both against §9."""
+        return value.expanduser().resolve()
 
 
 def load_config() -> Config:
