@@ -10,11 +10,13 @@ import pytest
 import typer
 from typer.testing import CliRunner
 
+import orchestra.cli.app as cli_app
 from orchestra import __version__
 from orchestra.cli.app import app, error_boundary
 from orchestra.cli.console import console
 from orchestra.config import load_config
-from orchestra.core.errors import ConfigError, ExitCode, ProviderError
+from orchestra.core.errors import ConfigError, ExitCode, ProviderError, TaskFailure
+from orchestra.core.state import AgentRole, Plan, Subtask, SubtaskStatus, TaskState
 
 runner = CliRunner()
 
@@ -77,6 +79,86 @@ def test_cli_version_prints_version_to_stdout() -> None:
     assert result.exit_code == ExitCode.SUCCESS
     assert result.stdout.strip() == __version__
     assert result.stderr == ""
+
+
+# --------------------------------------------------------------------------
+# `run` — parse, delegate, map to an exit code (§4). The run itself is stubbed:
+# what the engine does is `test_engine.py`'s subject, not the command's.
+# --------------------------------------------------------------------------
+
+PROMPT = "Summarize the last 3 quarters' financial trends"
+
+
+def _finished_state(*statuses: SubtaskStatus) -> TaskState:
+    plan = Plan(
+        subtasks=[
+            Subtask(id=f"step_{index}", role=AgentRole.ANALYTICS, instruction="Do the thing")
+            for index, _ in enumerate(statuses)
+        ]
+    )
+    for subtask, status in zip(plan.subtasks, statuses, strict=True):
+        subtask.status = status
+        if status is SubtaskStatus.DONE:
+            subtask.output_pointer = f"artifact:{subtask.id}.txt"
+    return TaskState(user_request=PROMPT, plan=plan)
+
+
+def _stub_run_once(monkeypatch: pytest.MonkeyPatch, outcome: TaskState | BaseException) -> None:
+    """Replace the delegation target, leaving the command's own behaviour under test."""
+
+    async def fake_run_once(prompt: str) -> TaskState:
+        assert prompt == PROMPT  # the command passes the argument through unchanged
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(cli_app, "run_once", fake_run_once)
+
+
+def test_run_succeeds_and_prints_the_summary_to_stdout(monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_run_once(monkeypatch, _finished_state(SubtaskStatus.DONE, SubtaskStatus.DONE))
+
+    result = runner.invoke(app, ["run", PROMPT], prog_name=PROG)
+
+    assert result.exit_code == ExitCode.SUCCESS
+    assert "done     step_0  artifact:step_0.txt" in result.stdout
+    assert result.stderr == ""
+
+
+def test_run_with_a_failed_subtask_still_reports_and_exits_task_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Partial results beat no results: the artifacts still print, the code says it failed."""
+    _stub_run_once(monkeypatch, _finished_state(SubtaskStatus.DONE, SubtaskStatus.FAILED))
+
+    result = runner.invoke(app, ["run", PROMPT], prog_name=PROG)
+
+    assert result.exit_code == ExitCode.TASK_FAILURE
+    assert "done     step_0  artifact:step_0.txt" in result.stdout
+    assert "failed   step_1" in result.stdout
+    assert result.stderr == ""
+
+
+def test_run_maps_a_task_failure_to_its_exit_code(monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_run_once(monkeypatch, TaskFailure("The planner returned an unusable plan twice."))
+
+    result = runner.invoke(app, ["run", PROMPT], prog_name=PROG)
+
+    assert result.exit_code == ExitCode.TASK_FAILURE
+    assert "unusable plan" in result.stderr
+    assert result.stdout == ""  # nothing half-written for a pipe to parse (§5)
+
+
+def test_run_interrupted_exits_130(monkeypatch: pytest.MonkeyPatch) -> None:
+    """§8: Ctrl-C cancels the run and exits 130 rather than dumping a traceback."""
+    _stub_run_once(monkeypatch, KeyboardInterrupt())
+
+    result = runner.invoke(app, ["run", PROMPT], prog_name=PROG)
+
+    assert result.exit_code == ExitCode.INTERRUPTED
+    assert "Interrupted." in result.stderr
+    assert "Traceback" not in result.stderr
+    assert result.stdout == ""
 
 
 # --------------------------------------------------------------------------
