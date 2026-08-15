@@ -7,7 +7,7 @@ the vendor package, not to this file.
 """
 
 from collections.abc import Sequence
-from typing import Literal
+from typing import Literal, assert_never
 
 import anthropic
 from anthropic.types import MessageParam
@@ -80,9 +80,15 @@ class AnthropicProvider:
 def _to_sdk_message(message: ProviderMessage) -> MessageParam:
     """Translate one turn into the SDK's shape. The reverse never happens: callers get
     parsed models, so no SDK type crosses back out (§6)."""
-    # Spelled out rather than passing `message.role.value`: the SDK types `role` as a
-    # literal, so this is where a new `MessageRole` member fails to compile.
-    role: Literal["user", "assistant"] = (
-        "assistant" if message.role is MessageRole.ASSISTANT else "user"
-    )
+    # Exhaustive rather than an else-branch: the SDK types `role` as a literal, and a
+    # fourth `MessageRole` member must fail under mypy here, not be silently relabelled
+    # `user` at runtime. `assert_never` is what makes that a compile-time guarantee.
+    role: Literal["user", "assistant"]
+    match message.role:
+        case MessageRole.USER:
+            role = "user"
+        case MessageRole.ASSISTANT:
+            role = "assistant"
+        case unhandled:
+            assert_never(unhandled)
     return MessageParam(role=role, content=message.content)

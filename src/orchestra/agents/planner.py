@@ -16,7 +16,7 @@ its first draft.
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from orchestra.core.errors import ProviderError
+from orchestra.core.errors import TaskFailure
 from orchestra.core.state import (
     AgentRole,
     EventKind,
@@ -82,7 +82,11 @@ class Planner:
             The validated plan, the same object as `state.plan`.
 
         Raises:
-            ProviderError: the provider failed, or returned an unusable plan twice.
+            TaskFailure: the model returned an unusable plan twice. Exit 5, not 4: the
+                provider answered both times, so retrying it or checking credentials is
+                the wrong advice — this run has no plan to execute (§8, §10).
+            ProviderError: the provider itself failed; raised at the adapter and passed
+                through here untouched.
             asyncio.CancelledError: the caller cancelled the run; propagated, never
                 swallowed (§10).
         """
@@ -101,7 +105,7 @@ class Planner:
             # Deliberately not a loop: a model that has failed the same schema twice
             # with the error in front of it is not going to succeed on the third try,
             # and the user is waiting.
-            raise ProviderError(f"The planner returned an unusable plan twice. Last: {rejection}")
+            raise TaskFailure(f"The planner returned an unusable plan twice. Last: {rejection}")
 
         state.plan = plan
         state.events.append(
@@ -126,10 +130,15 @@ class Planner:
             output_format=PlanDraft,
         )
         if draft is None:
-            return None, "No plan was returned. Reply with the plan and nothing else."
+            # Covers both a refusal and a reply that was JSON but not this schema — the
+            # adapter cannot tell them apart, so the feedback must fit either.
+            return None, (
+                "No usable plan was returned. Reply with a plan matching the schema "
+                "exactly, and nothing else."
+            )
         try:
             return _to_plan(draft), ""
-        except ValidationError as exc:
+        except (ValidationError, _RejectedDraftError) as exc:
             # `Plan` enforces unique ids, known dependencies and acyclicity — none of
             # which a JSON schema can express, so this is the retry's whole reason to
             # exist. The rejected draft goes back too: the model cannot see its own
@@ -137,12 +146,52 @@ class Planner:
             return None, f"{exc}\n\nThe rejected plan was:\n{draft.model_dump_json(indent=2)}"
 
 
+class _RejectedDraftError(ValueError):
+    """The draft is well-formed JSON but not a runnable plan.
+
+    Sibling of the `ValidationError` `Plan` raises, and handled identically: both are
+    "the model's plan cannot run, tell it why". Separate only because `Plan` does not
+    check `inputs` — see `_check_inputs`.
+    """
+
+
+def _check_inputs(draft: PlanDraft) -> None:
+    """Reject data edges that are missing or unordered.
+
+    `Plan` validates `depends_on` — ids, duplicates, cycles — but not `inputs`, and its
+    `inputs` semantics are not settled: `state_slice` reads them as artifact keys, while
+    `Subtask` documents them as upstream subtask ids. Settling that belongs to the engine
+    (#4), so the rule the planner's own prompt states is enforced here rather than in
+    `core/`: an input names a subtask in this plan, and consuming a step's output means
+    depending on it. Without the second half the engine may start a consumer before its
+    producer has written anything — the exact race `depends_on` exists to prevent.
+
+    Raises:
+        _RejectedDraftError: an input names an unknown subtask, or one not depended on.
+    """
+    known = {subtask.id for subtask in draft.subtasks}
+    for subtask in draft.subtasks:
+        unknown = sorted(set(subtask.inputs) - known)
+        if unknown:
+            raise _RejectedDraftError(
+                f"subtask {subtask.id!r} takes inputs from unknown steps: {unknown}"
+            )
+        unordered = sorted(set(subtask.inputs) - set(subtask.depends_on))
+        if unordered:
+            raise _RejectedDraftError(
+                f"subtask {subtask.id!r} consumes {unordered} but does not depend on them; "
+                "every id in `inputs` must also appear in `depends_on`"
+            )
+
+
 def _to_plan(draft: PlanDraft) -> Plan:
     """Convert model output into a ledger `Plan`, leaving engine-owned fields default.
 
     Raises:
         ValidationError: the draft is not a runnable DAG.
+        _RejectedDraftError: the draft's data edges are unknown or unordered.
     """
+    _check_inputs(draft)
     return Plan(
         subtasks=[
             Subtask(

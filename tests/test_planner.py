@@ -11,7 +11,7 @@ import pytest
 
 from conftest import FakeProvider
 from orchestra.agents.planner import PlanDraft, Planner, SubtaskDraft
-from orchestra.core.errors import ExitCode, ProviderError
+from orchestra.core.errors import ExitCode, ProviderError, TaskFailure
 from orchestra.core.state import AgentRole, EventKind, SubtaskStatus, TaskState
 from orchestra.prompts import PLANNER_SYSTEM_PROMPT
 
@@ -61,7 +61,10 @@ def _broken_plan() -> PlanDraft:
 
 
 @pytest.mark.asyncio
-async def test_create_plan_decomposes_the_financial_request_into_an_ordered_dag() -> None:
+async def test_create_plan_preserves_roles_and_dependency_ordering_from_the_draft() -> None:
+    """The ticket's sample request, but the plan asserted on is the fixture's, not a
+    model's: what this pins down is that conversion loses no role and no edge. Whether a
+    live model decomposes the request this way is #17a's scenario, not a unit test's."""
     provider = FakeProvider(responses=[_financial_plan()])
     state = TaskState(user_request=REQUEST)
 
@@ -133,6 +136,57 @@ async def test_create_plan_retries_once_when_the_plan_fails_validation() -> None
 
 
 @pytest.mark.asyncio
+async def test_create_plan_rejects_an_input_the_step_does_not_depend_on() -> None:
+    """A data edge with no ordering edge is a race, not a plan: the engine may start the
+    consumer before the producer has written anything. `Plan` checks `depends_on` only,
+    so this is the planner's own check — and it must reach the retry, not the ledger."""
+    unordered = PlanDraft(
+        subtasks=[
+            SubtaskDraft(
+                id="fetch_quarterly_financials",
+                role=AgentRole.DATA_RETRIEVAL,
+                instruction="Load revenue for the last three quarters.",
+            ),
+            SubtaskDraft(
+                id="analyse_trends",
+                role=AgentRole.ANALYTICS,
+                instruction="Compute quarter-over-quarter growth.",
+                inputs=["fetch_quarterly_financials"],  # consumed, but not depended on
+            ),
+        ]
+    )
+    provider = FakeProvider(responses=[unordered, _financial_plan()])
+    state = TaskState(user_request=REQUEST)
+
+    plan = await Planner(provider).create_plan(state)
+
+    assert len(provider.calls) == 2
+    assert "does not depend on them" in provider.calls[1].messages[1].content
+    assert plan is state.plan
+
+
+@pytest.mark.asyncio
+async def test_create_plan_rejects_an_input_naming_a_step_outside_the_plan() -> None:
+    ghost = PlanDraft(
+        subtasks=[
+            SubtaskDraft(
+                id="chart_trends",
+                role=AgentRole.VISUALIZATION,
+                instruction="Plot the quarterly revenue trend.",
+                inputs=["analyse_trends"],
+                depends_on=["analyse_trends"],
+            )
+        ]
+    )
+    provider = FakeProvider(responses=[ghost, _financial_plan()])
+
+    plan = await Planner(provider).create_plan(TaskState(user_request=REQUEST))
+
+    assert len(plan.subtasks) == 3
+    assert len(provider.calls) == 2
+
+
+@pytest.mark.asyncio
 async def test_create_plan_retries_once_when_no_structured_output_comes_back() -> None:
     """`parsed_output is None` — a refusal, or a reply truncated before the JSON closed."""
     provider = FakeProvider(responses=[None, _financial_plan()])
@@ -148,10 +202,12 @@ async def test_create_plan_raises_after_a_second_failure_without_retrying_again(
     provider = FakeProvider(responses=[_broken_plan(), _broken_plan()])
     state = TaskState(user_request=REQUEST)
 
-    with pytest.raises(ProviderError) as exc_info:
+    # Exit 5, not 4: the provider answered both times. Nothing is wrong with it or the
+    # credentials — this run simply has no plan to execute.
+    with pytest.raises(TaskFailure) as exc_info:
         await Planner(provider).create_plan(state)
 
-    assert exc_info.value.exit_code == ExitCode.PROVIDER
+    assert exc_info.value.exit_code == ExitCode.TASK_FAILURE
     assert len(provider.calls) == 2
     # A failed plan is not a plan: the ledger must not be left half-written.
     assert state.plan is None

@@ -41,7 +41,10 @@ dependency makes the run slower.
 - Every id in `depends_on` and `inputs` must be the `id` of another subtask in this \
 same plan, and the dependencies must form a directed acyclic graph.
 - Plan only. Do not answer the request, do not invent data, and do not describe how a \
-step will be implemented.\
+step will be implemented.
+- If part of the request needs work none of these three roles can do, plan the part that \
+does fit and say plainly in the closest `instruction` what was left out. Never stretch a \
+role to cover it.\
 """
 
 REFORMAT_INSTRUCTION = """\
