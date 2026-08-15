@@ -13,7 +13,7 @@ import pytest
 
 # Every setting `Config` reads. Listed once so a new field cannot silently start
 # leaking the developer's shell into the suite.
-_SETTING_ENV_VARS = ("ANTHROPIC_API_KEY", "ANTHROPIC_MODEL")
+_SETTING_ENV_VARS = ("ANTHROPIC_API_KEY", "ANTHROPIC_MODEL", "ARTIFACT_DIR")
 
 
 @pytest.fixture(autouse=True)

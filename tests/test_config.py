@@ -5,6 +5,7 @@ Isolation from the shell and from any real `.env` is provided by the autouse
 """
 
 import traceback
+from pathlib import Path
 
 import pytest
 
@@ -29,6 +30,47 @@ def test_load_config_with_model_env_var_overrides_default(monkeypatch: pytest.Mo
     monkeypatch.setenv("ANTHROPIC_MODEL", "claude-some-other-model")
 
     assert load_config().anthropic_model == "claude-some-other-model"
+
+
+def test_load_config_artifact_dir_defaults_under_home(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """§9: user data lives under ~/.orchestra/, never the working directory."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", FAKE_KEY)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+
+    artifact_dir = load_config().artifact_dir
+
+    # Asserted against $HOME, not against the module's own default, so the test can
+    # actually fail if the default stops being home-relative.
+    assert artifact_dir == tmp_path / "home" / ".orchestra" / "artifacts"
+
+
+def test_load_config_artifact_dir_env_var_overrides_default(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", FAKE_KEY)
+    monkeypatch.setenv("ARTIFACT_DIR", str(tmp_path / "elsewhere"))
+
+    assert load_config().artifact_dir == tmp_path / "elsewhere"
+
+
+@pytest.mark.parametrize("raw", ["~/somewhere", "relative-artifacts"])
+def test_load_config_artifact_dir_is_always_absolute(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, raw: str
+) -> None:
+    """A literal `~` would create a directory called `~`; a relative path follows the shell.
+
+    Both violate §9's "never the working directory", so the field resolves them.
+    """
+    monkeypatch.setenv("ANTHROPIC_API_KEY", FAKE_KEY)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("ARTIFACT_DIR", raw)
+
+    artifact_dir = load_config().artifact_dir
+
+    assert artifact_dir.is_absolute()
+    assert "~" not in str(artifact_dir)
 
 
 def test_load_config_missing_api_key_raises_config_error() -> None:
