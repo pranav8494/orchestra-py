@@ -143,6 +143,41 @@ def test_every_sdk_error_the_adapter_can_meet_derives_from_the_class_it_catches(
         assert issubclass(error, anthropic.AnthropicError)
 
 
+@pytest.mark.asyncio
+async def test_aclose_closes_the_sdk_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unclosed, the SDK's pooled sockets outlive the process that made them (#23)."""
+    provider = AnthropicProvider(api_key=SecretStr("test-key"), model="claude-opus-5")
+    closed = False
+
+    async def _close() -> None:
+        nonlocal closed
+        closed = True
+
+    monkeypatch.setattr(provider._client, "close", _close)
+
+    await provider.aclose()
+
+    assert closed
+
+
+@pytest.mark.asyncio
+async def test_aclose_propagates_an_sdk_failure_as_provider_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Closing is I/O too, and no SDK exception type may escape `providers/` (§6, §8)."""
+    provider = AnthropicProvider(api_key=SecretStr("test-key"), model="claude-opus-5")
+
+    async def _close() -> None:
+        raise anthropic.AnthropicError("connection already gone")
+
+    monkeypatch.setattr(provider._client, "close", _close)
+
+    with pytest.raises(ProviderError) as exc_info:
+        await provider.aclose()
+
+    assert exc_info.value.exit_code == ExitCode.PROVIDER
+
+
 def test_create_provider_returns_an_anthropic_provider() -> None:
     provider: Provider = create_provider(api_key=SecretStr("test-key"), model="claude-opus-5")
 

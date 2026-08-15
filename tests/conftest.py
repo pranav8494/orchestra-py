@@ -62,6 +62,7 @@ class FakeProvider:
     # gets a request in flight to cancel.
     blocker: asyncio.Event | None = None
     calls: list[ParseCall] = field(default_factory=list)
+    closed: bool = False
 
     async def parse_structured(
         self,
@@ -81,6 +82,10 @@ class FakeProvider:
             raise answer
         # The queue is heterogeneous by design; the test decides what the call returns.
         return cast("StructuredT | None", answer)
+
+    async def aclose(self) -> None:
+        """Nothing to release; the flag lets a test assert the caller closed it."""
+        self.closed = True
 
 
 if TYPE_CHECKING:

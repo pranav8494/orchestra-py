@@ -14,35 +14,12 @@ from orchestra.agents.planner import PlanDraft, Planner, SubtaskDraft
 from orchestra.core.errors import ExitCode, ProviderError, TaskFailure
 from orchestra.core.state import AgentRole, EventKind, SubtaskStatus, TaskState
 from orchestra.prompts import PLANNER_SYSTEM_PROMPT
+from scenarios import LINEAR
 
-REQUEST = "Summarize the last 3 quarters financial trends and create a chart"
-
-
-def _financial_plan() -> PlanDraft:
-    """A plausible answer to `REQUEST`: fetch, then analyse, then chart and write up."""
-    return PlanDraft(
-        subtasks=[
-            SubtaskDraft(
-                id="fetch_quarterly_financials",
-                role=AgentRole.DATA_RETRIEVAL,
-                instruction="Load revenue and margin for the last three quarters.",
-            ),
-            SubtaskDraft(
-                id="analyse_trends",
-                role=AgentRole.ANALYTICS,
-                instruction="Compute quarter-over-quarter growth and describe the trend.",
-                inputs=["fetch_quarterly_financials"],
-                depends_on=["fetch_quarterly_financials"],
-            ),
-            SubtaskDraft(
-                id="chart_trends",
-                role=AgentRole.VISUALIZATION,
-                instruction="Plot the quarterly revenue trend as a line chart.",
-                inputs=["analyse_trends"],
-                depends_on=["analyse_trends"],
-            ),
-        ]
-    )
+# The linear scenario is this file's good-plan fixture too — one definition, so the two
+# suites cannot disagree about what a valid plan looks like (§2).
+REQUEST = LINEAR.prompt
+_financial_plan = LINEAR.draft
 
 
 def _broken_plan() -> PlanDraft:
@@ -62,9 +39,8 @@ def _broken_plan() -> PlanDraft:
 
 @pytest.mark.asyncio
 async def test_create_plan_preserves_roles_and_dependency_ordering_from_the_draft() -> None:
-    """The ticket's sample request, but the plan asserted on is the fixture's, not a
-    model's: what this pins down is that conversion loses no role and no edge. Whether a
-    live model decomposes the request this way is #17a's scenario, not a unit test's."""
+    """Conversion loses no role and no edge. The plan asserted on is the fixture's, not a
+    model's — a live model's is `test_planner_scenarios_live.py`'s question."""
     provider = FakeProvider(responses=[_financial_plan()])
     state = TaskState(user_request=REQUEST)
 

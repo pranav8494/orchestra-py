@@ -76,6 +76,17 @@ class AnthropicProvider:
             return None
         return response.parsed_output
 
+    async def aclose(self) -> None:
+        """Close the SDK client's connection pool. See `Provider.aclose`.
+
+        Closing is I/O, so it fails like any other call — and mapping it here keeps the
+        rule that no SDK exception type leaves this module (§6, §8).
+        """
+        try:
+            await self._client.close()
+        except anthropic.AnthropicError as exc:
+            raise ProviderError(f"Closing the Anthropic client failed: {exc}") from exc
+
 
 def _to_sdk_message(message: ProviderMessage) -> MessageParam:
     """Translate one turn into the SDK's shape. The reverse never happens: callers get
