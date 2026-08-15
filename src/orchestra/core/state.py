@@ -164,6 +164,17 @@ class TaskState(BaseModel):
     events: list[TaskEvent] = Field(default_factory=list)
     clarifications: list[Clarification] = Field(default_factory=list)
 
+    @property
+    def failed_subtasks(self) -> list[Subtask]:
+        """The subtasks the engine marked failed — empty when the run produced everything.
+
+        The ledger answers "did this run succeed?", so the CLI can map a result to an
+        exit code without reimplementing the question (§4).
+        """
+        if self.plan is None:
+            return []
+        return [subtask for subtask in self.plan.subtasks if subtask.status is SubtaskStatus.FAILED]
+
     def state_slice(self, subtask: Subtask) -> SubtaskContext:
         """Narrow the ledger to what one worker needs (§6).
 

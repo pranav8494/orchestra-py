@@ -4,11 +4,12 @@ Also the single place a failure is turned into a message and a status (§8) —
 `error_boundary` maps an `OrchestraError` to its own exit code, `KeyboardInterrupt`
 to 130, and anything else to 1. Nothing below `cli/` formats an error for a human.
 
-Phase A registers no commands: `run` arrives with the agent loop. `load_config()` is
-deliberately not called here or at import — `--help` must work in a checkout with no
-`.env`.
+`load_config()` is deliberately not called here or at import — `--help` must work in a
+checkout with no `.env`, so configuration is loaded inside the command, under the
+boundary that turns a `ConfigError` into exit 3.
 """
 
+import asyncio
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Annotated
@@ -16,7 +17,9 @@ from typing import Annotated
 import typer
 
 from orchestra import __version__
+from orchestra.app import run_once
 from orchestra.cli.console import console, err_console
+from orchestra.cli.format import format_run_summary
 from orchestra.core.errors import ExitCode, OrchestraError
 
 app = typer.Typer(
@@ -74,3 +77,20 @@ def main(
         if version:
             console.print(__version__)  # a result, not a diagnostic (§5)
             raise typer.Exit(ExitCode.SUCCESS)
+
+
+@app.command()
+def run(
+    prompt: Annotated[str, typer.Argument(help="The task to solve.")],
+    debug: Annotated[bool, typer.Option("--debug", help="Show the traceback on failure.")] = False,
+) -> None:
+    """Plan the request, run the subtasks, and report what each produced."""
+    with error_boundary(debug=debug):
+        # Ctrl-C cancels the run inside `asyncio.run`, which unwinds the TaskGroup and
+        # re-raises KeyboardInterrupt here; the boundary maps it to 130 (§8).
+        state = asyncio.run(run_once(prompt))
+        console.print(format_run_summary(state))  # the result, so stdout (§5)
+        # A partially failed run still prints its artifacts; only the code says it failed.
+        raise typer.Exit(
+            ExitCode.TASK_FAILURE if state.failed_subtasks else ExitCode.SUCCESS,
+        )
