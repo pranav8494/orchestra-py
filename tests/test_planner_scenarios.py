@@ -1,12 +1,10 @@
-"""Offline half of the #17 scenario suite (CONVENTIONS.md §12).
+"""Offline half of the #17 scenario suite (§12).
 
-What these pin down is that a shape survives the trip through the planner: `_to_plan`
-invents no dependency edge, drops no role, and reorders nothing. Whether a live model
-decomposes each prompt this way is `test_planner_scenarios_live.py`'s question — a fake
-that answers with the shape the test then asserts on cannot answer it, and this file
-does not pretend to.
+These pin down that a shape survives the planner: `_to_plan` invents no dependency edge,
+drops no role, and reorders nothing. Whether a live model decomposes each prompt this way
+is `test_planner_scenarios_live.py`'s question; a fake cannot answer it.
 
-The shapes themselves live in `scenarios.py`, so both suites assert the same contract.
+The shapes live in `scenarios.py`, so both suites assert the same contract.
 """
 
 import pytest
@@ -31,9 +29,8 @@ async def test_create_plan_keeps_the_scenario_shape(scenario: Scenario) -> None:
 
 @pytest.mark.asyncio
 async def test_create_plan_leaves_the_two_fan_out_retrievals_unlinked() -> None:
-    """The fan-out criterion stated directly rather than through the shape: no edge in
-    either direction between the retrievals. An edge here is not a slower plan, it is a
-    serialised one — the engine parallelises on `depends_on` and nothing else."""
+    """The fan-out criterion stated directly: no edge in either direction between the
+    retrievals. The engine parallelises on `depends_on` and nothing else."""
     provider = FakeProvider(responses=[FAN_OUT.draft()])
 
     plan = await Planner(provider).create_plan(TaskState(user_request=FAN_OUT.prompt))
@@ -60,8 +57,8 @@ async def test_create_plan_omits_visualization_when_the_request_asks_for_no_char
 
 @pytest.mark.asyncio
 async def test_assert_plan_shape_rejects_a_plan_of_the_wrong_shape() -> None:
-    """The assertion's own error path. A shape checker that passes everything would let
-    all three scenarios go green while the planner emitted one fixed chain."""
+    """The assertion's own error path: a checker that passes everything would let all
+    three scenarios go green against one fixed chain."""
     provider = FakeProvider(responses=[FAN_OUT.draft()])
 
     plan = await Planner(provider).create_plan(TaskState(user_request=FAN_OUT.prompt))

@@ -1,24 +1,21 @@
 """The three scenarios that prove the planner is dynamic (#17).
 
 A three-role pipeline can look dynamic while always emitting the same DAG. Each scenario
-below pairs a prompt with the plan shape that prompt must produce, taken verbatim from
-the research doc's "Proving the Planner Is Dynamic" table:
+pairs a prompt with the shape it must produce, from the research doc's "Proving the
+Planner Is Dynamic" table:
 
-| Scenario      | Required shape                                                    |
-|---------------|-------------------------------------------------------------------|
-| linear        | 3 steps, sequential                                               |
-| fan_out       | 2 independent retrievals, then analytics, then visualization      |
-| role_omission | 2 steps, no visualization                                         |
+| Scenario      | Required shape                                               |
+|---------------|--------------------------------------------------------------|
+| linear        | 3 steps, sequential                                          |
+| fan_out       | 2 independent retrievals, then analytics, then visualization |
+| role_omission | 2 steps, no visualization                                    |
 
-A shape is stated in roles and edges, never in ids: the same assertion has to hold for a
-canned draft and for whatever a live model decides to name its steps.
+Shapes are stated in roles and edges, never ids, so the same assertion holds for a canned
+draft and for whatever a live model names its steps.
 
-Two suites consume this module. `test_planner_scenarios.py` runs it offline against
-`FakeProvider` and answers "does the shape survive draft -> `Plan` conversion?".
-`test_planner_scenarios_live.py` runs it against the real model and answers "does the
-planner actually decompose this way?" — the question a fake cannot answer and the one
-§12 will not let run by default. Counts are exact rather than tolerant, so a live
-failure is a signal about the prompt, which is the whole reason to run it.
+`test_planner_scenarios.py` asserts offline that a shape survives draft -> `Plan`
+conversion; `test_planner_scenarios_live.py` asserts a real model decomposes this way
+(§12 keeps it off by default).
 """
 
 import itertools
@@ -35,15 +32,12 @@ class PlanShape:
 
     Attributes:
         steps: how many subtasks the plan must have.
-        role_counts: how many subtasks carry each role. Every `AgentRole` must appear,
-            so an omitted role is stated as `0` rather than left implicit — that is the
-            assertion the role-omission scenario turns on, and it must not go missing
-            when a fourth role lands.
+        role_counts: subtasks per role. Every `AgentRole` must appear; an absent role is
+            stated as `0`, which is the assertion role_omission turns on.
         precedes: `(earlier, later)` pairs. Every subtask of `later` must transitively
             depend on every subtask of `earlier`.
-        concurrent: a role whose subtasks must be pairwise independent — neither
-            reachable from the other, so the engine may run them at once. `None` where
-            the role has a single subtask and the assertion would be vacuous.
+        concurrent: a role whose subtasks must be pairwise independent, so the engine may
+            run them at once. `None` where the role has one subtask.
     """
 
     steps: int
@@ -54,8 +48,8 @@ class PlanShape:
     def __post_init__(self) -> None:
         """Check the scenario definition, not a plan.
 
-        A shape whose role counts disagree with its step count would pass some plans it
-        should reject, and the test would look green while asserting nothing.
+        Role counts that disagree with the step count would accept plans they should
+        reject.
 
         Raises:
             ValueError: the shape is not internally consistent.
@@ -75,8 +69,7 @@ class Scenario:
     name: str
     prompt: str
     shape: PlanShape
-    # A factory, not an instance: the offline suite hands this to `FakeProvider`, and a
-    # draft shared between tests is a draft one test can leave modified for the next.
+    # A factory, not an instance: a shared draft is one a test can leave mutated.
     draft: Callable[[], PlanDraft]
 
 
@@ -108,9 +101,8 @@ def linear_draft() -> PlanDraft:
 
 
 def fan_out_draft() -> PlanDraft:
-    """Two retrievals that need nothing from each other, then one comparison, then a
-    chart. Neither retrieval names the other in `depends_on`: that missing edge is what
-    lets the engine run both at once, and asserting on it is this scenario's point."""
+    """Two independent retrievals, then a comparison, then a chart. The missing edge
+    between the retrievals is what lets the engine run them at once."""
     return PlanDraft(
         subtasks=[
             SubtaskDraft(
@@ -142,8 +134,7 @@ def fan_out_draft() -> PlanDraft:
 
 
 def role_omission_draft() -> PlanDraft:
-    """A written summary and nothing to draw. The absent visualization subtask is the
-    assertion: the planner drops a role it does not need, rather than reordering it."""
+    """A written summary and nothing to draw: visualization is dropped, not reordered."""
     return PlanDraft(
         subtasks=[
             SubtaskDraft(
@@ -268,8 +259,7 @@ def _with_role(plan: Plan, role: AgentRole) -> list[Subtask]:
 def _ancestors(plan: Plan) -> dict[str, set[str]]:
     """Every subtask id each subtask transitively depends on.
 
-    `Plan` validates acyclicity on construction, so this walk needs no cycle guard —
-    an unvalidated graph would recurse forever instead of failing an assertion.
+    `Plan` validates acyclicity on construction, so this walk needs no cycle guard.
     """
     by_id = {subtask.id: subtask for subtask in plan.subtasks}
     resolved: dict[str, set[str]] = {}
@@ -289,11 +279,7 @@ def _ancestors(plan: Plan) -> dict[str, set[str]]:
 
 
 def _render(plan: Plan) -> str:
-    """The plan as failure-message text: one line per subtask, with its role and edges.
-
-    A shape assertion that fails prints "expected 4, got 3" and nothing else is a
-    failure you have to re-run under a debugger to understand.
-    """
+    """The plan as failure-message text: one line per subtask, with its role and edges."""
     return "\n".join(
         f"  {subtask.id} [{subtask.role}] depends_on={subtask.depends_on}"
         for subtask in plan.subtasks

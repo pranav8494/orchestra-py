@@ -126,8 +126,8 @@ disallow_untyped_defs = false
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "strict"
-# `-m "not live"` is the default because §12 forbids the suite from touching the
-# network. The live scenarios opt in with `uv run pytest -m live`, which overrides it.
+# Default `-m "not live"`: §12 forbids the suite from touching the network. Live
+# scenarios opt in with `uv run pytest -m live`.
 addopts = '-ra --strict-markers --strict-config -m "not live"'
 markers = ["live: calls the real provider; deselected by default, run with -m live"]
 filterwarnings = ["error"]

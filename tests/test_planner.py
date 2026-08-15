@@ -16,8 +16,8 @@ from orchestra.core.state import AgentRole, EventKind, SubtaskStatus, TaskState
 from orchestra.prompts import PLANNER_SYSTEM_PROMPT
 from scenarios import LINEAR
 
-# The linear scenario doubles as this file's stand-in for a good plan: one fixture, so a
-# change to what a valid plan looks like cannot leave the two suites disagreeing (§2).
+# The linear scenario is this file's good-plan fixture too — one definition, so the two
+# suites cannot disagree about what a valid plan looks like (§2).
 REQUEST = LINEAR.prompt
 _financial_plan = LINEAR.draft
 
@@ -39,9 +39,8 @@ def _broken_plan() -> PlanDraft:
 
 @pytest.mark.asyncio
 async def test_create_plan_preserves_roles_and_dependency_ordering_from_the_draft() -> None:
-    """The ticket's sample request, but the plan asserted on is the fixture's, not a
-    model's: what this pins down is that conversion loses no role and no edge. Whether a
-    live model decomposes the request this way is `test_planner_scenarios_live.py`'s."""
+    """Conversion loses no role and no edge. The plan asserted on is the fixture's, not a
+    model's — a live model's is `test_planner_scenarios_live.py`'s question."""
     provider = FakeProvider(responses=[_financial_plan()])
     state = TaskState(user_request=REQUEST)
 
