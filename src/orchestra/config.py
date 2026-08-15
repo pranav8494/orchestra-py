@@ -20,12 +20,10 @@ DEFAULT_MODEL = "claude-opus-5"
 
 
 def default_artifact_dir() -> Path:
-    """`~/.orchestra/artifacts` — where §9 puts user data, never the working directory.
+    """`~/.orchestra/artifacts` — §9's home for user data, never the working directory.
 
-    Decided here because `Path.home()` reads $HOME and config.py is the only module
-    allowed to read the environment (§6); leaving the default to the store's caller is
-    how that rule gets broken. A function, not a constant, so it resolves when config is
-    loaded rather than when this module is first imported.
+    Decided here because `Path.home()` reads $HOME, and only config.py may (§6). A
+    function, not a constant, so it resolves at load rather than at import.
     """
     return Path.home() / ".orchestra" / "artifacts"
 
@@ -56,12 +54,8 @@ class Config(BaseSettings):
     @field_validator("artifact_dir")
     @classmethod
     def _absolute_path(cls, value: Path) -> Path:
-        """Expand `~` and resolve, so §9's "never the working directory" holds for any input.
-
-        `ARTIFACT_DIR=~/somewhere` arrives as a literal tilde and `ARTIFACT_DIR=out` as a
-        relative path; taken as given, the first creates a directory named `~` and the
-        second scatters artifacts wherever the user happened to `cd`.
-        """
+        """Taken as given, `ARTIFACT_DIR=~/x` makes a directory named `~` and a relative
+        path follows the shell — both against §9."""
         return value.expanduser().resolve()
 
 

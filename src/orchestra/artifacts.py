@@ -1,21 +1,13 @@
 """Pointer-based artifact store: payloads on disk, `artifact:<name>` strings in state.
 
-Agents exchange pointers, never blobs — see `core/state.py` for why. This module is the
-other end of that string: it writes the payload and resolves the pointer back.
-
 **Why here and not in `core/`.** §1.3 keeps `core/` free of I/O so the ledger stays
-portable behind another front end, and this store is precisely the part that changes
-when it does — a local directory today, object storage the moment the run leaves one
-process. `config.py` is the existing precedent: impure infrastructure sits at the top
-level and is injected downward from `app.py`.
+portable behind another front end, and this store is the part that changes when it does
+— a local directory today, object storage once the run leaves one process. `config.py`
+is the precedent: impure infrastructure at the top level, injected from `app.py`.
 
-Payloads are `bytes`, `str`, or an existing file. Serialising a DataFrame is the job of
-the agent that owns one; the store stays ignorant of what it holds, which is what makes
-it swappable.
-
-Synchronous by design (§10 keeps blocking I/O off the event loop): the async engine
-calls these through `asyncio.to_thread`, so every method here must be safe to run in
-parallel with itself. `_reserve` is the reason that holds.
+Payloads are `bytes`, `str`, or an existing file; serialising a DataFrame belongs to the
+agent that owns one. Synchronous, so the async engine calls it through `asyncio.to_thread`
+(§10) — which is why every method has to be safe to run in parallel with itself.
 """
 
 import re
@@ -31,26 +23,24 @@ from orchestra.core.state import ARTIFACT_NAME_PATTERN, ARTIFACT_PREFIX
 class ArtifactStore:
     """Stores payloads under `root` and hands back pointer keys.
 
-    One instance per run, constructed in `app.py` and injected — one of each thing (§1.5),
-    but not a singleton, which would hide the dependency from its users (§3.3).
+    One instance per run, constructed in `app.py` and injected — not a singleton (§3.3).
     """
 
     def __init__(self, root: Path) -> None:
         """Create the store, making `root` if it does not exist.
 
         Args:
-            root: absolute directory to write into. Comes from `Config.artifact_dir`.
+            root: absolute directory to write into, from `Config.artifact_dir`.
 
         Raises:
-            ConfigError: `root` cannot be created. Raised when the store is constructed
-                rather than at the first write, so `app.py` surfaces a bad path before
-                any agent runs (§9).
+            ConfigError: `root` is unusable — at construction, so `app.py` surfaces a bad
+                path before any agent runs (§9).
         """
         try:
             root.mkdir(parents=True, exist_ok=True)
         except (OSError, ValueError) as exc:
-            # ValueError, not just OSError: a NUL byte in the path fails in the encoder
-            # before the syscall, and it must not escape the taxonomy as an exit-1 bug.
+            # ValueError too: a NUL byte fails in the encoder before the syscall, and
+            # must not escape the taxonomy as an exit-1 bug.
             raise ConfigError(f"Cannot use artifact directory {root}: {exc}") from exc
         self._root = root
 
@@ -68,8 +58,7 @@ class ArtifactStore:
 
     def put_text(self, name: str, text: str) -> str:
         """Store `text` as UTF-8 and return its pointer."""
-        # Explicit encoding: `Path.write_text` defaults to the locale's, so the same CSV
-        # would round-trip differently on a machine that is not UTF-8.
+        # Explicit encoding: `write_text` defaults to the locale's.
         return self.put_bytes(name, text.encode("utf-8"))
 
     def put_file(self, path: Path) -> str:
@@ -90,7 +79,7 @@ class ArtifactStore:
         return self.get_bytes(pointer).decode("utf-8")
 
     def path_for(self, pointer: str) -> Path:
-        """Filesystem path behind `pointer`, for handing a chart file to the renderer.
+        """Filesystem path behind `pointer`, for handing a chart to the renderer.
 
         Raises:
             TaskFailure: the pointer is malformed or names nothing.
@@ -101,11 +90,10 @@ class ArtifactStore:
         """Turn a pointer back into a path inside `root`.
 
         Raises:
-            TaskFailure: malformed pointer or missing file. A pointer in state that
-                resolves to nothing means the run has lost data it claims to hold, which
-                ends the run (exit 5) rather than surfacing as an empty payload. Callers
-                that are tools convert this to `ToolResponse(is_error=True)` at their own
-                boundary (§6) — the store does not know it is being called by one.
+            TaskFailure: malformed pointer or missing file — the run has lost data it
+                claims to hold, so it ends (exit 5) rather than yielding an empty payload.
+                Tools convert this to `ToolResponse(is_error=True)` at their own boundary
+                (§6); the store does not know it is being called by one.
         """
         if not pointer.startswith(ARTIFACT_PREFIX):
             raise TaskFailure(f"Not an artifact pointer: {pointer!r}")
@@ -117,13 +105,9 @@ class ArtifactStore:
     def _reserve(self, name: str) -> Path:
         """Atomically claim the first unused of `name`, `name-1`, `name-2`, …
 
-        Two subtasks both naming their output `chart.png` must not clobber each other,
-        and the pointer returned by the earlier `put` must keep resolving to what it
-        stored. `touch(exist_ok=False)` is `O_CREAT|O_EXCL`, so the check and the claim
-        are one syscall: a plain `exists()` test would let two threads — the engine
-        dispatches subtasks concurrently — pick the same name between the check and the
-        write, and one payload would be lost. The loop terminates because each pass
-        proposes a name it has not tried.
+        `touch(exist_ok=False)` is `O_CREAT|O_EXCL`, so the check and the claim are one
+        syscall. An `exists()` test would let two threads — the engine dispatches
+        subtasks concurrently — pick the same name and lose a payload.
         """
         safe = _safe_name(name)
         stem, suffix = Path(safe).stem, Path(safe).suffix
@@ -141,16 +125,14 @@ class ArtifactStore:
 
 
 def _safe_name(name: str) -> str:
-    """Check a name against the artifact allow-list in `core/state.py`.
+    """Check a name against the allow-list in `core/state.py`.
 
-    Names reach the store from model output — a planner naming an output file — so this
-    is a trust boundary, not a sanity check. Because the pattern admits no separator, no
-    colon, no leading dot, and no control character, `root / name` cannot leave `root`;
-    containment is a property of the name rather than a second check that could drift
-    from this one.
+    Names come from model output, so this is a trust boundary. The pattern admits no
+    separator, colon, leading dot or control character, so `root / name` cannot leave
+    `root` — containment is a property of the name, not a second check that could drift.
 
     Raises:
-        TaskFailure: the name is not a valid artifact name.
+        TaskFailure: not a valid artifact name.
     """
     if not re.fullmatch(ARTIFACT_NAME_PATTERN, name):
         raise TaskFailure(f"Unsafe artifact name: {name!r}")
@@ -159,7 +141,7 @@ def _safe_name(name: str) -> str:
 
 @contextmanager
 def _as_task_failure(action: str) -> Iterator[None]:
-    """Turn a filesystem error into the taxonomy's `TaskFailure` (§8), never a bare `OSError`."""
+    """Turn a filesystem error into the taxonomy's `TaskFailure` (§8)."""
     try:
         yield
     except OSError as exc:

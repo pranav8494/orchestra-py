@@ -58,11 +58,8 @@ def test_put_same_name_twice_does_not_clobber_the_first(store: ArtifactStore) ->
 
 
 def test_concurrent_puts_of_one_name_all_survive(store: ArtifactStore) -> None:
-    """Regression: the engine dispatches subtasks concurrently, through `to_thread` (§10).
-
-    A check-then-write `exists()` loop hands the same name to two threads and loses a
-    payload; `_reserve` claims the name with O_CREAT|O_EXCL so it cannot.
-    """
+    """Regression: a check-then-write `exists()` loop hands two threads the same name and
+    loses a payload. The engine dispatches subtasks concurrently through `to_thread` (§10)."""
     payloads = [f"payload-{index}" for index in range(16)]
 
     with ThreadPoolExecutor(max_workers=8) as pool:
@@ -123,7 +120,6 @@ def test_pointer_escaping_the_root_is_rejected(store: ArtifactStore, tmp_path: P
     ],
 )
 def test_put_with_an_unsafe_name_is_rejected(store: ArtifactStore, name: str) -> None:
-    """The allow-list is what makes `root / name` provably unable to leave `root`."""
     with pytest.raises(TaskFailure, match="Unsafe artifact name"):
         store.put_text(name, CSV)
 
@@ -131,7 +127,7 @@ def test_put_with_an_unsafe_name_is_rejected(store: ArtifactStore, name: str) ->
 def test_put_file_with_a_missing_source_raises_task_failure(
     store: ArtifactStore, tmp_path: Path
 ) -> None:
-    """A filesystem error is data the run can report, never a bare OSError out of the store."""
+    """A filesystem error leaves as a `TaskFailure`, never a bare `OSError`."""
     with pytest.raises(TaskFailure, match="could not copy") as exc_info:
         store.put_file(tmp_path / "never-written.html")
 

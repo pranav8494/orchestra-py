@@ -85,11 +85,7 @@ def test_subtask_rejects_unknown_status() -> None:
     ],
 )
 def test_task_state_rejects_anything_that_is_not_a_pointer(blob: str) -> None:
-    """AC: agents exchange pointers, never raw blobs, *in state*.
-
-    Enforced by the type rather than by the store, because state is the thing that gets
-    serialised into every prompt — which is the reason the rule exists.
-    """
+    """Enforced by the type, not just by the store: state is what reaches the prompt."""
     with pytest.raises(ValidationError):
         TaskState(user_request=REQUEST, artifacts={"revenue": blob})
 
@@ -105,7 +101,7 @@ def test_subtask_rejects_an_output_pointer_that_is_not_a_pointer() -> None:
 
 
 def test_task_state_rejects_an_unexpected_field() -> None:
-    """Persisted state is a trust boundary (§7): a key silently dropped on reload is data loss."""
+    """A key silently dropped on reload is data loss (§7)."""
     with pytest.raises(ValidationError):
         TaskState.model_validate({"user_request": REQUEST, "artifactss": {}})
 
@@ -170,11 +166,8 @@ def test_state_slice_gives_the_worker_only_its_declared_inputs() -> None:
 
 
 def test_state_slice_does_not_hand_the_worker_a_write_handle_on_the_ledger() -> None:
-    """Isolation has to be containment, not just omission.
-
-    Pydantic reuses nested instances, so without the copy a worker writing to its own
-    context would reach through and mutate the plan the engine owns.
-    """
+    """Pydantic reuses nested instances, so without the copy a worker writing to its own
+    context reaches through into the plan the engine owns."""
     plan = Plan(subtasks=[_fetch()])
     state = TaskState(user_request=REQUEST, plan=plan)
 
@@ -185,8 +178,7 @@ def test_state_slice_does_not_hand_the_worker_a_write_handle_on_the_ledger() -> 
 
 
 def test_state_slice_result_is_frozen() -> None:
-    """mypy rejects this statically too — the ignore below is the proof. This covers the
-    runtime half, which is what a worker built from model output actually hits."""
+    """mypy catches this statically — the ignore is the proof; this covers runtime."""
     context = TaskState(user_request=REQUEST).state_slice(_fetch())
 
     with pytest.raises(ValidationError):
@@ -206,7 +198,7 @@ def test_state_slice_carries_answered_clarifications() -> None:
 
 
 def test_state_slice_with_missing_input_raises_task_failure() -> None:
-    """Wrong dependency order. Failing beats handing a worker nothing and letting it invent."""
+    """Wrong dependency order — better than letting a worker invent the missing data."""
     state = TaskState(user_request=REQUEST)  # "revenue" was never produced
 
     with pytest.raises(TaskFailure) as exc_info:
