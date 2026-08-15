@@ -12,6 +12,8 @@ dependencies = [
     "pydantic>=2.7",
     "pydantic-settings>=2.3",
     "anthropic>=0.34",
+    "pandas>=3.0",          # tabular analysis for the analytics agent
+    "plotly>=6.9",          # chart generation for the visualization agent
 ]
 
 [project.scripts]
@@ -92,7 +94,9 @@ convention = "google"
 # See CONVENTIONS.md §7 and §14.2.
 # ---------------------------------------------------------------------------
 [tool.mypy]
-python_version = "3.11"
+# Matches `.python-version` and CONVENTIONS.md line 3. At 3.11 mypy rejects the
+# PEP 695 `type` statements in numpy's stubs, which pandas and pytest both pull in.
+python_version = "3.12"
 strict = true
 files = ["src/orchestra", "tests"]
 plugins = ["pydantic.mypy"]
