@@ -4,6 +4,8 @@
 here is one the planner (#3) can hand us from model output.
 """
 
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 
@@ -52,6 +54,20 @@ def test_task_state_round_trip_preserves_plan_artifacts_and_log() -> None:
     restored = TaskState.model_validate_json(state.model_dump_json())
 
     assert restored == state
+
+
+def test_task_state_artifact_dir_defaults_to_none() -> None:
+    """A ledger built outside `app.py` — a test, a replay — knows of no directory."""
+    assert TaskState(user_request=REQUEST).artifact_dir is None
+
+
+def test_task_state_round_trip_preserves_the_artifact_dir() -> None:
+    """A `Path` has to come back as one: state is serialised into prompts and back out."""
+    state = TaskState(user_request=REQUEST, artifact_dir=Path("/tmp/run/2026-08-16T09-30-00Z"))
+
+    restored = TaskState.model_validate_json(state.model_dump_json())
+
+    assert restored.artifact_dir == state.artifact_dir
 
 
 def test_task_state_round_trip_preserves_subtask_status_transitions() -> None:

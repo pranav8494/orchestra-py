@@ -13,10 +13,17 @@ an absent plan or report is rendered as the fact it is.
 """
 
 from enum import StrEnum
+from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict
 
-from orchestra.core.state import AgentRole, ArtifactPointer, SubtaskStatus, TaskState
+from orchestra.core.state import (
+    AgentRole,
+    ArtifactPointer,
+    SubtaskStatus,
+    TaskState,
+    artifact_path,
+)
 
 # Never print nothing: a silent command is indistinguishable from one that crashed.
 NO_REPORT = "No report was produced for this run."
@@ -82,6 +89,9 @@ class ResultDocument(BaseModel):
     report: ReportView | None
     subtasks: list[SubtaskView]
     failure_reason: str | None
+    # Beside `report.chart`, which stays a pointer: the document reports what the run
+    # recorded, and rewriting one field into a path is the text shape's job, not this one's.
+    artifact_dir: str | None
 
 
 def format_result(state: TaskState, *, output: OutputFormat, quiet: bool = False) -> str:
@@ -121,30 +131,41 @@ def _text(state: TaskState, *, quiet: bool) -> str:
         if report.chart_ascii:
             blocks.append(report.chart_ascii)
         if report.chart is not None:
-            blocks.append(f"Chart: {report.chart}")
+            # The path, not the pointer: the user has to be able to open it.
+            blocks.append(f"Chart: {_artifact_path(report.chart, state.artifact_dir)}")
 
-    steps = _steps(state)
-    if steps and not quiet:
-        blocks.append(steps)
+    trace = _trace(state)
+    if trace and not quiet:
+        blocks.append(trace)
     return "\n\n".join(blocks)
 
 
-def _steps(state: TaskState) -> str:
-    """One line per subtask: status, id, artifact.
+def _artifact_path(pointer: ArtifactPointer, artifact_dir: Path | None) -> str:
+    """Where `pointer`'s payload is, or the pointer itself when the run named no directory.
+
+    `core.state.artifact_path` rather than `ArtifactStore._resolve`: that one does I/O and
+    raises, and this module promises neither.
+    """
+    if artifact_dir is None:
+        return pointer
+    return str(artifact_path(artifact_dir, pointer))
+
+
+def _trace(state: TaskState) -> str:
+    """The run's trace as one block: its directory, then a line per subtask.
 
     Fixed column widths, not fitted to the ids, so the block diffs cleanly between runs.
+    The directory leads so a run that produced no chart is still findable, and rides in
+    the same block so `--quiet` drops the two together.
     """
-    if state.plan is None:
-        return ""
-    return "\n".join(
-        [
-            "Steps:",
-            *(
-                f"{subtask.status.value:<8} {subtask.id}  {subtask.output_pointer or '-'}"
-                for subtask in state.plan.subtasks
-            ),
-        ]
-    )
+    lines = [] if state.artifact_dir is None else [f"Artifacts: {state.artifact_dir}"]
+    if state.plan is not None:
+        lines.append("Steps:")
+        lines.extend(
+            f"{subtask.status.value:<8} {subtask.id}  {subtask.output_pointer or '-'}"
+            for subtask in state.plan.subtasks
+        )
+    return "\n".join(lines)
 
 
 def _document(state: TaskState) -> ResultDocument:
@@ -175,4 +196,5 @@ def _document(state: TaskState) -> ResultDocument:
             for subtask in subtasks
         ],
         failure_reason=state.failure_reason,
+        artifact_dir=None if state.artifact_dir is None else str(state.artifact_dir),
     )
