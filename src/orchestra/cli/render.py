@@ -82,8 +82,8 @@ _EVENT_LABELS: Mapping[EventKind, str] = {
     EventKind.RUN_FINISHED: "finish",
 }
 
-# Not a `SubtaskStatus` style: the step still finishes `done`, and colouring the status
-# would say the run went worse than it did.
+# Not a `SubtaskStatus` style: a warning is a caveat on a step that has not transitioned
+# yet, and colouring the status would pre-empt the outcome.
 _WARNING_STYLE = "yellow"
 
 # What the active panel says while the run is between steps — see `active_panel`.
@@ -224,7 +224,15 @@ class RunView:
         status = _STATUS_BY_KIND.get(event.kind)
         if status is None:
             return  # an unknown kind — see the docstring
-        self.rows[row.id] = replace(row, status=status, detail=_one_line(event.message))
+        # `run_table` shows a warning *instead of* the detail, so a retry notice kept past
+        # its attempt hides the failure message on a red row. Only completion carries one
+        # forward: a degradation arrives mid-step, after the start that would clear it.
+        self.rows[row.id] = replace(
+            row,
+            status=status,
+            detail=_one_line(event.message),
+            warning=row.warning if event.kind is EventKind.SUBTASK_COMPLETED else "",
+        )
 
 
 def run_table(view: RunView) -> Table:

@@ -7,6 +7,10 @@ Exceeding either is a `TaskFailure` — one failed subtask, not a retry.
 **Failures come back as data.** A tool error, and a tool name that does not exist, are
 answered to the model so the next turn is its retry; only a bound unwinds the loop (§6).
 
+**Repetition is a third bound.** Neither turn count nor budget catches an agent making the
+same cheap call over and over, so `core/loop.py` watches the signatures and this loop turns
+a trip into a `TaskFailure` — abort, not replan, until #12 gives replanning a home.
+
 **The transcript is resent whole every turn**, so the budget counts it once per lap and
 bites sooner than a distinct-token count would. Deliberate: resent tokens are billed, and
 it is spend being bounded.
@@ -25,6 +29,7 @@ from dataclasses import dataclass
 from orchestra.agents.workers.briefing import build_briefing
 from orchestra.core.errors import TaskFailure
 from orchestra.core.events import Broker
+from orchestra.core.loop import RepetitionDetector, step_signature
 from orchestra.core.state import EventKind, SubtaskContext, TaskEvent
 from orchestra.providers.base import (
     AssistantTurn,
@@ -131,9 +136,13 @@ class ToolLoop:
             that means the step failed is the worker's judgement, not the loop's.
 
         Raises:
-            TaskFailure: a bound was hit, or the reply was truncated.
+            TaskFailure: a bound was hit, the loop repeated itself, or the reply was
+                truncated.
             asyncio.CancelledError: propagated from the provider or a tool (§10).
         """
+        # Per subtask, not per loop: the object is reused across dispatches, and a retried
+        # subtask starts its count again.
+        repeats = RepetitionDetector()
         # Earlier artifacts are named, not resolved: the pointers are there so the model
         # does not re-fetch something the run already has.
         named = ", ".join(f"{name} ({pointer})" for name, pointer in sorted(context.inputs.items()))
@@ -152,7 +161,8 @@ class ToolLoop:
             if spent >= self._token_budget:
                 raise TaskFailure(
                     f"{self._label} for {context.subtask.id!r} spent its {self._token_budget}-token "
-                    f"budget before finishing. {_gathered(kept)}"
+                    f"budget before finishing. {_gathered(kept)}",
+                    retryable=False,
                 )
             turn = await self._provider.send(
                 system=self._system_prompt, messages=messages, tools=self._specs
@@ -162,7 +172,8 @@ class ToolLoop:
             if turn.stop_reason == TRUNCATED:
                 raise TaskFailure(
                     f"{self._label} for {context.subtask.id!r} was cut off by the model's output "
-                    f"limit. {_gathered(kept)}"
+                    f"limit. {_gathered(kept)}",
+                    retryable=False,
                 )
 
             if not turn.tool_calls:
@@ -179,6 +190,13 @@ class ToolLoop:
                 )
                 if response.warning:
                     await self._warn(context, response.warning)
+                if repeats.record(step_signature(call.name, call.arguments, response.content)):
+                    raise TaskFailure(
+                        f"{self._label} for {context.subtask.id!r} made the same {call.name} call "
+                        f"for the same result more than {repeats.max_repeats} times in "
+                        f"{repeats.window} steps. {_gathered(kept)}",
+                        retryable=False,
+                    )
                 # `is_empty` too, not just `is_error`: a lookup that matched nothing ran
                 # correctly, but keeping it would let "nothing was found" pass a worker's
                 # did-we-produce-anything check (§6).
@@ -189,7 +207,8 @@ class ToolLoop:
         else:
             raise TaskFailure(
                 f"{self._label} for {context.subtask.id!r} was still calling tools after "
-                f"{self._max_turns} turns. {_gathered(kept)}"
+                f"{self._max_turns} turns. {_gathered(kept)}",
+                retryable=False,
             )
 
         return LoopResult(summary=summary, kept=tuple(kept))

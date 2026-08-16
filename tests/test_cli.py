@@ -99,7 +99,11 @@ PROMPT = "Summarize the last 3 quarters' financial trends"
 SUMMARY = "Revenue grew in each of the last three quarters."
 
 
-def _finished_state(*statuses: SubtaskStatus, failure_reason: str | None = None) -> TaskState:
+def _finished_state(
+    *statuses: SubtaskStatus,
+    summary: str = SUMMARY,
+    failure_reason: str | None = None,
+) -> TaskState:
     """A ledger shaped the way `run_task` hands one back: statuses, artifacts, a report."""
     plan = Plan(
         subtasks=[
@@ -119,7 +123,7 @@ def _finished_state(*statuses: SubtaskStatus, failure_reason: str | None = None)
         artifacts=artifacts,
         # The aggregator always leaves one behind, even on the paths that fell short.
         final_result=FinalReport(
-            executive_summary=SUMMARY,
+            executive_summary=summary,
             key_figures=[
                 KeyFigure(label="Q3 revenue", value="145", source=pointer)
                 for pointer in list(artifacts.values())[:1]
@@ -314,6 +318,27 @@ def test_run_that_stopped_short_prints_the_report_and_the_reason_on_stderr(
     assert SUMMARY in result.stdout
     assert "done     step_0  artifact:step_0.txt" in result.stdout
     assert reason not in result.stdout  # never on the stream a script parses
+    assert reason in _squash(result.stderr)
+
+
+def test_run_whose_synthesis_failed_prints_the_ledger_report_and_exits_task_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#9's trade at the boundary: a provider outage during synthesis exits 5 with a report
+    rather than 4 with an empty stdout. The operator tells the two apart by stderr (§8)."""
+    reason = "The report could not be synthesised: 503 overloaded_error"
+    ledger_summary = "No synthesis was available for this run"
+    _stub_run_once(
+        monkeypatch,
+        _finished_state(SubtaskStatus.DONE, summary=ledger_summary, failure_reason=reason),
+    )
+
+    result = runner.invoke(app, ["run", PROMPT], prog_name=PROG)
+
+    assert result.exit_code == ExitCode.TASK_FAILURE
+    assert ledger_summary in _squash(result.stdout)
+    assert "done     step_0  artifact:step_0.txt" in result.stdout
+    assert "overloaded_error" not in result.stdout  # never on the stream a script parses
     assert reason in _squash(result.stderr)
 
 

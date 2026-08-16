@@ -12,7 +12,12 @@ from dataclasses import dataclass, field
 import pytest
 
 from conftest import FakeProvider, wait_until
-from orchestra.agents.engine import DEFAULT_MAX_CONCURRENCY, DEFAULT_STEP_CAP, ExecutionEngine
+from orchestra.agents.engine import (
+    DEFAULT_MAX_CONCURRENCY,
+    DEFAULT_STEP_CAP,
+    DEFAULT_SUBTASK_ATTEMPTS,
+    ExecutionEngine,
+)
 from orchestra.agents.planner import Planner
 from orchestra.agents.workers.base import Worker
 from orchestra.core.errors import ExitCode, TaskFailure
@@ -39,6 +44,10 @@ class ScriptedWorker:
     """
 
     fail_ids: frozenset[str] = frozenset()
+    # Fails only its first dispatch, so a test can watch the engine's retry succeed.
+    fail_once_ids: frozenset[str] = frozenset()
+    # Raised instead of the default `TaskFailure` when a scripted failure trips.
+    failure: Exception | None = None
     # Held open until the gate is set. Empty means every subtask waits on it.
     gate: asyncio.Event | None = None
     gate_ids: frozenset[str] = frozenset()
@@ -49,6 +58,7 @@ class ScriptedWorker:
 
     async def run(self, context: SubtaskContext) -> str:
         self.contexts.append(context)
+        attempt = _dispatches(self, context.subtask.id)
         self.running += 1
         self.peak_concurrency = max(self.peak_concurrency, self.running)
         try:
@@ -58,8 +68,10 @@ class ScriptedWorker:
                 # Yield once, so a sibling dispatched in the same pass is observable
                 # running alongside this one.
                 await asyncio.sleep(0)
-            if context.subtask.id in self.fail_ids:
-                raise TaskFailure(f"{context.subtask.id} could not be completed")
+            if context.subtask.id in self.fail_ids or (
+                context.subtask.id in self.fail_once_ids and attempt == 1
+            ):
+                raise self.failure or TaskFailure(f"{context.subtask.id} could not be completed")
             return self.pointer_override or f"artifact:{context.subtask.id}.txt"
         finally:
             self.running -= 1
@@ -80,12 +92,14 @@ def _engine(
     *,
     max_concurrency: int = DEFAULT_MAX_CONCURRENCY,
     step_cap: int = DEFAULT_STEP_CAP,
+    subtask_attempts: int = DEFAULT_SUBTASK_ATTEMPTS,
 ) -> ExecutionEngine:
     return ExecutionEngine(
         workers=_workers(worker),
         broker=broker if broker is not None else _broker(),
         max_concurrency=max_concurrency,
         step_cap=step_cap,
+        subtask_attempts=subtask_attempts,
     )
 
 
@@ -107,6 +121,11 @@ def _statuses(state: TaskState) -> dict[str, SubtaskStatus]:
 
 def _drain(queue: asyncio.Queue[TaskEvent]) -> list[TaskEvent]:
     return [queue.get_nowait() for _ in range(queue.qsize())]
+
+
+def _dispatches(worker: ScriptedWorker, subtask_id: str) -> int:
+    """How many times `subtask_id` reached the worker — one per attempt."""
+    return sum(1 for context in worker.contexts if context.subtask.id == subtask_id)
 
 
 # --------------------------------------------------------------------------
@@ -347,6 +366,106 @@ async def test_run_fails_the_subtask_when_a_worker_returns_a_malformed_pointer()
 
 
 # --------------------------------------------------------------------------
+# Retries: a dispatch that raises is attempted again, up to the cap (#9).
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_run_retries_a_failed_subtask_and_completes_it_on_the_next_attempt() -> None:
+    state = await _planned(LINEAR)
+    worker = ScriptedWorker(fail_once_ids=frozenset({"analyse_trends"}))
+    broker = _broker()
+
+    async with broker.subscribe() as queue:
+        await _engine(worker, broker).run(state)
+        published = _drain(queue)
+
+    assert set(_statuses(state).values()) == {SubtaskStatus.DONE}
+    assert _dispatches(worker, "analyse_trends") == 2
+    warnings = [event for event in published if event.kind is EventKind.SUBTASK_WARNING]
+    assert [event.subtask_id for event in warnings] == ["analyse_trends"]
+    assert "Attempt 1 of 3" in warnings[0].message
+    # A retried subtask is not a finished one: the dashboard and `failed_subtasks` read
+    # `subtask_failed` as final.
+    assert EventKind.SUBTASK_FAILED not in _kinds(published)
+    assert state.failed_subtasks == []
+
+
+@pytest.mark.asyncio
+async def test_run_fails_a_subtask_once_its_attempts_are_spent() -> None:
+    """The cap is what stops the retry loop; the run still finishes with partial results."""
+    state = await _planned(LINEAR)
+    worker = ScriptedWorker(fail_ids=frozenset({"fetch_quarterly_financials"}))
+    broker = _broker()
+
+    async with broker.subscribe() as queue:
+        await _engine(worker, broker).run(state)
+        published = _drain(queue)
+
+    assert _dispatches(worker, "fetch_quarterly_financials") == DEFAULT_SUBTASK_ATTEMPTS
+    assert _statuses(state)["fetch_quarterly_financials"] is SubtaskStatus.FAILED
+    assert _kinds(published).count(EventKind.SUBTASK_FAILED) == 1
+    assert _kinds(published)[-1] is EventKind.RUN_FINISHED
+    assert [subtask.id for subtask in state.failed_subtasks] == ["fetch_quarterly_financials"]
+
+
+@pytest.mark.asyncio
+async def test_run_counts_every_retry_against_the_step_cap() -> None:
+    """Retries spend the run's budget, so a failing subtask cannot loop past the cap.
+
+    And the retry the cap took away has to be reconciled: without that, a subtask that
+    failed twice was reported as pending and absent from `failed_subtasks` (#9).
+    """
+    state = await _planned(LINEAR)
+    worker = ScriptedWorker(fail_ids=frozenset({"fetch_quarterly_financials"}))
+    broker = _broker()
+
+    async with broker.subscribe() as queue:
+        with pytest.raises(TaskFailure, match="Step cap of 2 exceeded"):
+            await _engine(worker, broker, step_cap=2, subtask_attempts=5).run(state)
+        published = _drain(queue)
+
+    assert _dispatches(worker, "fetch_quarterly_financials") == 2
+    assert _statuses(state)["fetch_quarterly_financials"] is SubtaskStatus.FAILED
+    assert [subtask.id for subtask in state.failed_subtasks] == ["fetch_quarterly_financials"]
+    # Carrying the last attempt's error, and still before the run's verdict (§6).
+    failures = [event for event in published if event.kind is EventKind.SUBTASK_FAILED]
+    assert [(event.subtask_id, event.message) for event in failures] == [
+        ("fetch_quarterly_financials", "fetch_quarterly_financials could not be completed")
+    ]
+    assert _kinds(published)[-1] is EventKind.RUN_FINISHED
+
+
+@pytest.mark.parametrize(
+    ("failure", "dispatches"),
+    [
+        (TaskFailure("the plan's dependency order is wrong", retryable=False), 1),
+        (RuntimeError("connection reset"), DEFAULT_SUBTASK_ATTEMPTS),
+    ],
+    ids=["deterministic", "unknown"],
+)
+@pytest.mark.asyncio
+async def test_run_retries_only_a_failure_that_could_go_differently(
+    failure: Exception, dispatches: int
+) -> None:
+    """A bound the worker already hit is reached identically on a retry, and each attempt
+    spends a step the rest of the plan needs. Anything not declared deterministic — every
+    non-`OrchestraError` included — is still retried."""
+    state = await _planned(LINEAR)
+    worker = ScriptedWorker(fail_ids=frozenset({"fetch_quarterly_financials"}), failure=failure)
+
+    await _engine(worker).run(state)
+
+    assert _dispatches(worker, "fetch_quarterly_financials") == dispatches
+    assert _statuses(state)["fetch_quarterly_financials"] is SubtaskStatus.FAILED
+
+
+def test_engine_rejects_a_non_positive_attempt_cap() -> None:
+    with pytest.raises(ValueError, match="subtask_attempts"):
+        ExecutionEngine(workers={}, broker=_broker(), subtask_attempts=0)
+
+
+# --------------------------------------------------------------------------
 # Limits and wiring: the failures that end the whole run.
 # --------------------------------------------------------------------------
 
@@ -423,3 +542,20 @@ async def test_run_cancellation_stops_in_flight_subtasks_and_propagates() -> Non
     assert worker.running == 0  # every in-flight worker unwound
     # Not marked failed: a cancelled subtask did not fail.
     assert _statuses(state)["fetch_recent_quarters"] is SubtaskStatus.RUNNING
+
+
+@pytest.mark.asyncio
+async def test_run_cancellation_is_not_retried_as_a_failed_attempt() -> None:
+    """`CancelledError` is not an attempt: retrying one would refuse the Ctrl-C."""
+    state = await _planned(FAN_OUT)
+    worker = ScriptedWorker(gate=asyncio.Event())  # never set
+
+    run = asyncio.create_task(_engine(worker).run(state))
+    await wait_until(lambda: worker.running == 2, what="both retrievals to be in flight")
+
+    run.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await run
+
+    assert _dispatches(worker, "fetch_recent_quarters") == 1
+    assert EventKind.SUBTASK_WARNING not in _kinds(state.events)

@@ -27,6 +27,7 @@ from orchestra.core.events import Broker
 from orchestra.core.state import (
     AgentRole,
     EventKind,
+    KeyFigure,
     Subtask,
     SubtaskContext,
     TaskEvent,
@@ -43,6 +44,8 @@ UPSTREAM = "analyse_trends"
 # A figure that appears only in the payload, so finding it in the briefing proves the
 # worker sent the preview and not just the pointer.
 UPSTREAM_FIGURE = "2025Q4 revenue growth: 10.65% QoQ"
+# What #6 sourced that figure to: the artifact its script read, a step further upstream.
+UPSTREAM_SOURCE = "artifact:fetch_financials.json"
 
 QUARTERS = ["2025Q2", "2025Q3", "2025Q4"]
 REVENUE = [5_820_000.0, 6_340_000.0, 7_015_000.0]
@@ -102,7 +105,7 @@ def _seed_upstream(store: ArtifactStore) -> str:
     """Write the artifact #6 would have written, so the preview the model sees is real."""
     analysis = AnalysisResult(
         summary="Growth accelerated into the final quarter.",
-        figures=[UPSTREAM_FIGURE],
+        figures=[KeyFigure(value=UPSTREAM_FIGURE, source=UPSTREAM_SOURCE)],
         instruction="Compute quarter-over-quarter revenue growth",
     )
     return store.put_text(f"{UPSTREAM}.json", analysis.model_dump_json(indent=2))
@@ -152,13 +155,25 @@ async def test_worker_with_one_point_warns_and_completes_without_a_chart(
 
 
 @pytest.mark.asyncio
+async def test_worker_retries_an_unusable_reply_and_charts_the_second(store: ArtifactStore) -> None:
+    """A refusal is unusable output, so it is retried; the step still completes."""
+    provider = FakeProvider(responses=[None, _draft()])
+
+    pointer = await _worker(provider, store).run(_context())
+
+    assert len(provider.calls) == 2
+    assert _stored(store, pointer).summary == SUMMARY
+
+
+@pytest.mark.asyncio
 async def test_worker_that_got_no_chart_back_fails_the_subtask(store: ArtifactStore) -> None:
-    """A refusal or a truncated reply: nothing to draw and nothing to invent."""
-    provider = FakeProvider(responses=[None])
+    """Every attempt refused or truncated: nothing to draw and nothing to invent."""
+    provider = FakeProvider(responses=[None, None, None])
 
     with pytest.raises(TaskFailure, match=SUBTASK):
         await _worker(provider, store).run(_context())
 
+    assert len(provider.calls) == 3
     assert list(store.root.iterdir()) == []  # the step failed before either write started
 
 

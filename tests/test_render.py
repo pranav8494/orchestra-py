@@ -1041,6 +1041,43 @@ def test_run_table_shows_the_warning_in_place_of_the_detail() -> None:
     assert [str(cell) for cell in table.columns[2].cells] == ["done", "pending", "pending"]
 
 
+def test_run_view_failure_replaces_the_retry_warning_it_follows() -> None:
+    """Regression: `run_table` shows the warning in place of the detail, so a subtask that
+    failed on its last attempt went red with "Attempt 1 of 2 failed, retrying" rather than
+    with why it failed."""
+    view = _seeded_view()
+    view.apply(
+        TaskEvent(
+            kind=EventKind.SUBTASK_WARNING,
+            subtask_id="fetch",
+            message="Attempt 1 of 2 failed, retrying: rate limited",
+        )
+    )
+
+    view.apply(TaskEvent(kind=EventKind.SUBTASK_FAILED, subtask_id="fetch", message="rate limited"))
+
+    assert view.rows["fetch"].status is SubtaskStatus.FAILED
+    assert view.rows["fetch"].warning == ""
+    assert [str(cell) for cell in run_table(view).columns[3].cells] == ["rate limited", "", ""]
+
+
+def test_run_view_a_new_attempt_clears_the_previous_ones_retry_notice() -> None:
+    """The notice belongs to the attempt that raised it: once the next one starts, a
+    success has to show its pointer rather than a stale "retrying"."""
+    view = _seeded_view()
+    view.apply(TaskEvent(kind=EventKind.SUBTASK_WARNING, subtask_id="fetch", message="retrying: x"))
+
+    view.apply(_started("fetch"))
+    view.apply(
+        TaskEvent(
+            kind=EventKind.SUBTASK_COMPLETED, subtask_id="fetch", message="artifact:fetch.json"
+        )
+    )
+
+    assert view.rows["fetch"].warning == ""
+    assert view.rows["fetch"].detail == "artifact:fetch.json"
+
+
 def test_event_line_labels_a_warning_for_the_plain_sink() -> None:
     """Non-TTY runs get the same notice; `--quiet` and `--output json` are the gap."""
     line = event_line(
