@@ -48,6 +48,7 @@ from orchestra.core.state import (
     EventKind,
     SubtaskStatus,
     TaskEvent,
+    artifact_path,
 )
 from orchestra.providers.anthropic import AnthropicProvider
 from orchestra.providers.base import AssistantTurn, Provider
@@ -514,12 +515,14 @@ async def test_run_once_reports_a_computed_figure_and_its_chart_in_both_output_s
     # And the value is in the artifact it cites, beside what the script called it.
     assert f"quarters analysed: {figure.value}" in store.get_text(figure.source)
     assert report.chart is not None
-    assert store.path_for(report.chart).is_file()  # the pointer opens a real file
+    # `artifact_path`, not `store.path_for`: the store raises on a missing file, so that
+    # assertion could only ever raise, never fail.
+    assert artifact_path(state.artifact_dir, report.chart).is_file()
 
     text = format_result(state, output=OutputFormat.TEXT)
     assert f"{figure.label}  {figure.value}  {figure.source}" in text
     assert CHART_CATEGORY in text
-    # One document, not a fragment: `json.loads` is the assertion (§5).
+    # One document, not a fragment; the stream it goes out on is `test_cli.py`'s.
     document = json.loads(format_result(state, output=OutputFormat.JSON))
     assert document["report"]["key_figures"] == [
         {"label": figure.label, "value": figure.value, "source": figure.source}
