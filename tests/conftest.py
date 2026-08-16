@@ -67,7 +67,7 @@ def tool_call(name: str, call_id: str = "call-1", **arguments: object) -> ToolCa
     return ToolCall(id=call_id, name=name, arguments=arguments)
 
 
-async def _wait_until(predicate: Callable[[], bool], *, what: str) -> None:
+async def wait_until(predicate: Callable[[], bool], *, what: str) -> None:
     """Yield to the loop until `predicate` holds; bounded, so a condition that never
     arrives fails rather than hangs the suite.
 

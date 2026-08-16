@@ -11,7 +11,7 @@ import time
 
 import pytest
 
-from conftest import FakeProvider, _wait_until
+from conftest import FakeProvider, wait_until
 from orchestra.agents.aggregator import (
     MAX_PREVIEW_READS,
     Aggregator,
@@ -333,7 +333,7 @@ async def test_write_report_is_cancellable(store: ArtifactStore) -> None:
 
     task = asyncio.create_task(Aggregator(provider, store).write_report(state))
     # In flight and blocked: the preview reads run in threads before the request.
-    await _wait_until(lambda: bool(provider.calls), what="the aggregator to reach the provider")
+    await wait_until(lambda: bool(provider.calls), what="the aggregator to reach the provider")
     task.cancel()
 
     # Bounded: an aggregator that swallowed the cancellation would hang on the blocker.

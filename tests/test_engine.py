@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 
 import pytest
 
-from conftest import FakeProvider, _wait_until
+from conftest import FakeProvider, wait_until
 from orchestra.agents.engine import DEFAULT_MAX_CONCURRENCY, DEFAULT_STEP_CAP, ExecutionEngine
 from orchestra.agents.planner import Planner
 from orchestra.agents.workers.base import Worker
@@ -295,7 +295,7 @@ async def test_run_starts_a_subtask_without_waiting_for_an_unrelated_slow_one() 
     worker = ScriptedWorker(gate=gate, gate_ids=frozenset({"slow_fetch"}))
 
     run = asyncio.create_task(_engine(worker).run(state))
-    await _wait_until(
+    await wait_until(
         lambda: _statuses(state)["analyse"] is SubtaskStatus.DONE, what="analyse to finish"
     )
 
@@ -414,7 +414,7 @@ async def test_run_cancellation_stops_in_flight_subtasks_and_propagates() -> Non
     worker = ScriptedWorker(gate=asyncio.Event())  # never set
 
     run = asyncio.create_task(_engine(worker).run(state))
-    await _wait_until(lambda: worker.running == 2, what="both retrievals to be in flight")
+    await wait_until(lambda: worker.running == 2, what="both retrievals to be in flight")
 
     run.cancel()
     with pytest.raises(asyncio.CancelledError):

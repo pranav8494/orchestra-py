@@ -20,7 +20,7 @@ from typing import cast
 import pytest
 from pydantic import BaseModel, SecretStr
 
-from conftest import FakeProvider, _wait_until
+from conftest import FakeProvider, wait_until
 from orchestra import app as app_module
 from orchestra.agents.aggregator import Aggregator, FigureDraft, ReportDraft
 from orchestra.agents.engine import DEFAULT_STEP_CAP, ExecutionEngine
@@ -356,7 +356,7 @@ async def test_run_once_cancellation_exits_the_observer_and_closes_the_provider(
     observer = RecordingObserver()
 
     run = asyncio.create_task(run_once(LINEAR.prompt, observer=observer))
-    await _wait_until(lambda: bool(provider.calls), what="the run to reach the provider")
+    await wait_until(lambda: bool(provider.calls), what="the run to reach the provider")
 
     run.cancel()
     with pytest.raises(asyncio.CancelledError):
