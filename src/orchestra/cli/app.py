@@ -10,20 +10,22 @@ with no `.env`, and a `ConfigError` has to land under the boundary that makes it
 import asyncio
 import sys
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import AsyncExitStack, contextmanager
 from functools import partial
 from typing import Annotated
 
 import typer
 
 from orchestra import __version__
-from orchestra.app import run_once
+from orchestra.app import RunObserver, run_once
+from orchestra.cli.chat import HINT, ConsoleChat
 from orchestra.cli.console import console, err_console
 from orchestra.cli.format import OutputFormat
 from orchestra.cli.prompt import ConsoleAsker
-from orchestra.cli.render import RenderMode, dashboard, result_renderable
+from orchestra.cli.render import LiveRegion, RenderMode, dashboard, result_renderable
 from orchestra.core.errors import ExitCode, OrchestraError
 from orchestra.core.question import Asker
+from orchestra.core.state import TaskState
 
 app = typer.Typer(
     no_args_is_help=True,
@@ -93,8 +95,14 @@ def run(
     with error_boundary(debug=debug):
         # Ctrl-C unwinds the TaskGroup inside `asyncio.run` and re-raises here, so the
         # dashboard is always torn down and the boundary maps it to 130 (§8).
-        observer = partial(dashboard, mode=_render_mode(quiet=quiet, output=output))
-        state = asyncio.run(run_once(prompt, observer=observer, asker=_asker()))
+        # One region, given to both: only one of them may own the terminal at a time (#12).
+        region = LiveRegion()
+        observer = partial(dashboard, mode=_render_mode(quiet=quiet, output=output), region=region)
+        chat = ConsoleChat(region) if _interactive() else None
+        if chat is not None and not quiet:
+            # An affordance, not progress — but still a diagnostic, so stderr (§5).
+            err_console.print(HINT)
+        state = asyncio.run(_run(prompt, observer=observer, asker=_asker(), chat=chat))
         if state.failure_reason is not None:
             # Diagnostic, so stderr even under `-o json` and `--quiet` (§5, §8): which
             # stream says what must not depend on the format or the noise level.
@@ -107,14 +115,34 @@ def run(
         raise typer.Exit(ExitCode.TASK_FAILURE if state.failed else ExitCode.SUCCESS)
 
 
-def _asker() -> Asker | None:
-    """Who answers the planner's clarifying questions, or `None` when nobody can (#10).
+async def _run(
+    prompt: str, *, observer: RunObserver, asker: Asker | None, chat: ConsoleChat | None
+) -> TaskState:
+    """Run once with the terminal watching for the interrupt key, when there is one (#12).
 
-    Both streams: the question is written to stderr, the answer read from stdin. Redirect
-    either and the run would block on a prompt nobody can see or answer, so the planner is
-    told there is nobody instead.
+    Here rather than inside `app.run_once`: raw mode is this layer's business, and `app.py`
+    only ever sees the port (§3.2). The stack unwinds on Ctrl-C too, so the line discipline
+    is always given back (§8).
     """
-    return ConsoleAsker() if sys.stdin.isatty() and err_console.is_terminal else None
+    async with AsyncExitStack() as stack:
+        if chat is not None:
+            await stack.enter_async_context(chat)
+        return await run_once(prompt, observer=observer, asker=asker, chat=chat)
+
+
+def _interactive() -> bool:
+    """Can this run talk to a person at all?
+
+    Both streams: questions and prompts are written to stderr, answers read from stdin.
+    Redirect either and the run would block on a prompt nobody can see or answer, so the
+    planner is told there is nobody (#10) and no key is watched for (#12).
+    """
+    return sys.stdin.isatty() and err_console.is_terminal
+
+
+def _asker() -> Asker | None:
+    """Who answers the planner's clarifying questions, or `None` when nobody can (#10)."""
+    return ConsoleAsker() if _interactive() else None
 
 
 def _render_mode(*, quiet: bool, output: OutputFormat) -> RenderMode:
