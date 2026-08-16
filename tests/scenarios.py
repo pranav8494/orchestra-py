@@ -12,10 +12,9 @@ pairs a prompt with the shape it must produce:
 Shapes are stated in roles and edges, never ids, so the same assertion holds for a canned
 draft and for whatever a live model names its steps.
 
-`fan_out` asks for two subjects held in two different places, because the planner is told
-what the team can retrieve (#10) and reads that roster honestly. Its earlier prompt —
-three quarters against the same quarters a year earlier — is two ranges of one CSV, so
-planning it as one step is correct and the split stopped being reliable.
+`fan_out` names two subjects held in two places. The planner is told what the team can
+retrieve (#10), so a prompt whose halves are two ranges of one CSV is legitimately one
+step — the split has to come from the request, not from the phrasing.
 """
 
 import itertools
@@ -25,12 +24,8 @@ from dataclasses import dataclass
 from orchestra.agents.planner import PlannerAction, PlannerDraft, SubtaskDraft
 from orchestra.core.state import AgentRole, Plan, Subtask
 
-# A count a plan must hit exactly, or a `range` of counts it may land anywhere inside.
-# A range is for the one thing a scenario does not get to dictate: how finely the model
-# divides a role's work. Splitting "compute our growth, then compare it" into two steps is
-# the same judgement that keeps two ranges of one CSV in one step, and a live plan did
-# exactly that. What the scenario *does* dictate — which roles appear, and which edges do
-# and do not exist — stays exact.
+# An exact count, or a range of permitted ones. Exact everywhere the scenario dictates the
+# shape; a range only for how finely the model divides one role's work.
 type Count = int | range
 
 
@@ -46,12 +41,13 @@ def _describe(expected: Count) -> str:
     return f"{_lowest(expected)} to {_highest(expected)}"
 
 
+# Indexed, not `start`/`stop`: a stepped range's `stop - 1` is a count it can never hold.
 def _lowest(expected: Count) -> int:
-    return expected if isinstance(expected, int) else expected.start
+    return expected if isinstance(expected, int) else expected[0]
 
 
 def _highest(expected: Count) -> int:
-    return expected if isinstance(expected, int) else expected.stop - 1
+    return expected if isinstance(expected, int) else expected[-1]
 
 
 @dataclass(frozen=True, slots=True)
@@ -206,7 +202,7 @@ FAN_OUT = Scenario(
     "and chart the trend",
     shape=PlanShape(
         # Two retrievals and one chart, exactly; the comparison may be one step or two.
-        steps=range(4, 6),
+        steps=range(4, 6),  # 4 or 5
         role_counts={
             AgentRole.DATA_RETRIEVAL: 2,
             AgentRole.ANALYTICS: range(1, 3),

@@ -10,7 +10,15 @@ import pytest
 from conftest import FakeProvider
 from orchestra.agents.planner import Planner
 from orchestra.core.state import AgentRole, Plan, Subtask, TaskState
-from scenarios import FAN_OUT, LINEAR, ROLE_OMISSION, SCENARIOS, Scenario, assert_plan_shape
+from scenarios import (
+    FAN_OUT,
+    LINEAR,
+    ROLE_OMISSION,
+    SCENARIOS,
+    PlanShape,
+    Scenario,
+    assert_plan_shape,
+)
 from scenarios import scenario_id as _id
 
 
@@ -93,3 +101,52 @@ def test_assert_plan_shape_rejects_two_branches_that_never_meet() -> None:
 
     with pytest.raises(AssertionError, match="fan out and never meet"):
         assert_plan_shape(plan, FAN_OUT.shape)
+
+
+def test_assert_plan_shape_rejects_a_count_outside_a_permitted_range() -> None:
+    """The other direction of the widened counts: the fan-out shape admits a second
+    analytics step, not a third. A range that accepted anything would retire the
+    assertion."""
+    plan = Plan(
+        subtasks=[
+            *(
+                Subtask(id=f"fetch_{n}", role=AgentRole.DATA_RETRIEVAL, instruction="Load")
+                for n in range(2)
+            ),
+            *(
+                Subtask(
+                    id=f"crunch_{n}",
+                    role=AgentRole.ANALYTICS,
+                    instruction="Compute",
+                    inputs=["fetch_0", "fetch_1"],
+                    depends_on=["fetch_0", "fetch_1"],
+                )
+                for n in range(3)
+            ),
+            Subtask(
+                id="chart",
+                role=AgentRole.VISUALIZATION,
+                instruction="Plot",
+                inputs=["crunch_0"],
+                depends_on=["crunch_0"],
+            ),
+        ]
+    )
+
+    with pytest.raises(AssertionError, match="expected 4 to 5 subtasks, got 6"):
+        assert_plan_shape(plan, FAN_OUT.shape)
+
+
+def test_plan_shape_rejects_role_counts_that_cannot_reach_the_step_count() -> None:
+    """A scenario whose counts disagree with its step count accepts plans it should reject,
+    so the definition itself fails rather than the plans it is checked against."""
+    with pytest.raises(ValueError, match="role counts allow"):
+        PlanShape(
+            steps=range(4, 6),
+            role_counts={
+                AgentRole.DATA_RETRIEVAL: 2,
+                AgentRole.ANALYTICS: 1,
+                AgentRole.VISUALIZATION: 1,
+            },
+            precedes=(),
+        )

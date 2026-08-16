@@ -22,7 +22,7 @@ from rich.panel import Panel
 from rich.spinner import Spinner
 from rich.table import Table
 
-from conftest import wait_until
+from conftest import ScriptedWorker, planned, wait_until
 from orchestra.agents.engine import ExecutionEngine
 from orchestra.agents.workers.base import Worker
 from orchestra.agents.workers.stub import EchoWorker
@@ -59,7 +59,6 @@ from orchestra.core.state import (
     TaskState,
 )
 from scenarios import FAN_OUT
-from test_engine import ScriptedWorker, _planned
 
 PROMPT = "Summarize the last 3 quarters' financial trends"
 SUMMARY = "Revenue grew in each of the last three quarters."
@@ -1021,7 +1020,7 @@ async def test_dashboard_shows_both_fan_out_retrievals_spinning_at_once() -> Non
     rather than whichever moment the assertion arrived in.
     """
     retrievals = ["fetch_our_growth", "fetch_industry_benchmarks"]
-    state = await _planned(FAN_OUT)
+    state = await planned(FAN_OUT)
     assert state.plan is not None
     instructions = {subtask.id: subtask.instruction for subtask in state.plan.subtasks}
     gate = asyncio.Event()
@@ -1044,10 +1043,10 @@ async def test_dashboard_shows_both_fan_out_retrievals_spinning_at_once() -> Non
         ]
 
         # And painted, for the "visibly" in the AC: two rows in the one panel, each still
-        # its own agent's work. Asserted on the head of the instruction — an 80-column
-        # panel elides the tail, which is the behaviour above it.
+        # its own agent's work. Width pinned, and only the head of the instruction asserted,
+        # because the panel elides the tail — the behaviour the test above it pins.
         with console.capture() as painted:
-            console.print(active_panel(view))
+            console.print(active_panel(view), width=80)
         drawn = painted.get().splitlines()[1:-1]  # between the panel's two borders
         assert len(drawn) == 2
         for subtask_id, line in zip(retrievals, drawn, strict=True):
