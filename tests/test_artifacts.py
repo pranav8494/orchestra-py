@@ -77,6 +77,53 @@ def test_path_for_returns_the_file_on_disk(store: ArtifactStore) -> None:
     assert path.read_text(encoding="utf-8") == CSV
 
 
+def test_preview_of_short_text_returns_it_whole(store: ArtifactStore) -> None:
+    """Under the limit there is nothing to elide, and a marker would be noise in a prompt."""
+    pointer = store.put_text("revenue.csv", CSV)
+
+    assert store.preview(pointer) == CSV
+
+
+def test_preview_of_oversized_text_elides_and_names_the_omitted_size(store: ArtifactStore) -> None:
+    """What keeps a hundred-thousand-row CSV out of the aggregator's prompt (#8)."""
+    pointer = store.put_text("rows.csv", "x" * 1_000)
+
+    preview = store.preview(pointer, limit=100)
+
+    assert preview.startswith("x" * 100)
+    assert preview.endswith("[elided, 900 more bytes]")
+    assert "x" * 101 not in preview
+
+
+def test_preview_of_multibyte_text_is_still_read_as_text(store: ArtifactStore) -> None:
+    """Regression: the head read cuts mid-character, which a strict decode would call
+    binary. The bytes are counted, so the omitted size stays honest for non-ASCII too."""
+    pointer = store.put_text("prices.csv", "€" * 500)  # 3 bytes each
+
+    preview = store.preview(pointer, limit=100)
+
+    assert preview.startswith("€" * 100)
+    assert preview.endswith("[elided, 1200 more bytes]")
+
+
+def test_preview_of_a_binary_payload_reports_its_size_instead_of_its_bytes(
+    store: ArtifactStore,
+) -> None:
+    """A chart is opened, not read: replacement characters would cost tokens and say
+    nothing."""
+    pointer = store.put_bytes("chart.png", b"\x89PNG\r\n\x1a\n\xff\xd8\xff")
+
+    assert store.preview(pointer) == "<binary, 11 bytes>"
+
+
+def test_preview_of_unknown_pointer_raises_task_failure(store: ArtifactStore) -> None:
+    """One error path: the same `_resolve` every other read goes through."""
+    with pytest.raises(TaskFailure, match="Artifact not found") as exc_info:
+        store.preview(f"{ARTIFACT_PREFIX}never-written.csv")
+
+    assert exc_info.value.exit_code == ExitCode.TASK_FAILURE
+
+
 def test_get_unknown_pointer_raises_task_failure(store: ArtifactStore) -> None:
     with pytest.raises(TaskFailure) as exc_info:
         store.get_text(f"{ARTIFACT_PREFIX}never-written.csv")

@@ -150,6 +150,35 @@ class SubtaskContext(BaseModel):
     clarifications: list[Clarification]
 
 
+class KeyFigure(BaseModel):
+    """One number the report states, and the artifact it was read from.
+
+    `source` is a pointer rather than free text because an unsourced figure is a claim
+    nobody can check: the aggregator drops a figure whose source is not an artifact this
+    run produced, and the type is what makes that check possible.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    label: str
+    value: str  # str, not float: "12.4% QoQ" and "$1.2M" are both figures a report states
+    source: ArtifactPointer
+
+
+class FinalReport(BaseModel):
+    """The run's answer: what happened, the numbers behind it, and the chart to open.
+
+    Frozen, like `TaskEvent`: a report is written once, at the end, and read by the CLI.
+    Holds a pointer for the chart, never the chart — same reason as everywhere else here.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    executive_summary: str
+    key_figures: list[KeyFigure] = Field(default_factory=list)
+    chart: ArtifactPointer | None = None
+
+
 class TaskState(BaseModel):
     """The one ledger for a run. Created by `app.py`, mutated by the engine."""
 
@@ -163,6 +192,12 @@ class TaskState(BaseModel):
     artifacts: dict[str, ArtifactPointer] = Field(default_factory=dict)  # producer id -> pointer
     events: list[TaskEvent] = Field(default_factory=list)
     clarifications: list[Clarification] = Field(default_factory=list)
+    final_result: FinalReport | None = None
+    # Why the run stopped short, when it did. `app.py` records the engine's run-ending
+    # failures here — the step cap, a role with no worker — instead of letting them
+    # abort the command, so the aggregator can still report the artifacts already on
+    # disk and the CLI can still print them alongside the reason.
+    failure_reason: str | None = None
 
     @property
     def failed_subtasks(self) -> list[Subtask]:
@@ -174,6 +209,15 @@ class TaskState(BaseModel):
         if self.plan is None:
             return []
         return [subtask for subtask in self.plan.subtasks if subtask.status is SubtaskStatus.FAILED]
+
+    @property
+    def failed(self) -> bool:
+        """Did this run fall short — either as a whole, or in one of its steps?
+
+        The single question the CLI asks of a finished run, so the command body maps a
+        result to an exit code without holding a domain conditional of its own (§4).
+        """
+        return bool(self.failure_reason or self.failed_subtasks)
 
     def state_slice(self, subtask: Subtask) -> SubtaskContext:
         """Narrow the ledger to what one worker needs (§6).

@@ -10,6 +10,7 @@ agent that owns one. Synchronous, so the async engine calls it through `asyncio.
 (§10) — which is why every method has to be safe to run in parallel with itself.
 """
 
+import codecs
 import re
 import shutil
 from collections.abc import Iterator
@@ -18,6 +19,15 @@ from pathlib import Path
 
 from orchestra.core.errors import ConfigError, TaskFailure
 from orchestra.core.state import ARTIFACT_NAME_PATTERN, ARTIFACT_PREFIX
+
+# Characters of an artifact a preview may carry into a prompt. Roughly 200 tokens —
+# enough for a small CSV or a paragraph of analysis, small enough that a plan's worth of
+# previews still leaves the model room to answer.
+DEFAULT_PREVIEW_LIMIT = 800
+
+# UTF-8 is at most 4 bytes per character, so this many bytes always yields `limit`
+# characters when the file has them — the read stays bounded whatever the payload size.
+_BYTES_PER_CHARACTER = 4
 
 
 class ArtifactStore:
@@ -77,6 +87,58 @@ class ArtifactStore:
     def get_text(self, pointer: str) -> str:
         """Read the payload behind `pointer` as UTF-8 text."""
         return self.get_bytes(pointer).decode("utf-8")
+
+    def preview(self, pointer: str, *, limit: int = DEFAULT_PREVIEW_LIMIT) -> str:
+        """A compact, prompt-safe rendering of the payload behind `pointer`.
+
+        The aggregator (#8) is shown previews, never payloads: a report over five
+        artifacts would otherwise put five whole files — a chart's HTML among them — into
+        one prompt.
+
+        **Undecodable payloads are described, not decoded.** UTF-8 with `errors="replace"`
+        turns a PNG into a screenful of U+FFFD, which costs tokens and says nothing; the
+        size and the fact that it is binary are the entire informative content, so that is
+        what this returns. A chart is read by opening the file it points at, not by
+        reading its bytes in a prompt.
+
+        Only the head of the file is read, so previewing a large artifact costs the same
+        as previewing a small one.
+
+        Args:
+            pointer: the artifact to preview.
+            limit: how many characters of text to keep before eliding.
+
+        Returns:
+            The whole payload when it is short text, the first `limit` characters plus an
+            elision marker naming the omitted byte count when it is longer, or
+            `<binary, N bytes>` when it is not UTF-8 text.
+
+        Raises:
+            TaskFailure: the pointer is malformed or names nothing — the store's one
+                error path, unchanged here.
+        """
+        path = self._resolve(pointer)
+        with _as_task_failure(f"read {path}"):
+            size = path.stat().st_size
+            with path.open("rb") as handle:
+                head = handle.read(limit * _BYTES_PER_CHARACTER)
+
+        # Incremental, so a multi-byte character straddling the end of the read is held
+        # back rather than reported as a decode error — otherwise a long UTF-8 document
+        # would be called binary once in four times, depending on where the cut landed.
+        decoder = codecs.getincrementaldecoder("utf-8")()
+        try:
+            text = decoder.decode(head, len(head) == size)
+        except UnicodeDecodeError:
+            return f"<binary, {size} bytes>"
+
+        if len(head) == size and len(text) <= limit:
+            return text
+        kept = text[:limit]
+        # Counted in bytes against the file's own size: characters would need the whole
+        # file decoded, which is the read this method exists to avoid.
+        omitted = size - len(kept.encode("utf-8"))
+        return f"{kept}\n... [elided, {omitted} more bytes]"
 
     def path_for(self, pointer: str) -> Path:
         """Filesystem path behind `pointer`, for handing a chart to the renderer.

@@ -6,6 +6,8 @@ whitespace or substrings because Rich pads help output to the console width — 
 contract is the text, not Rich's rendering of it.
 """
 
+import json
+
 import pytest
 import typer
 from typer.testing import CliRunner
@@ -16,7 +18,15 @@ from orchestra.cli.app import app, error_boundary
 from orchestra.cli.console import console
 from orchestra.config import load_config
 from orchestra.core.errors import ConfigError, ExitCode, ProviderError, TaskFailure
-from orchestra.core.state import AgentRole, Plan, Subtask, SubtaskStatus, TaskState
+from orchestra.core.state import (
+    AgentRole,
+    FinalReport,
+    KeyFigure,
+    Plan,
+    Subtask,
+    SubtaskStatus,
+    TaskState,
+)
 
 runner = CliRunner()
 
@@ -87,20 +97,37 @@ def test_cli_version_prints_version_to_stdout() -> None:
 # --------------------------------------------------------------------------
 
 PROMPT = "Summarize the last 3 quarters' financial trends"
+SUMMARY = "Revenue grew in each of the last three quarters."
 
 
-def _finished_state(*statuses: SubtaskStatus) -> TaskState:
+def _finished_state(*statuses: SubtaskStatus, failure_reason: str | None = None) -> TaskState:
+    """A ledger shaped the way `run_task` hands one back: statuses, artifacts, a report."""
     plan = Plan(
         subtasks=[
             Subtask(id=f"step_{index}", role=AgentRole.ANALYTICS, instruction="Do the thing")
             for index, _ in enumerate(statuses)
         ]
     )
+    artifacts: dict[str, str] = {}
     for subtask, status in zip(plan.subtasks, statuses, strict=True):
         subtask.status = status
         if status is SubtaskStatus.DONE:
             subtask.output_pointer = f"artifact:{subtask.id}.txt"
-    return TaskState(user_request=PROMPT, plan=plan)
+            artifacts[subtask.id] = subtask.output_pointer
+    return TaskState(
+        user_request=PROMPT,
+        plan=plan,
+        artifacts=artifacts,
+        # The aggregator always leaves one behind, including on the paths that fell short.
+        final_result=FinalReport(
+            executive_summary=SUMMARY,
+            key_figures=[
+                KeyFigure(label="Q3 revenue", value="145", source=pointer)
+                for pointer in list(artifacts.values())[:1]
+            ],
+        ),
+        failure_reason=failure_reason,
+    )
 
 
 def _stub_run_once(monkeypatch: pytest.MonkeyPatch, outcome: TaskState | BaseException) -> None:
@@ -121,6 +148,7 @@ def test_run_succeeds_and_prints_the_summary_to_stdout(monkeypatch: pytest.Monke
     result = runner.invoke(app, ["run", PROMPT], prog_name=PROG)
 
     assert result.exit_code == ExitCode.SUCCESS
+    assert SUMMARY in result.stdout
     assert "done     step_0  artifact:step_0.txt" in result.stdout
     assert result.stderr == ""
 
@@ -137,6 +165,84 @@ def test_run_with_a_failed_subtask_still_reports_and_exits_task_failure(
     assert "done     step_0  artifact:step_0.txt" in result.stdout
     assert "failed   step_1" in result.stdout
     assert result.stderr == ""
+
+
+def test_run_output_json_puts_one_document_on_stdout_and_nothing_else(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§5: `--output json` emits one JSON document and nothing else. `json.loads` is the
+    assertion — it rejects a stray banner or a second document as trailing data."""
+    _stub_run_once(monkeypatch, _finished_state(SubtaskStatus.DONE, SubtaskStatus.DONE))
+
+    result = runner.invoke(app, ["run", PROMPT, "--output", "json"], prog_name=PROG)
+
+    assert result.exit_code == ExitCode.SUCCESS
+    document = json.loads(result.stdout)
+    assert document["request"] == PROMPT
+    assert document["status"] == "completed"
+    assert document["report"]["executive_summary"] == SUMMARY
+    assert [subtask["id"] for subtask in document["subtasks"]] == ["step_0", "step_1"]
+    assert result.stderr == ""
+
+
+def test_run_quiet_omits_the_step_lines_and_keeps_the_report(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§5: `--quiet` suppresses progress, never the result. The trace is the progress."""
+    _stub_run_once(monkeypatch, _finished_state(SubtaskStatus.DONE, SubtaskStatus.DONE))
+
+    result = runner.invoke(app, ["run", PROMPT, "--quiet"], prog_name=PROG)
+
+    assert result.exit_code == ExitCode.SUCCESS
+    assert SUMMARY in result.stdout
+    assert "Steps:" not in result.stdout
+    assert "done     step_0" not in result.stdout
+    assert result.stderr == ""
+
+
+def test_run_that_stopped_short_prints_the_report_and_the_reason_on_stderr(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The artifacts are on disk, so they are reported; why the run stopped is a
+    diagnostic, so it goes to stderr and the exit code says it failed (§5, §8)."""
+    reason = "Step cap of 1 exceeded; the plan is too large to run."
+    _stub_run_once(monkeypatch, _finished_state(SubtaskStatus.DONE, failure_reason=reason))
+
+    result = runner.invoke(app, ["run", PROMPT], prog_name=PROG)
+
+    assert result.exit_code == ExitCode.TASK_FAILURE
+    assert SUMMARY in result.stdout
+    assert "done     step_0  artifact:step_0.txt" in result.stdout
+    assert reason not in result.stdout  # never on the stream a script parses
+    assert reason in _squash(result.stderr)
+
+
+def test_run_that_stopped_short_reports_the_reason_on_both_streams_in_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Which stream says what does not change with `-o`: the document carries the reason
+    for the script, stderr repeats it for the person watching the pipe."""
+    reason = "No worker is registered for roles: [<AgentRole.VISUALIZATION: 'visualization'>]"
+    _stub_run_once(monkeypatch, _finished_state(SubtaskStatus.DONE, failure_reason=reason))
+
+    result = runner.invoke(app, ["run", PROMPT, "-o", "json"], prog_name=PROG)
+
+    assert result.exit_code == ExitCode.TASK_FAILURE
+    assert json.loads(result.stdout)["failure_reason"] == reason
+    # Rich markup would read the bracketed role list as a style tag. Substring, not the
+    # whole line: stderr is for eyes and wraps at the console width.
+    assert "[<AgentRole.VISUALIZATION:" in _squash(result.stderr)
+
+
+def test_run_rejects_an_unknown_output_format(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The enum is what makes this a usage error instead of a run that prints nonsense."""
+    _stub_run_once(monkeypatch, _finished_state(SubtaskStatus.DONE))
+
+    result = runner.invoke(app, ["run", PROMPT, "--output", "yaml"], prog_name=PROG)
+
+    assert result.exit_code == ExitCode.USAGE
+    assert "yaml" in _squash(result.stderr)
+    assert result.stdout == ""
 
 
 def test_run_maps_a_task_failure_to_its_exit_code(monkeypatch: pytest.MonkeyPatch) -> None:
