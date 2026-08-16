@@ -314,8 +314,8 @@ async def test_create_plan_asks_nothing_when_the_request_is_unambiguous() -> Non
 
 @pytest.mark.asyncio
 async def test_create_plan_refuses_a_second_round_of_questions() -> None:
-    """The guardrail against question loops: one round per run, and the model is told why
-    its second attempt was rejected rather than being asked again."""
+    """The guardrail against question loops: a second round is refused and the model told
+    why, rather than the user being asked again."""
     provider = FakeProvider(
         responses=[_clarify(METRIC_QUESTION), _clarify(PERIOD_QUESTION), _financial_plan()]
     )
@@ -345,10 +345,10 @@ async def test_create_plan_never_asks_when_nobody_can_answer() -> None:
 
 @pytest.mark.asyncio
 async def test_create_plan_records_no_clarification_for_an_answer_the_user_declined() -> None:
-    """A blank answer is not an answer. The round is still spent, but the model must be
-    told there is nothing to plan *with* — pointing it at answers that do not exist is how
-    it clarifies again and burns the retry cap on a run it could have planned."""
-    # Asks, is declined, asks again: the second try is what shows which reason it was given.
+    """A blank answer is not an answer: the round is still spent, but the model must be
+    told there is nothing to plan *with*, or it clarifies again and burns the retry cap on
+    a run it could have planned."""
+    # The second `clarify` is what shows which reason the model was given.
     provider = FakeProvider(
         responses=[_clarify(METRIC_QUESTION), _clarify(METRIC_QUESTION), _financial_plan()]
     )
@@ -382,7 +382,7 @@ async def test_create_plan_rejects_a_clarification_carrying_subtasks() -> None:
 @pytest.mark.asyncio
 async def test_create_plan_rejects_an_empty_plan() -> None:
     """`subtasks` lost its `min_length` to the shared draft, so the constraint moved from
-    the wire schema to this rejection — nothing else enforces it now."""
+    the wire schema to this rejection."""
     provider = FakeProvider(responses=[PlannerDraft(action=PlannerAction.PLAN), _financial_plan()])
 
     plan = await Planner(provider).create_plan(TaskState(user_request=REQUEST))
@@ -423,8 +423,8 @@ async def test_create_plan_does_not_reopen_a_round_the_ledger_already_carries() 
 
 @pytest.mark.asyncio
 async def test_create_plan_rejects_more_questions_than_the_cap_allows() -> None:
-    """An interview is not a clarification round; the cap is the schema's, so this is
-    rejected before anyone is prompted."""
+    """The cap is the schema's, so an over-long round is rejected before anyone is
+    prompted."""
     too_many = _clarify(*[PERIOD_QUESTION] * (MAX_QUESTIONS + 1))
     provider = FakeProvider(responses=[too_many, _financial_plan()])
     asker = ScriptedAsker()

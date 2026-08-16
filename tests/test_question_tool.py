@@ -51,8 +51,7 @@ def test_ask_user_info_publishes_the_question_model_as_its_schema() -> None:
 
 
 def test_ask_user_info_description_says_when_not_to_ask() -> None:
-    """The cost of this tool is a human turn-around, so the prompt has to spend most of
-    its words fencing it off."""
+    """The tool costs a human turn-around, so most of the prompt fences it off."""
     description = AskUserTool(ScriptedAsker()).info().description
 
     assert "Do not use it" in description
@@ -140,9 +139,7 @@ async def test_ask_user_blank_answer_is_empty_not_an_error() -> None:
 
     assert response.is_empty
     assert not response.is_error
-    # A sentence, not "": every other tool pairs `is_empty` with something to act on, and
-    # the API rejects an empty `tool_result` block outright.
-    assert response.content == DECLINED
+    assert response.content == DECLINED  # a sentence, not "" — see the constant
     assert "declined" in response.content
 
 

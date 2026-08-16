@@ -1,8 +1,7 @@
 """The typed clarification request the planner emits instead of a plan (§3.3, #10).
 
-A question is data, not prose: `kind` decides how `cli/prompt.py` renders it and what a
-test can assert about it, so neither side has to parse a sentence to learn that "which
-quarter?" wanted one of four choices.
+A question is data, not prose: `kind` decides how `cli/prompt.py` renders it, so nobody
+has to parse a sentence to learn that "which quarter?" wanted one of four choices.
 
 The answered half is `state.Clarification` — it lives on the ledger, this does not.
 """
@@ -13,7 +12,7 @@ from typing import Protocol
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 # Enough to disambiguate a request, few enough that answering is not an interview. Also
-# the planner's cap: a draft asking for more is rejected before anyone is prompted.
+# the planner's cap: a longer draft is rejected before anyone is prompted.
 MAX_QUESTIONS = 3
 
 # Below this a "choice" is not one, and a model that emits a single option has usually

@@ -266,7 +266,7 @@ def test_run_with_a_piped_stdin_offers_nobody_to_answer_questions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """#10: a script or CI run has no one at the keyboard, so the command hands `run_once`
-    no asker and the planner is told to plan without asking. Anything else hangs."""
+    no asker. Anything else hangs."""
     askers: list[Asker | None] = []
     _stub_run_once(monkeypatch, _finished_state(SubtaskStatus.DONE), askers=askers)
 
@@ -283,9 +283,8 @@ def test_run_with_a_piped_stdin_offers_nobody_to_answer_questions(
 def test_asker_needs_both_streams_to_be_a_terminal(
     monkeypatch: pytest.MonkeyPatch, stdin_tty: bool, stderr_tty: bool, offered: bool
 ) -> None:
-    """A question needs a stream to appear on and a stream to be answered on. Redirect
-    either and nobody can answer — `2>log` in particular would put the question in the
-    file and leave the user staring at a terminal that has stopped.
+    """Both streams, or nobody: `2>log` in particular would put the question in the file
+    and leave the user staring at a terminal that has stopped.
 
     Called directly: `CliRunner` replaces `sys.stdin` inside `invoke`.
     """

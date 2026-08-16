@@ -110,10 +110,9 @@ def run(
 def _asker() -> Asker | None:
     """Who answers the planner's clarifying questions, or `None` when nobody can (#10).
 
-    Both streams, because a question needs both: it is written to stderr and the answer
-    is read from stdin. Redirect either and the run would block on a prompt nobody can
-    see or nobody can answer — so the planner is told instead, and plans on its own
-    reading of the request.
+    Both streams: the question is written to stderr, the answer read from stdin. Redirect
+    either and the run would block on a prompt nobody can see or answer, so the planner is
+    told there is nobody instead.
     """
     return ConsoleAsker() if sys.stdin.isatty() and err_console.is_terminal else None
 

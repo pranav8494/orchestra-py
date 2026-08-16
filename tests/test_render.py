@@ -697,9 +697,9 @@ async def test_dashboard_live_mode_folds_events_in_and_leaves_stdout_alone(
 async def test_dashboard_live_mode_opens_no_region_until_the_first_event(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """#10: the planner may stop to ask the user a question, and it does so before the
-    first event. A `Live` already owning the terminal would swallow that prompt, so the
-    region waits for something to draw and a plain line says the run is alive."""
+    """#10: the planner asks its questions before the first event, and a `Live` already
+    owning the terminal would swallow the prompt. So the region waits, and a plain line
+    says the run is alive."""
     started = 0
     start = Live.start
 

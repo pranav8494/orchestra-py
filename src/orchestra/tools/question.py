@@ -3,8 +3,8 @@
 - **The question *is* the schema** — `core.question.Question` is published verbatim as
   `input_schema`, so there is no second params model to drift from the type the `Asker`
   and the renderer already agree on (§1.5, §2.2).
-- **The `Asker` is injected** — this module never learns that the answer comes from a
-  terminal, which keeps `tools/` below `cli/` (§3.2) and lets a test answer from a list.
+- **The `Asker` is injected** — which keeps `tools/` below `cli/` (§3.2) and lets a test
+  answer from a list.
 - **Declining is not failing** — a blank answer comes back `is_empty`, not `is_error`:
   the user was asked and chose not to say, so a retry would just ask again (§6).
 """
@@ -21,8 +21,8 @@ from orchestra.tools.base import (
 
 TOOL_NAME = "ask_user"
 
-# What a decline comes back as. A sentence, not "": every other tool pairs `is_empty` with
-# something the model can act on, and an empty `tool_result` block is rejected by the API.
+# A sentence, not "": every other tool pairs `is_empty` with something the model can act
+# on, and an empty `tool_result` block is rejected by the API.
 DECLINED = "The user declined to answer. Continue with a stated assumption; do not ask again."
 
 # A prompt (§6). The cost being described is a human turn-around, so most of this is about
@@ -63,22 +63,21 @@ class AskUserTool:
     async def run(self, call: ToolCall) -> ToolResponse:
         """Ask the question and return the answer as text. See `BaseTool.run`.
 
-        The only thing that may leave here is `CancelledError` from a user who is still at
-        the prompt when the run is cancelled (§10).
+        Only `CancelledError` leaves here — a user still at the prompt when the run is
+        cancelled (§10).
         """
         try:
             question = Question.model_validate(call.arguments)
         except ValidationError as exc:
             # Includes the choices/kind rule, so a `free_text` question with options comes
-            # back as a sentence the model can act on rather than an unhandled error (§6).
+            # back as a sentence the model can act on (§6).
             return ToolResponse(
                 content=f"Invalid arguments for {TOOL_NAME}: {format_validation_error(exc)}",
                 is_error=True,
             )
 
         answer = await self._asker.ask(question)
-        # Whitespace counts as blank: someone who pressed space and Enter declined as much
-        # as someone who pressed Enter. `is_empty`, not `is_error` — see the module docstring.
+        # Whitespace counts as blank: space-then-Enter declines as much as Enter does.
         if not answer.strip():
             return ToolResponse(content=DECLINED, is_empty=True)
         return ToolResponse(content=answer)

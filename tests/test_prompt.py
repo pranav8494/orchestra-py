@@ -17,9 +17,8 @@ CHOICES = ["Q1", "Q2", "Q3"]
 
 
 class ClosedStdin:
-    """stdin at EOF. Rich reads through `stream.readline()`, and without a stream it reads
-    through the builtin `input()`, which raises `EOFError` — so this stands in for the
-    production path the guard exists for. Not a `StringIO` subclass: `readline` is typed
+    """stdin at EOF, standing in for the production path where Rich falls back to the
+    builtin `input()` and it raises. Not a `StringIO` subclass: `readline` is typed
     `bytes` on `IOBase`, and only the one method is ever called."""
 
     def readline(self) -> str:
@@ -89,8 +88,7 @@ def test_match_choices_repeated_entry_appears_once() -> None:
 
 
 def test_match_choices_nothing_matched_falls_back_to_the_raw_answer() -> None:
-    """Someone who typed a fifth option meant it; returning "" would be recorded as a
-    decline and the planner would never see what they said."""
+    """Someone who typed a fifth option meant it; "" would be recorded as a decline."""
     assert match_choices("  the first half  ", CHOICES) == "the first half"
 
 
@@ -163,9 +161,8 @@ async def test_console_asker_free_text_returns_what_was_typed() -> None:
     ids=str,
 )
 async def test_console_asker_a_user_who_answers_nothing_declines(kind: QuestionKind) -> None:
-    """Without a default, Rich re-asks a `yes_no` or `single_choice` forever, and a user
-    who cannot answer has no way out but Ctrl-C. `default=DECLINED` ends it: no answer
-    means "no answer", which the tool reports as `is_empty`.
+    """Without a default, Rich re-asks a `yes_no` or `single_choice` forever and the user's
+    only way out is Ctrl-C. `default=DECLINED` ends it; the tool reports "" as `is_empty`.
 
     Reached here through the exhausted stream rather than the bare newline — Rich's
     `stream` path does not strip it, where the builtin `input()` production uses does, so

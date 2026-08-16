@@ -33,10 +33,9 @@ from orchestra.cli.format import OutputFormat, format_result
 from orchestra.core.events import Broker
 from orchestra.core.state import AgentRole, EventKind, SubtaskStatus, TaskEvent, TaskState
 
-# Printed before `plan_created` arrives, above the region rather than in it: planning is
-# the slowest part of a short run and may stop to ask a question (#10), so the window it
-# covers is the one where nothing may own the terminal. Also `RunView`'s opening headline,
-# which only the plain sink now draws.
+# Printed before `plan_created` arrives, above the region rather than in it (see
+# `_consume`): planning is the slowest part of a short run, and an empty opening frame
+# reads as a hang. Also `RunView`'s opening headline, which only the plain sink now draws.
 PLANNING_HEADLINE = "Planning the request"
 
 # Named so a leaked task is identifiable in a task dump, and a constant so a test
@@ -458,18 +457,17 @@ async def _consume(
             await _pump(queue, view, _write_line)
             return
 
-        # A line, then nothing, until the run has something to draw. The region must not
-        # own the terminal before the first event: the planner's clarification round (#10)
-        # prompts on this stream while it is still planning, and a `Live` up at that
-        # moment leaves the cursor inside it. The first event is the engine's
-        # `plan_created`, published once planning has settled either way.
+        # The region must not own the terminal before the first event: the planner's
+        # clarification round (#10) prompts on this stream while it is still planning, and
+        # a `Live` up at that moment leaves the cursor inside it. `plan_created` is that
+        # first event, published once planning has settled either way.
         err_console.print(PLANNING_HEADLINE)
         try:
             view.apply(await queue.get())
         except asyncio.CancelledError:
             # `_pump`'s contract, one phase earlier: a run torn down before it drew
-            # anything still folds what it was sent, or the view left behind describes
-            # the moment the region would have opened rather than the run.
+            # anything still folds what it was sent, or the view describes the moment the
+            # region would have opened rather than the run.
             _drain(queue, view, _undrawn)
             raise
 

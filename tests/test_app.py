@@ -393,8 +393,7 @@ class RecordingObserver:
     entered: int = 0
     exited: int = 0
     events: list[TaskEvent] = field(default_factory=list)
-    # Held while attached, so a test can ask what had been published at a given moment
-    # rather than only what arrived by the end.
+    # Held while attached, so a test can ask what had been published at a given moment.
     queue: asyncio.Queue[TaskEvent] | None = None
 
     @asynccontextmanager
@@ -469,7 +468,7 @@ async def test_run_once_answers_the_planners_question_before_the_run_starts(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """#10 through the composition root: an ambiguous request stops for one question, the
-    answer lands on the ledger, and the run proceeds on the plan that came back."""
+    answer lands on the ledger, and the run proceeds."""
     metric = Question(
         kind=QuestionKind.SINGLE_CHOICE,
         text="Which metric should the chart show?",
@@ -488,9 +487,8 @@ async def test_run_once_answers_the_planners_question_before_the_run_starts(
     assert [(entry.question, entry.answer) for entry in state.clarifications] == [
         (metric.text, "revenue")
     ]
-    # Nothing had been published when the question was put. `cli/render.py` opens its
-    # `Live` region on the first event and so relies on this: publish while a prompt is
-    # open and the region lands on top of it (#10).
+    # Nothing had been published when the question was put: `cli/render.py` opens its
+    # `Live` region on the first event, so a prompt must come before one (#10).
     assert asker.published_before_asking == [0]
     assert state.final_result is not None
     assert not state.failed

@@ -174,8 +174,8 @@ class FakeProvider:
 class ScriptedAsker:
     """An `Asker` that answers from a queue and keeps what it was asked (§12).
 
-    The questions are kept as objects, not strings: what a test checks is that the
-    planner's typed question reached the renderer intact.
+    Questions are kept as objects, not strings: what a test checks is that the typed
+    question reached the renderer intact.
     """
 
     answers: list[str] = field(default_factory=list)

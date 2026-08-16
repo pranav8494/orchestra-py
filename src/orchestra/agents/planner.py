@@ -10,11 +10,10 @@ schema cannot say — unique ids, known `depends_on`, acyclic graph. `agents/str
 runs up to three attempts with each rejection fed back, then the run fails.
 
 **Why the planner owns clarification (#10).** A request missing a parameter is a planning
-problem, so the ambiguity check is the planner's and so is its guardrail. One round per
-*run*, not per call: a ledger that already carries clarifications never opens another, so
-a later replan (#12) re-entering `create_plan` cannot start a second round. The round that
-follows validates with `_plan_only`, which rejects `clarify` outright, and the retry cap
-ends the run if the model will not plan.
+problem, so the ambiguity check and its guardrail are the planner's. One round per *run*,
+not per call: a ledger that already carries clarifications never opens another, so a later
+replan (#12) re-entering `create_plan` cannot start a second round. What follows validates
+with `_plan_only`, which rejects `clarify` outright.
 """
 
 from collections.abc import Callable
@@ -101,10 +100,9 @@ class Planner:
     def __init__(self, provider: Provider, *, ask_tool: BaseTool | None = None) -> None:
         """Store the provider and, when someone can answer, the tool that asks.
 
-        `ask_tool` is `None` for a non-interactive run: the ambiguity check still runs,
-        but a `clarify` reply is rejected back to the model instead of blocking on a
-        prompt nobody is there to answer. Nothing is read from config or the environment
-        here (§6).
+        `ask_tool` is `None` for a non-interactive run: the check still runs, but a
+        `clarify` reply is rejected back to the model instead of blocking on a prompt
+        nobody can answer. Nothing is read from config or the environment here (§6).
         """
         self._provider = provider
         self._ask_tool = ask_tool
@@ -122,17 +120,17 @@ class Planner:
             asyncio.CancelledError: propagated, never swallowed (§10).
         """
         ask_tool = self._ask_tool
-        # `state.clarifications` is the run's record of its one round, so asking is
-        # unreachable once it holds anything — whoever called, and however often.
+        # The ledger is the run's record of its one round, so asking is unreachable once
+        # it holds anything — whoever called, and however often.
         if ask_tool is not None and not state.clarifications:
             outcome = await self._request(state, _to_outcome)
             if isinstance(outcome, Plan):
                 return self._commit(state, outcome)
             await self._ask(state, outcome, ask_tool)
 
-        # Nobody could be asked, or the round is over. Which reason the model is given
-        # turns on whether an answer was recorded, not on which branch arrived here: a
-        # round everyone declined leaves nothing to plan with, exactly as no round does.
+        # Nobody could be asked, or the round is over. Which reason the model gets turns
+        # on whether an answer was recorded, not on how we got here: a round everyone
+        # declined leaves nothing to plan with, exactly as no round does.
         refusal = PLANNER_CLARIFY_SPENT if state.clarifications else PLANNER_CLARIFY_UNANSWERED
         return self._commit(state, await self._request(state, _plan_only(refusal)))
 
@@ -168,8 +166,8 @@ class Planner:
             response = await ask_tool.run(
                 ToolCall(id=f"clarify-{index}", name=ASK_USER_TOOL, arguments=question.model_dump())
             )
-            # A blank answer is the user declining; an error would be this call being
-            # malformed, which the planner must not then quote back as an answer.
+            # A blank answer is a decline, an error is this call being malformed; neither
+            # may be quoted back to the model as an answer.
             if response.is_error or response.is_empty:
                 continue
             state.clarifications.append(

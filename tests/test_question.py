@@ -1,8 +1,7 @@
 """Tests for the clarification schema (#10).
 
-The validator is the contract the renderer and the `ask_user` tool both rely on: a choice
-question always has options to render, and a free-text one never has options that would be
-silently dropped. Asserted here rather than through either consumer.
+The validator is the contract the renderer and the `ask_user` tool both rely on, so it is
+asserted here rather than through either consumer.
 """
 
 import pytest
@@ -27,8 +26,7 @@ def test_question_a_choice_kind_without_enough_choices_is_rejected(kind: Questio
 
 @pytest.mark.parametrize("kind", [QuestionKind.FREE_TEXT, QuestionKind.YES_NO])
 def test_question_a_non_choice_kind_carrying_choices_is_rejected(kind: QuestionKind) -> None:
-    """Accepting them would drop them at the prompt, where the user never sees the options
-    the model meant to offer."""
+    """Accepting them would drop them at the prompt, unseen by the user."""
     with pytest.raises(ValidationError, match="takes no choices"):
         Question(kind=kind, text="Which metric?", choices=["revenue", "profit"])
 

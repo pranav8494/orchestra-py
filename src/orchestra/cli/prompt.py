@@ -5,8 +5,7 @@
 - **Prompts are diagnostics** — they go to `err_console`, so a piped run still has only
   its result on stdout (§5). No `Console` is constructed here.
 - **The pure parts are separate** — `question_text` and `match_choices` are plain
-  functions, so the wording and the matching are tested as data rather than through
-  Rich's drawing (§12).
+  functions, so the wording and the matching are tested as data, not as drawing (§12).
 """
 
 from collections.abc import Sequence
@@ -24,8 +23,8 @@ DECLINED = ""
 
 
 def question_text(question: Question) -> str:
-    """The whole prompt as plain text: the question, its context, and the options when
-    listing them is on us rather than on Rich.
+    """The whole prompt as plain text: the question, its context, and the options Rich
+    will not draw itself.
 
     Rich draws the choices for `single_choice` and the y/n for `yes_no`; `multi_choice` is
     a free-text field, so its options only appear if this puts them there.
@@ -57,8 +56,8 @@ def match_choices(answer: str, choices: Sequence[str]) -> str:
 
     Returns the matched options in the question's own spelling, in the order entered, so
     the planner reads back strings it wrote. Unmatched entries are dropped; an answer that
-    matched nothing falls back to itself, because someone who typed a fifth option meant
-    it and returning "" would be recorded as a decline.
+    matched nothing falls back to itself — someone who typed a fifth option meant it, and
+    "" would be recorded as a decline.
     """
     canonical = {choice.lower(): choice for choice in choices}
     matched = [
@@ -76,31 +75,29 @@ class ConsoleAsker:
     def __init__(self, stream: TextIO | None = None) -> None:
         """`stream` is Rich's own seam for scripted input (`Prompt.ask(stream=...)`).
 
-        `None` — the default, and the only value production passes — reads real stdin.
-        Tests hand in a `StringIO` so the suite never touches a terminal (§12).
+        `None` — the default, and the only value production passes — reads real stdin;
+        tests hand in a `StringIO`, so the suite never touches a terminal (§12).
         """
         self._stream = stream
 
     async def ask(self, question: Question) -> str:
         """Ask `question` and return the answer, or "" if the user declined.
 
-        Async by the `Asker` contract, but the prompt below blocks. This deviates from §10
-        deliberately: `asyncio.to_thread` uses non-daemon threads, so a Ctrl-C while the
-        user sits at the prompt could not end the process — the interpreter would wait on
-        the thread that is waiting on the user. Blocking directly lets `KeyboardInterrupt`
-        reach the CLI boundary and exit 130 (§8).
+        Async by the `Asker` contract, but the prompt below blocks — a deliberate §10
+        deviation: `asyncio.to_thread` uses non-daemon threads, so a Ctrl-C while the user
+        sits at the prompt could not end the process. Blocking directly lets
+        `KeyboardInterrupt` reach the CLI boundary and exit 130 (§8).
 
         The trade only holds at a pre-engine call site, where the sole other task on the
         loop is a dashboard consumer parked on its queue with no region open. Offering
         this tool to a worker's model (#12) would freeze the `Live` region and every
-        concurrent subtask for as long as the human thinks, and needs a different answer.
+        concurrent subtask, and needs a different answer.
         """
         try:
             return self._read(question)
         except (EOFError, OSError):
             # stdin closed — a pipe, or Ctrl-D — or stderr went away mid-prompt. Declining,
-            # not a crash: §5 lets a dead stream cost the interaction, never the run, and
-            # the caller reads "" as "no answer given" (`Asker`).
+            # not a crash: a dead stream costs the interaction, never the run (§5).
             return DECLINED
 
     def _read(self, question: Question) -> str:

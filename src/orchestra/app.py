@@ -150,8 +150,7 @@ def build_orchestra(config: Config, *, asker: Asker | None = None) -> Orchestra:
     )
     return Orchestra(
         # Not in `agents/toolsets.py`: that module says which tools each agent's *model*
-        # is shown, and this one is not offered to a model in this phase — the planner
-        # calls it directly to put its own questions.
+        # is shown, and no model is offered this one yet — the planner calls it directly.
         planner=Planner(provider, ask_tool=None if asker is None else AskUserTool(asker)),
         engine=ExecutionEngine(
             workers=workers,
