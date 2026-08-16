@@ -17,7 +17,7 @@ import orchestra.cli.app as cli_app
 from orchestra import __version__
 from orchestra.app import RunObserver
 from orchestra.cli.app import app, error_boundary
-from orchestra.cli.chat import HINT
+from orchestra.cli.chat import HINT, ConsoleChat
 from orchestra.cli.console import console, err_console
 from orchestra.cli.prompt import ConsoleAsker
 from orchestra.cli.render import RenderMode
@@ -322,6 +322,29 @@ def test_run_with_a_piped_stdin_offers_nobody_to_interrupt(
     assert result.exit_code == ExitCode.SUCCESS
     assert chats == [None]
     assert HINT not in result.stderr  # nothing to advertise
+
+
+def test_run_on_a_terminal_offers_a_chat_and_says_how_to_reach_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other arm: an interruptible run has to say so, and the affordance is a
+    diagnostic, so it goes to stderr and never near the result (§5).
+
+    `_interactive` is patched rather than the streams, because `CliRunner` replaces
+    `sys.stdin` inside `invoke`; which streams make a run interactive is the parametrized
+    test above.
+    """
+    chats: list[Chat | None] = []
+    _stub_run_once(monkeypatch, _finished_state(SubtaskStatus.DONE), chats=chats)
+    monkeypatch.setattr(cli_app, "_interactive", lambda: True)
+    _force_terminal(monkeypatch, value=True)
+
+    result = runner.invoke(app, ["run", PROMPT], prog_name=PROG)
+
+    assert result.exit_code == ExitCode.SUCCESS
+    assert isinstance(chats[0], ConsoleChat)
+    assert HINT in result.stderr
+    assert HINT not in result.stdout
 
 
 def test_run_on_a_terminal_asks_for_the_live_dashboard(monkeypatch: pytest.MonkeyPatch) -> None:

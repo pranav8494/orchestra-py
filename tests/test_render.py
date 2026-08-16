@@ -1167,3 +1167,35 @@ def test_event_line_labels_a_warning_for_the_plain_sink() -> None:
 
     assert line.startswith("warn")
     assert "fetch" in line and "fell back" in line
+
+
+@pytest.mark.asyncio
+async def test_spin_holds_still_while_the_region_is_suspended(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An interrupt's prompt owns the terminal during a pause (#12), so the ticker must not
+    write into it. Rich happens to drop a stopped region's refresh too — this pins the
+    intent, so nobody removes the guard on the grounds that it looks redundant."""
+    monkeypatch.setattr(render, "SPINNER_TICK_SECONDS", 0.001)
+    refreshes = 0
+
+    class CountingLive:
+        def refresh(self) -> None:
+            nonlocal refreshes
+            refreshes += 1
+
+    view = _seeded_view()
+    view.apply(_started("fetch"))
+    region = LiveRegion()
+    ticker = asyncio.create_task(render._spin(cast(Live, CountingLive()), view, region))
+
+    with region.suspended():
+        await asyncio.sleep(0.02)
+        assert refreshes == 0
+
+    await asyncio.sleep(0.02)
+    assert refreshes > 0  # and it picks straight back up
+
+    ticker.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await ticker
