@@ -1,15 +1,15 @@
 """One validate-and-retry path for every structured call (#9).
 
 Structured output guarantees JSON *shape*; `validate` is where the caller checks what a
-schema cannot say, and its rejection goes back to the model as the next turn. Unusable
-output is retried; a provider outage is not — `ProviderError` propagates.
+schema cannot say, and the `Rejected` it raises goes back to the model as the next turn.
+Unusable output is retried; a provider outage is not — `ProviderError` propagates.
 
 Whether an exhausted call fails the run is the caller's policy, so nothing is raised here.
 """
 
 from collections.abc import Callable, Sequence
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from orchestra.providers.base import MessageRole, Provider, ProviderMessage
 
@@ -20,6 +20,15 @@ DEFAULT_MAX_RETRIES = 2
 # A refusal and off-schema JSON are indistinguishable at the adapter, so the reason has
 # to fit either. Not prompt text (§11) — the caller's `instruction` says what to do.
 _NO_OUTPUT = "No usable structured output was returned."
+
+
+# N818: named for the domain concept, as `TaskFailure` is — a rejection, not an error.
+class Rejected(ValueError):  # noqa: N818
+    """What a `validate` callable raises to mean the model's output is unusable.
+
+    The sentinel, not `ValueError` at large: a bad `int()` or enum lookup inside `validate`
+    is a bug, and feeding it to the model would buy two more calls and the same bug.
+    """
 
 
 # `StructuredT` mirrors the port's bound; `ResultT` is whatever the caller's ledger type is.
@@ -36,9 +45,9 @@ async def parse_validated[StructuredT: BaseModel, ResultT](
     """Request `output_format` until `validate` accepts it, feeding each rejection back.
 
     Args:
-        validate: converts the draft into the caller's type. Raises `ValueError` (which
-            `pydantic.ValidationError` is) when the draft is well-formed but unusable;
-            anything else propagates as the programmer error it is.
+        validate: converts the draft into the caller's type. Raises `Rejected`, or the
+            `pydantic.ValidationError` a model constructor raises, when the draft is
+            well-formed but unusable; anything else propagates as the programmer error it is.
         instruction: prepended to the rejection on every retry turn.
         max_retries: extra calls after the first.
 
@@ -68,7 +77,7 @@ async def parse_validated[StructuredT: BaseModel, ResultT](
             continue
         try:
             return validate(draft), ""
-        except ValueError as exc:
+        except (ValidationError, Rejected) as exc:
             # The rejected draft goes back with the reason: the model cannot see its own
             # previous message as data, and "fix this" needs a "this".
             rejection = f"{exc}\n\nThe rejected reply was:\n{draft.model_dump_json(indent=2)}"

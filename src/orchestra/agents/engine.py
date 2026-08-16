@@ -6,10 +6,12 @@ re-scans on every completion. `asyncio.Semaphore` bounds concurrency (§10); `in
 not `status` — is what stops a double dispatch, because a subtask is only `RUNNING` once
 it holds the semaphore and a queued one should not show as running.
 
-**A failed subtask ends a step, not the run.** A dispatch that raises is retried up to
-`subtask_attempts` times; only the last failure marks it `FAILED`. Its dependents then
-never become ready, and everything independent of it still completes. The verdict is the
-caller's to draw from state — partial results beat no results (§8, #8).
+**A failed subtask ends a step, not the run.** A subtask is dispatched up to
+`subtask_attempts` times; only its last failure marks it `FAILED`. An error that declares
+itself non-retryable — a bound the worker already hit — ends it on the first, since the
+same input reaches the same conclusion. Its dependents then never become ready, and
+everything independent of it still completes. The verdict is the caller's to draw from
+state — partial results beat no results (§8, #8).
 
 **One thing does end the run**: the global step cap, the backstop against a plan that
 would run forever. Every attempt counts against it, so it bounds retries too. Exceeding
@@ -24,7 +26,7 @@ import asyncio
 from collections.abc import Mapping
 
 from orchestra.agents.workers.base import Worker
-from orchestra.core.errors import TaskFailure
+from orchestra.core.errors import OrchestraError, TaskFailure
 from orchestra.core.events import Broker
 from orchestra.core.state import (
     AgentRole,
@@ -117,6 +119,8 @@ class ExecutionEngine:
         capped = False
         # Per run, not on `Subtask`: the model is the ledger's and forbids extra fields.
         attempts: dict[str, int] = {}
+        # The last error each attempted subtask raised, for the reconciliation below.
+        last_error: dict[str, str] = {}
 
         async with asyncio.TaskGroup() as group:
             while True:
@@ -140,12 +144,26 @@ class ExecutionEngine:
                                 in_flight,
                                 finished,
                                 attempt=attempts[subtask.id],
+                                last_error=last_error,
                             ),
                             name=f"subtask:{subtask.id}",
                         )
                 if not in_flight:
                     break  # nothing running and nothing left that could become ready
                 await finished.wait()
+
+        # A retriable failure is left `PENDING` for a re-dispatch; if the cap stopped that
+        # from ever happening, nothing else would report it and the run would call a
+        # subtask that failed twice "pending".
+        for subtask in plan.subtasks:
+            if subtask.status is SubtaskStatus.PENDING and subtask.id in last_error:
+                subtask.status = SubtaskStatus.FAILED
+                await self._emit(
+                    state,
+                    EventKind.SUBTASK_FAILED,
+                    subtask_id=subtask.id,
+                    message=last_error[subtask.id],
+                )
 
         done = sum(1 for subtask in plan.subtasks if subtask.status is SubtaskStatus.DONE)
 
@@ -176,10 +194,12 @@ class ExecutionEngine:
         finished: asyncio.Event,
         *,
         attempt: int,
+        last_error: dict[str, str],
     ) -> None:
         """Run one subtask under the semaphore and record the outcome in `state`.
 
-        `attempt` is this dispatch's 1-based number, counted by `run()`.
+        `attempt` is this dispatch's 1-based number, counted by `run()`; `last_error` is
+        written for `run()` to reconcile a retry the step cap took away.
         """
         try:
             async with semaphore:
@@ -207,7 +227,11 @@ class ExecutionEngine:
         except Exception as exc:
             # Not `BaseException`: `CancelledError` must propagate so the TaskGroup can
             # unwind, and a cancelled subtask is neither failed nor retried (§10).
-            if attempt < self._subtask_attempts:
+            last_error[subtask.id] = str(exc)
+            # Narrowed, not `getattr`: only our own errors declare determinism, and
+            # anything else could go differently next time (§7).
+            retriable = not isinstance(exc, OrchestraError) or exc.retryable
+            if retriable and attempt < self._subtask_attempts:
                 # Back to pending so `_ready` picks it up again; a warning, because
                 # `subtask_failed` means the subtask is finished, unsuccessfully.
                 subtask.status = SubtaskStatus.PENDING

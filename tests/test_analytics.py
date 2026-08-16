@@ -24,7 +24,14 @@ from orchestra.artifacts import DEFAULT_PREVIEW_LIMIT, ArtifactStore
 from orchestra.config import default_data_dir
 from orchestra.core.errors import TaskFailure
 from orchestra.core.events import Broker
-from orchestra.core.state import AgentRole, Subtask, SubtaskContext, TaskEvent, TaskState
+from orchestra.core.state import (
+    AgentRole,
+    KeyFigure,
+    Subtask,
+    SubtaskContext,
+    TaskEvent,
+    TaskState,
+)
 from orchestra.providers.base import AssistantTurn
 from orchestra.tools.base import BaseTool, ToolCall, ToolResponse
 from orchestra.tools.python_exec import TOOL_NAME as RUN_PYTHON_TOOL
@@ -132,22 +139,84 @@ async def test_worker_stores_the_analysis_and_returns_its_pointer(store: Artifac
     provider = FakeProvider(
         turns=[
             AssistantTurn(
-                text="", tool_calls=(_call("print(1 + 1)", inputs=[]),), usage_tokens=120
+                text="",
+                tool_calls=(_call("print(1 + 1)", inputs=[UPSTREAM_POINTER]),),
+                usage_tokens=120,
             ),
             AssistantTurn(text="Revenue grew 10.6% quarter over quarter.", usage_tokens=80),
         ]
     )
     tool = FakeTool(RUN_PYTHON_TOOL, [ToolResponse(content="2025Q4 growth: 10.65%")])
 
-    pointer = await _worker(provider, store, [tool]).run(_context())
+    pointer = await _worker(provider, store, [tool]).run(
+        _context(inputs={UPSTREAM: UPSTREAM_POINTER})
+    )
 
     assert pointer == "artifact:analyse_trends.json"
     analysis = _stored(store, pointer)
-    assert analysis.figures == ["2025Q4 growth: 10.65%"]
-    assert [item.stdout for item in analysis.computations] == analysis.figures
+    assert [figure.value for figure in analysis.figures] == ["2025Q4 growth: 10.65%"]
+    assert [item.stdout for item in analysis.computations] == ["2025Q4 growth: 10.65%"]
     assert analysis.computations[0].code == "print(1 + 1)"
     assert analysis.summary == "Revenue grew 10.6% quarter over quarter."
     assert analysis.instruction == "Compute quarter-over-quarter revenue growth"
+
+
+@pytest.mark.asyncio
+async def test_worker_sources_each_figure_to_the_artifact_its_script_read(
+    store: ArtifactStore,
+) -> None:
+    """#9's pairing: the figure cites the pointer the call read, and carries no label — the
+    report's wording is the aggregator's to write."""
+    provider = FakeProvider(
+        turns=[
+            AssistantTurn(
+                text="",
+                tool_calls=(_call("print('growth')", inputs=[UPSTREAM_POINTER]),),
+                usage_tokens=20,
+            ),
+            AssistantTurn(text="Revenue grew.", usage_tokens=20),
+        ]
+    )
+    tool = FakeTool(RUN_PYTHON_TOOL, [ToolResponse(content="2025Q4 growth: 10.65%")])
+
+    pointer = await _worker(provider, store, [tool]).run(
+        _context(inputs={UPSTREAM: UPSTREAM_POINTER})
+    )
+
+    assert _stored(store, pointer).figures == [
+        KeyFigure(value="2025Q4 growth: 10.65%", source=UPSTREAM_POINTER)
+    ]
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [{}, {"inputs": []}, {"inputs": ["/tmp/sales.csv"]}, {"inputs": UPSTREAM_POINTER}],
+    ids=["absent", "empty", "not-a-pointer", "not-a-list"],
+)
+@pytest.mark.asyncio
+async def test_worker_records_a_computation_without_a_figure_when_no_input_is_named(
+    store: ArtifactStore, arguments: dict[str, object]
+) -> None:
+    """`call.arguments` is model output. A number nobody can trace back is dropped rather
+    than sourced to a guess — but the script ran, so the step still completes."""
+    # `ToolCall` directly, not `_call`: these argument maps are the malformed ones a helper
+    # taking typed keywords cannot express.
+    call = ToolCall(
+        id="call-1", name=RUN_PYTHON_TOOL, arguments={"code": "print('total: 42')"} | arguments
+    )
+    provider = FakeProvider(
+        turns=[
+            AssistantTurn(text="", tool_calls=(call,), usage_tokens=20),
+            AssistantTurn(text="Totals computed.", usage_tokens=20),
+        ]
+    )
+    tool = FakeTool(RUN_PYTHON_TOOL, [ToolResponse(content="total: 42")])
+
+    pointer = await _worker(provider, store, [tool]).run(_context())
+
+    analysis = _stored(store, pointer)
+    assert analysis.figures == []
+    assert [item.stdout for item in analysis.computations] == ["total: 42"]
 
 
 @pytest.mark.asyncio
@@ -259,14 +328,24 @@ async def test_worker_puts_every_figure_ahead_of_every_script_in_the_preview(
     assert len(json.dumps(LEVELS_SCRIPT)) > DEFAULT_PREVIEW_LIMIT
     provider = FakeProvider(
         turns=[
-            AssistantTurn(text="", tool_calls=(_call(LEVELS_SCRIPT),), usage_tokens=20),
-            AssistantTurn(text="", tool_calls=(_call(QOQ_SCRIPT, "call-2"),), usage_tokens=20),
+            AssistantTurn(
+                text="",
+                tool_calls=(_call(LEVELS_SCRIPT, inputs=[UPSTREAM_POINTER]),),
+                usage_tokens=20,
+            ),
+            AssistantTurn(
+                text="",
+                tool_calls=(_call(QOQ_SCRIPT, "call-2", inputs=[UPSTREAM_POINTER]),),
+                usage_tokens=20,
+            ),
             AssistantTurn(text="Growth accelerated into Q4.", usage_tokens=20),
         ]
     )
     tool = FakeTool(RUN_PYTHON_TOOL, [ToolResponse(content=figure) for figure in figures])
 
-    pointer = await _worker(provider, store, [tool]).run(_context())
+    pointer = await _worker(provider, store, [tool]).run(
+        _context(inputs={UPSTREAM: UPSTREAM_POINTER})
+    )
 
     preview = store.preview(pointer)
     assert "Growth accelerated into Q4." in preview

@@ -26,6 +26,14 @@ class OrchestraError(Exception):
 
     exit_code: ExitCode = ExitCode.UNHANDLED
 
+    def __init__(self, message: str, *, retryable: bool = True) -> None:
+        """`retryable=False` when the same input would reach the same failure — a bound
+        already hit, or a plan whose dependency order is wrong. The engine spends an
+        attempt, and the run's step budget, on nothing otherwise.
+        """
+        super().__init__(message)
+        self.retryable = retryable
+
 
 class ConfigError(OrchestraError):
     """Configuration is missing or invalid. Raised at startup, before work begins (§9)."""

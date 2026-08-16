@@ -12,7 +12,7 @@ runs up to three attempts with each rejection fed back, then the run fails.
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from orchestra.agents.structured import parse_validated
+from orchestra.agents.structured import Rejected, parse_validated
 from orchestra.core.errors import TaskFailure
 from orchestra.core.state import (
     AgentRole,
@@ -94,14 +94,6 @@ class Planner:
         return plan
 
 
-class _RejectedDraftError(ValueError):
-    """The draft is well-formed JSON but not a runnable plan.
-
-    Handled identically to the `ValidationError` `Plan` raises; separate only because
-    `Plan` does not check `inputs` — see `_check_inputs`.
-    """
-
-
 def _check_inputs(draft: PlanDraft) -> None:
     """Reject data edges that are missing or unordered.
 
@@ -111,18 +103,16 @@ def _check_inputs(draft: PlanDraft) -> None:
     engine can start a consumer before its producer has written anything.
 
     Raises:
-        _RejectedDraftError: an input names an unknown subtask, or one not depended on.
+        Rejected: an input names an unknown subtask, or one not depended on.
     """
     known = {subtask.id for subtask in draft.subtasks}
     for subtask in draft.subtasks:
         unknown = sorted(set(subtask.inputs) - known)
         if unknown:
-            raise _RejectedDraftError(
-                f"subtask {subtask.id!r} takes inputs from unknown steps: {unknown}"
-            )
+            raise Rejected(f"subtask {subtask.id!r} takes inputs from unknown steps: {unknown}")
         unordered = sorted(set(subtask.inputs) - set(subtask.depends_on))
         if unordered:
-            raise _RejectedDraftError(
+            raise Rejected(
                 f"subtask {subtask.id!r} consumes {unordered} but does not depend on them; "
                 "every id in `inputs` must also appear in `depends_on`"
             )
@@ -133,7 +123,8 @@ def _to_plan(draft: PlanDraft) -> Plan:
 
     Raises:
         ValidationError: the draft is not a runnable DAG.
-        _RejectedDraftError: the draft's data edges are unknown or unordered.
+        Rejected: the draft's data edges are unknown or unordered — `Plan` checks
+            `depends_on` but not `inputs`, so `_check_inputs` owns that half.
     """
     _check_inputs(draft)
     return Plan(

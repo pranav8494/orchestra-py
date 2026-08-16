@@ -161,7 +161,8 @@ class ToolLoop:
             if spent >= self._token_budget:
                 raise TaskFailure(
                     f"{self._label} for {context.subtask.id!r} spent its {self._token_budget}-token "
-                    f"budget before finishing. {_gathered(kept)}"
+                    f"budget before finishing. {_gathered(kept)}",
+                    retryable=False,
                 )
             turn = await self._provider.send(
                 system=self._system_prompt, messages=messages, tools=self._specs
@@ -171,7 +172,8 @@ class ToolLoop:
             if turn.stop_reason == TRUNCATED:
                 raise TaskFailure(
                     f"{self._label} for {context.subtask.id!r} was cut off by the model's output "
-                    f"limit. {_gathered(kept)}"
+                    f"limit. {_gathered(kept)}",
+                    retryable=False,
                 )
 
             if not turn.tool_calls:
@@ -192,7 +194,8 @@ class ToolLoop:
                     raise TaskFailure(
                         f"{self._label} for {context.subtask.id!r} made the same {call.name} call "
                         f"for the same result more than {repeats.max_repeats} times in "
-                        f"{repeats.window} steps. {_gathered(kept)}"
+                        f"{repeats.window} steps. {_gathered(kept)}",
+                        retryable=False,
                     )
                 # `is_empty` too, not just `is_error`: a lookup that matched nothing ran
                 # correctly, but keeping it would let "nothing was found" pass a worker's
@@ -204,7 +207,8 @@ class ToolLoop:
         else:
             raise TaskFailure(
                 f"{self._label} for {context.subtask.id!r} was still calling tools after "
-                f"{self._max_turns} turns. {_gathered(kept)}"
+                f"{self._max_turns} turns. {_gathered(kept)}",
+                retryable=False,
             )
 
         return LoopResult(summary=summary, kept=tuple(kept))

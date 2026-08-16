@@ -8,18 +8,25 @@ anything; the conversion to `FinalReport` is where it is checked against this ru
 artifacts (§7). The chart is not in the draft — it is the ledger's, read back from the
 visualization step's own artifact rather than asked for again.
 
-**A synthesis failure never loses the report.** The artifacts are already paid for, so a
-refusal, unbacked figures, a provider outage or an unreadable artifact all degrade to a
-ledger-only report; the reason lands on `state.failure_reason`, marking the run failed
-(exit 5 via `TaskState.failed`) rather than exiting with an empty stdout (§8, §10). The
-same path serves a run with nothing completed.
+**A synthesis failure never loses the report.** The artifacts are already paid for, so
+every failure degrades to a ledger-only report rather than an empty stdout (§8, §10). Two
+paths, deliberately different:
+
+| Failure | What records it |
+|---|---|
+| `OrchestraError`: a provider outage, a lost artifact | `state.failure_reason`, run failed |
+| a refusal, or figures citing nothing this run made | nothing — the ledger summary, on stdout |
+
+The second is a degraded report, not a broken run (#8). The same path serves a run with
+nothing completed. The first remaps what §8's table calls a provider error (exit 4) onto a
+task failure (exit 5) — the trade buys a report, and stderr is what tells the two apart.
 """
 
 import asyncio
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from orchestra.agents.structured import parse_validated
+from orchestra.agents.structured import Rejected, parse_validated
 from orchestra.agents.workers.visualization import VisualizationResult
 from orchestra.artifacts import DEFAULT_PREVIEW_LIMIT, ArtifactStore
 from orchestra.core.errors import OrchestraError
@@ -94,11 +101,13 @@ class Aggregator:
         """Synthesise the run's artifacts, record the report in `state`, and return it.
 
         `state.final_result` is always set on return, including when the model refused,
-        when synthesis failed, and when nothing completed.
+        when synthesis failed, and when nothing completed. An `OrchestraError` on either
+        step also records its reason on `state.failure_reason`, marking the run failed; a
+        refusal or wholly unbacked figures degrade to the ledger report silently, whose
+        summary says so on stdout.
 
         Raises:
-            asyncio.CancelledError: propagated, never swallowed (§10). Nothing else: an
-                `OrchestraError` degrades the report and marks the run failed instead.
+            asyncio.CancelledError: propagated, never swallowed (§10). Nothing else.
         """
         completed = _completed(state)
         chart: ArtifactPointer | None = None
@@ -108,12 +117,16 @@ class Aggregator:
             # From the visualization step's own receipt, never from the report draft: the
             # chart is a fact the run recorded, not one the model may claim.
             chart, chart_ascii = await self._chart_outputs(completed)
-            if completed:
-                report = await self._synthesise(state, completed, chart, chart_ascii)
         except OrchestraError as exc:
-            # A lost artifact or a provider outage costs the synthesis, not the run's
-            # answer. A chart read that failed leaves both chart fields `None`.
-            _record_failure(state, f"The report could not be synthesised: {exc}")
+            # Its own `try`: a chart nobody can read costs the chart, not the summary the
+            # readable artifacts still support.
+            _record_failure(state, f"The report's chart could not be read: {exc}")
+
+        if completed:
+            try:
+                report = await self._synthesise(state, completed, chart, chart_ascii)
+            except OrchestraError as exc:
+                _record_failure(state, f"The report could not be synthesised: {exc}")
 
         if report is None:
             report = _ledger_report(state.user_request, completed, chart, chart_ascii)
@@ -131,7 +144,7 @@ class Aggregator:
         Returns `(None, None)` when no visualization ran, and when its artifact is not a
         `VisualizationResult` — `EchoWorker` still backs the role and writes plain text,
         which costs the report its chart, not the run (§8). A `TaskFailure` from the store
-        is raised, not caught here: `write_report` turns lost data into a degraded report.
+        is raised: `write_report` records it and writes the rest of the report anyway.
         """
         receipts = [
             pointer for subtask, pointer in completed if subtask.role is AgentRole.VISUALIZATION
@@ -158,7 +171,8 @@ class Aggregator:
 
         Returns:
             The report, or `None` when every attempt gave nothing usable — a refusal, a
-            truncated reply, or figures citing no artifact of this run.
+            truncated reply, or figures citing no artifact of this run. The rejection is
+            dropped rather than recorded: that is a degraded report, not a failed run (#8).
         """
         briefing = await self._briefing(state.user_request, completed)
 
@@ -167,7 +181,7 @@ class Aggregator:
             figures = state.backed_figures(_key_figures(draft))
             if draft.key_figures and not figures:
                 # Every number it cited traces to nothing, so its summary is no better read.
-                raise ValueError(
+                raise Rejected(
                     "None of those figures cite an artifact this run produced. Cite only the "
                     "`artifact:` pointers shown in the briefing, copied exactly, and drop any "
                     "figure you cannot source to one."

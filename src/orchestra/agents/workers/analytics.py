@@ -10,13 +10,14 @@ that agent: its executor, its artifact, and what "computed nothing" means.
 **One artifact**, like retrieval's: numbers and the scripts behind them under the single
 pointer `Worker.run` returns, as JSON so the aggregator and #7 read it with `json.loads`.
 
-**Every figure leads.** The aggregator sees a *preview*, so field order is a budget —
-see `AnalysisResult`.
+**Every figure leads, and cites.** Each number is recorded against the artifact its script
+read, so the report cites what was computed rather than what the aggregator guessed (#9).
+The aggregator sees a *preview*, so field order is a budget — see `AnalysisResult`.
 """
 
 import asyncio
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from orchestra.agents.workers.tool_loop import (
     DEFAULT_MAX_TURNS,
@@ -26,7 +27,7 @@ from orchestra.agents.workers.tool_loop import (
 from orchestra.artifacts import ArtifactStore
 from orchestra.core.errors import TaskFailure
 from orchestra.core.events import Broker
-from orchestra.core.state import ArtifactPointer, SubtaskContext, TaskEvent
+from orchestra.core.state import ArtifactPointer, KeyFigure, SubtaskContext, TaskEvent
 from orchestra.prompts import ANALYTICS_SYSTEM_PROMPT
 from orchestra.providers.base import Provider
 from orchestra.tools.base import BaseTool, ToolCall, ToolResponse
@@ -51,12 +52,14 @@ class AnalysisResult(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     # Field order is load-bearing. The aggregator (#8) sees `ArtifactStore.preview`, which
-    # elides past 800 characters — less than one escaped pandas script — so *every* output
-    # goes ahead of *any* script. `figures` guarantees the numbers survive; `computations`
-    # repeats them beside their code, which is provenance and may be elided. `instruction`
-    # is last, unlike `RetrievedDataset`: the aggregator already has the plan's.
+    # elides past 800 characters — less than one escaped pandas script — so *every* figure
+    # goes ahead of *any* script. A figure carries its source pointer as well as the number,
+    # so it spends more of that budget than the bare string it replaced: fewer fit, and
+    # leading is what keeps them. `computations` repeats each number beside its code, which
+    # is provenance and may be elided. `instruction` is last, unlike `RetrievedDataset`: the
+    # aggregator already has the plan's.
     summary: str
-    figures: list[str] = Field(default_factory=list)
+    figures: list[KeyFigure] = Field(default_factory=list)
     computations: list[Computation] = Field(default_factory=list)
     instruction: str
 
@@ -108,17 +111,23 @@ class AnalyticsWorker:
         # No split by tool name, unlike retrieval's two: one tool, so everything kept is a
         # script that ran and printed.
         computations = [_computation(outcome.call, outcome.response) for outcome in result.kept]
+        figures = [
+            figure
+            for outcome in result.kept
+            if (figure := _figure(outcome.call, outcome.response)) is not None
+        ]
 
         if not computations:
-            # A summary with no figures behind it is the invented answer the design
-            # forbids — better a failed subtask the report can name (§8).
+            # A summary with no computation behind it is the invented answer the design
+            # forbids — better a failed subtask the report can name (§8). On `computations`,
+            # not `figures`: a script that ran and printed is work done, unsourced or not.
             raise TaskFailure(
                 f"Analysis for {context.subtask.id!r} finished without computing anything."
             )
 
         analysis = AnalysisResult(
             summary=result.summary,
-            figures=[item.stdout for item in computations],
+            figures=figures,
             computations=computations,
             instruction=context.subtask.instruction,
         )
@@ -136,3 +145,19 @@ def _computation(call: ToolCall, response: ToolResponse) -> Computation:
     the tool accepted the call; recording it is not worth a second validation pass.
     """
     return Computation(stdout=response.content, code=str(call.arguments.get("code", "")))
+
+
+def _figure(call: ToolCall, response: ToolResponse) -> KeyFigure | None:
+    """Pair a script's output with the artifact it read — the first pointer in `inputs`.
+
+    `None` when the call named no readable one: a number whose provenance is missing is
+    dropped rather than sourced to a guess, which is what #9 exists to stop.
+    """
+    inputs = call.arguments.get("inputs")
+    first: object = inputs[0] if isinstance(inputs, list) and inputs else None
+    try:
+        # Validated, not trusted: `call.arguments` is model output, so the pointer's shape
+        # is checked here even though the tool accepted the call (§7).
+        return KeyFigure.model_validate({"value": response.content, "source": first})
+    except ValidationError:
+        return None

@@ -78,7 +78,8 @@ class Orchestra:
 
         Raises:
             TaskFailure: planning failed — an execution failure does *not* reach here.
-            ProviderError: the provider failed while planning or synthesising.
+            ProviderError: the provider failed while planning. One that fails the
+                synthesis is recorded on the ledger instead (`agents/aggregator.py`).
         """
         state = TaskState(user_request=prompt, artifact_dir=self._artifact_dir)
         await self._planner.create_plan(state)

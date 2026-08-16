@@ -23,7 +23,7 @@ from orchestra.agents.workers.base import Worker
 from orchestra.agents.workers.stub import EchoWorker
 from orchestra.agents.workers.visualization import VisualizationResult
 from orchestra.artifacts import DEFAULT_PREVIEW_LIMIT, ArtifactStore
-from orchestra.core.errors import ProviderError
+from orchestra.core.errors import ProviderError, TaskFailure
 from orchestra.core.events import Broker
 from orchestra.core.state import (
     ARTIFACT_PREFIX,
@@ -378,20 +378,27 @@ async def test_write_report_takes_the_last_visualization_when_a_plan_draws_twice
 
 
 @pytest.mark.asyncio
-async def test_write_report_degrades_when_the_visualization_receipt_is_gone(
-    store: ArtifactStore,
+async def test_write_report_degrades_only_the_chart_when_the_receipt_cannot_be_read(
+    store: ArtifactStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The receipt is read, not previewed, so its loss is lost data — but the run keeps
-    its report, chartless, and is marked failed."""
+    """The receipt is read whole and the briefing reads previews, so the receipt's read can
+    fail alone. It costs the chart, not the answer: the artifacts the summary is written
+    from are all still readable, and skipping synthesis would throw away a paid-for run."""
     state = _finished_run(store)
-    store.path_for(state.artifacts["chart"]).unlink()
-    provider = FakeProvider(responses=[_draft()])
+
+    def unreadable(pointer: str) -> str:
+        raise TaskFailure(f"Artifact not found: {pointer!r}")
+
+    monkeypatch.setattr(store, "get_text", unreadable)
+    draft = _draft()
+    provider = FakeProvider(responses=[draft])
 
     report = await Aggregator(provider, store).write_report(state)
 
     assert state.final_result is report
     assert (report.chart, report.chart_ascii) == (None, None)
-    assert provider.calls == []  # the read failed before the synthesis was paid for
+    assert report.executive_summary == draft.executive_summary  # the summary survives
+    assert len(provider.calls) == 1  # the synthesis was not skipped with it
     assert state.failed
     assert "Artifact not found" in (state.failure_reason or "")
 

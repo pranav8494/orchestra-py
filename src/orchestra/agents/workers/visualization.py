@@ -2,7 +2,8 @@
 
 **No tool loop.** Retrieval and analysis need tools because they act on the world; this
 step is one shaped answer — pick the chart, name the points — so it is one
-`parse_structured` call, the planner's shape rather than the analytics agent's.
+`parse_validated` call, up to three requests, the planner's shape rather than the
+analytics agent's.
 
 **Two renderings, one artifact.** A chart file to open and a text chart to print are the
 same deliverable, and the ledger records one pointer per subtask. So the pointer names a

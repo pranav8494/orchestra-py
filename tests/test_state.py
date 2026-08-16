@@ -110,6 +110,16 @@ def test_key_figure_rejects_a_source_that_is_not_a_pointer() -> None:
         KeyFigure(label="Q3 growth", value="10.7%", source="the analytics step")
 
 
+def test_key_figure_without_a_label_is_backed_by_the_run_that_produced_its_source() -> None:
+    """A worker records `{value, source}` and no label — the report's wording is the
+    aggregator's — and the ledger backs such a figure like any other (#9)."""
+    figure = KeyFigure(value="10.7%", source="artifact:growth.md")
+    state = TaskState(user_request=REQUEST, artifacts={"analyse": "artifact:growth.md"})
+
+    assert figure.label == ""
+    assert state.backed_figures([figure]) == [figure]
+
+
 def test_final_report_rejects_a_chart_that_is_not_a_pointer() -> None:
     with pytest.raises(ValidationError):
         FinalReport(executive_summary="Revenue grew.", chart="/tmp/trend.html")
@@ -289,3 +299,5 @@ def test_state_slice_with_missing_input_raises_task_failure() -> None:
 
     assert "revenue" in str(exc_info.value)
     assert exc_info.value.exit_code == ExitCode.TASK_FAILURE
+    # The same slice fails the same way next time, so the engine must not spend a step on it.
+    assert not exc_info.value.retryable

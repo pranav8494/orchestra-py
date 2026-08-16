@@ -6,12 +6,13 @@ nothing validates — never about the model's judgement.
 """
 
 import asyncio
+from collections.abc import Callable, Sequence
 
 import pytest
 from pydantic import BaseModel
 
 from conftest import FakeProvider
-from orchestra.agents.structured import DEFAULT_MAX_RETRIES, parse_validated
+from orchestra.agents.structured import DEFAULT_MAX_RETRIES, Rejected, parse_validated
 from orchestra.core.errors import ProviderError
 from orchestra.providers.base import MessageRole, ProviderMessage
 
@@ -29,17 +30,27 @@ class _Draft(BaseModel):
 def _positive(draft: _Draft) -> int:
     """The caller's conversion: shape is pydantic's, the rule is the caller's."""
     if draft.value <= 0:
-        raise ValueError(f"value must be positive, got {draft.value}")
+        raise Rejected(f"value must be positive, got {draft.value}")
     return draft.value
 
 
-async def _parse(provider: FakeProvider, **overrides: int) -> tuple[int | None, str]:
+def _briefing() -> list[ProviderMessage]:
+    return [ProviderMessage(role=MessageRole.USER, content=BRIEFING)]
+
+
+async def _parse(
+    provider: FakeProvider,
+    *,
+    messages: Sequence[ProviderMessage] | None = None,
+    validate: Callable[[_Draft], int] = _positive,
+    **overrides: int,
+) -> tuple[int | None, str]:
     return await parse_validated(
         provider=provider,
         system=SYSTEM,
-        messages=[ProviderMessage(role=MessageRole.USER, content=BRIEFING)],
+        messages=_briefing() if messages is None else messages,
         output_format=_Draft,
-        validate=_positive,
+        validate=validate,
         instruction=INSTRUCTION,
         **overrides,
     )
@@ -122,6 +133,37 @@ async def test_parse_validated_with_negative_retries_rejects_the_wiring() -> Non
         await _parse(provider, max_retries=-1)
 
     assert provider.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [TypeError, ValueError], ids=["type-error", "value-error"])
+async def test_parse_validated_propagates_a_programmer_error_from_validate(
+    error: type[Exception],
+) -> None:
+    """Only `Rejected` and `ValidationError` are model output. A plain `ValueError` — a bad
+    `int()`, an unknown enum member — is a bug, and feeding it back costs two extra calls."""
+    provider = FakeProvider(responses=[_Draft(value=3)])
+
+    def broken(draft: _Draft) -> int:
+        raise error("validate is wired wrong")
+
+    with pytest.raises(error, match="wired wrong"):
+        await _parse(provider, validate=broken)
+
+    assert len(provider.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_parse_validated_leaves_the_caller_s_messages_unmutated() -> None:
+    """Retry turns go on a copy: a caller reusing its list would re-send the rejections."""
+    provider = FakeProvider(responses=[_Draft(value=-1), _Draft(value=4)])
+    messages = _briefing()
+
+    value, _ = await _parse(provider, messages=messages)
+
+    assert value == 4
+    assert len(provider.calls[1].messages) == 2  # the retry turn was added somewhere
+    assert messages == _briefing()  # but not to what the caller passed
 
 
 @pytest.mark.asyncio

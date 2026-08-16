@@ -158,8 +158,12 @@ async def test_loop_still_calling_tools_at_the_turn_cap_fails_with_its_label() -
     )
     tool = FakeTool(LOOKUP, [ToolResponse(content="ok") for _ in range(2)])
 
-    with pytest.raises(TaskFailure, match=r"Analysis for 'analyse_trend' .* after 2 turns"):
+    capped = r"Analysis for 'analyse_trend' .* after 2 turns"
+    with pytest.raises(TaskFailure, match=capped) as bound:
         await _loop(provider, [tool], max_turns=2).run(_context())
+
+    # Re-dispatching runs the same input to the same bound, at three times the cost (§10).
+    assert not bound.value.retryable
 
 
 @pytest.mark.asyncio
@@ -173,8 +177,11 @@ async def test_loop_over_its_token_budget_fails_with_its_label() -> None:
     )
     tool = FakeTool(LOOKUP, [ToolResponse(content="ok")])
 
-    with pytest.raises(TaskFailure, match="Analysis for 'analyse_trend' spent its 100-token"):
+    with pytest.raises(TaskFailure, match="spent its 100-token") as bound:
         await _loop(provider, [tool], token_budget=100).run(_context())
+
+    assert "Analysis for 'analyse_trend'" in str(bound.value)
+    assert not bound.value.retryable
 
 
 @pytest.mark.asyncio
@@ -192,11 +199,15 @@ async def test_loop_repeating_one_call_and_result_fails_before_the_turn_cap() ->
     )
     tool = FakeTool(LOOKUP, [ToolResponse(content="same") for _ in range(6)])
 
-    with pytest.raises(TaskFailure, match=r"Analysis for .* the same lookup call for the same"):
+    looped = r"Analysis for .* the same lookup call for the same"
+    with pytest.raises(TaskFailure, match=looped) as bound:
         await _loop(provider, [tool]).run(_context())
 
     # Tripped on the sixth call, so the third turn was never answered.
     assert len(tool.calls) == 6
+    # The sharpest of the four: the detector is rebuilt per dispatch, so a retry pays the
+    # whole `max_turns` again to abort in exactly the same place.
+    assert not bound.value.retryable
 
 
 @pytest.mark.asyncio
@@ -228,8 +239,11 @@ async def test_loop_with_a_truncated_reply_fails_with_its_label() -> None:
         turns=[AssistantTurn(text="I was about to sa", usage_tokens=10, stop_reason="max_tokens")]
     )
 
-    with pytest.raises(TaskFailure, match=r"Analysis for .* cut off by the model's output limit"):
+    cut_off = r"Analysis for .* cut off by the model's output limit"
+    with pytest.raises(TaskFailure, match=cut_off) as bound:
         await _loop(provider, [FakeTool(LOOKUP, [])]).run(_context())
+
+    assert not bound.value.retryable
 
 
 @pytest.mark.asyncio

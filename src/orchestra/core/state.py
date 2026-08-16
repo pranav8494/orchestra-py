@@ -62,8 +62,9 @@ class EventKind(StrEnum):
 
     PLAN_CREATED = "plan_created"
     SUBTASK_STARTED = "subtask_started"
-    # Succeeded, but degraded — a backend fell back. An event, not a fourth
-    # `SubtaskStatus`, so consumers read it as a note on a normal outcome.
+    # A note on a step, not a transition: it degraded (a backend fell back), or an attempt
+    # failed and will be retried. Never a status, so a consumer keeps its own — but a
+    # retry notice is only about the attempt that raised it, and does not outlive it.
     SUBTASK_WARNING = "subtask_warning"
     SUBTASK_COMPLETED = "subtask_completed"
     SUBTASK_FAILED = "subtask_failed"
@@ -174,15 +175,18 @@ class SubtaskContext(BaseModel):
 
 
 class KeyFigure(BaseModel):
-    """One number the report states, and the artifact it was read from.
+    """One number, and the artifact it was read from.
 
     `source` is a pointer, not free text: it lets the aggregator drop a figure this run
-    never produced.
+    never produced. One type for both ends — a worker records the number as it computed it,
+    the aggregator states it (§1.5).
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    label: str
+    # Empty as a worker records it: the label is the report's wording, added by the
+    # aggregator. `FigureDraft.label` keeps `min_length=1`, so a reported figure has one.
+    label: str = ""
     value: str  # str, not float: "12.4% QoQ" and "$1.2M" are both figures a report states
     source: ArtifactPointer
 
@@ -214,7 +218,8 @@ class TaskState(BaseModel):
     artifact_dir: Path | None = None
     plan: Plan | None = None
     # Display counter for "Step X of N" only: the plan is a DAG, so under concurrent
-    # dispatch there is no single step the run is "at".
+    # dispatch there is no single step the run is "at". Counts attempts, so a run with
+    # retries in it goes past N.
     current_step: int = Field(default=0, ge=0)
     artifacts: dict[str, ArtifactPointer] = Field(default_factory=dict)  # producer id -> pointer
     events: list[TaskEvent] = Field(default_factory=list)
@@ -261,8 +266,10 @@ class TaskState(BaseModel):
         """
         missing = sorted(set(subtask.inputs) - self.artifacts.keys())
         if missing:
+            # Not retryable: re-dispatching slices the same ledger to the same verdict.
             raise TaskFailure(
-                f"subtask {subtask.id!r} needs artifacts {missing}, which no step has produced"
+                f"subtask {subtask.id!r} needs artifacts {missing}, which no step has produced",
+                retryable=False,
             )
         return SubtaskContext(
             user_request=self.user_request,
