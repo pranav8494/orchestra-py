@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import pytest
-from rich.console import Group
+from rich.console import Group, RenderableType
 from rich.live import Live
 from rich.panel import Panel
 from rich.spinner import Spinner
@@ -370,6 +370,77 @@ def test_dashboard_frame_grows_to_three_panels_and_keeps_them() -> None:
     assert [type(part) for part in finished.renderables] == [Table, Panel]
 
 
+def _log_lines(frame: RenderableType) -> list[str]:
+    """The Events panel's lines, or `[]` if the frame has no Events panel."""
+    assert isinstance(frame, Group)
+    panels = [part for part in frame.renderables if isinstance(part, Panel)]
+    events = [panel for panel in panels if panel.title == "Events"]
+    return str(events[0].renderable).splitlines() if events else []
+
+
+def _long_run() -> RunView:
+    """Eight subtasks and a full log — the shape that overran a 24-line terminal."""
+    plan = Plan(
+        subtasks=[
+            Subtask(id=f"step{index}", role=AgentRole.ANALYTICS, instruction="Work")
+            for index in range(8)
+        ]
+    )
+    view = RunView()
+    view.apply(_plan_created(plan))
+    for index in range(EVENT_LOG_LINES):
+        view.apply(
+            TaskEvent(kind=EventKind.SUBTASK_WARNING, subtask_id="step0", message=str(index))
+        )
+    return view
+
+
+def test_dashboard_frame_without_a_height_keeps_the_whole_log() -> None:
+    """`None` is unbounded: nothing but a real terminal has a height to fit."""
+    assert len(_log_lines(dashboard_frame(_long_run()))) == EVENT_LOG_LINES
+
+
+def test_dashboard_frame_trims_the_log_to_fit_a_short_terminal() -> None:
+    """Each part is bounded but the sum was not, so an 8-step plan overran a 24-line
+    terminal and Rich cropped the frame from the bottom (#39). The log gives way: the
+    table is the deliverable."""
+    view = _long_run()
+
+    frame = dashboard_frame(view, height=24)
+
+    # 8 rows + 5 of table chrome + the idle active panel's 3 = 16, leaving 8 for the
+    # Events panel: 6 lines inside its 2 borders.
+    assert len(_log_lines(frame)) == 6
+    assert _log_lines(frame)[-1].endswith(str(EVENT_LOG_LINES - 1))  # the newest survive
+
+
+def test_dashboard_frame_drops_the_log_when_the_plan_alone_fills_the_terminal() -> None:
+    """A two-line box with nothing in it is worse than no box: the table has to fit."""
+    frame = dashboard_frame(_long_run(), height=16)
+
+    assert _log_lines(frame) == []
+    assert isinstance(frame, Group)
+    assert [type(part) for part in frame.renderables] == [Table, Panel]  # table + active
+
+
+def test_dashboard_frame_drops_the_active_panel_once_the_stream_detaches() -> None:
+    """Ctrl-C cancels the steps rather than failing them, so the rows still read
+    `running`. Animating them in the frame Ctrl-C freezes would claim work that stopped
+    (#39)."""
+    view = _seeded_view()
+    view.apply(_started("fetch"))
+    running = dashboard_frame(view)
+    assert isinstance(running, Group)
+    assert [type(part) for part in running.renderables] == [Table, Panel, Panel]
+
+    view.stopped = True
+    frame = dashboard_frame(view)
+
+    assert view.active  # the ledger still says so — it is the drawing that must not
+    assert isinstance(frame, Group)
+    assert [type(part) for part in frame.renderables] == [Table, Panel]  # table + events
+
+
 def test_event_line_collapses_a_multi_line_message_onto_one_line() -> None:
     """Regression: `engine.py` publishes `subtask_failed` with `str(exc)`, and
     `str(ValidationError)` is multi-line. An embedded newline defeats every `no_wrap`
@@ -711,6 +782,27 @@ async def test_dashboard_reports_a_ticker_that_died_instead_of_losing_it(
     assert captured.out == ""  # a diagnostic, so stderr only (§5)
     assert "The dashboard stopped: ticker bug" in captured.err
     assert _pending_tasks() == []
+
+
+@pytest.mark.asyncio
+async def test_dashboard_marks_the_view_stopped_so_the_last_frame_does_not_animate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Teardown paints one more frame before the region is exited (#39). The ticker stops
+    with it, or it would keep refreshing a run that is over."""
+    monkeypatch.setattr(render, "SPINNER_TICK_SECONDS", 0.001)
+    broker: Broker[TaskEvent] = Broker()
+
+    async with dashboard(broker, mode=RenderMode.LIVE) as view:
+        await broker.publish_lifecycle(_plan_created())
+        await broker.publish_lifecycle(_started("fetch"))
+        await wait_until(lambda: bool(view.active), what="the step to show as running")
+
+    assert view.stopped
+    assert view.active  # the rows are untouched; only the drawing gives up on them
+    frame = dashboard_frame(view)
+    assert isinstance(frame, Group)
+    assert [type(part) for part in frame.renderables] == [Table, Panel]
 
 
 @pytest.mark.asyncio

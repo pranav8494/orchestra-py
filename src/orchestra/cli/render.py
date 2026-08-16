@@ -92,6 +92,14 @@ _WARNING_STYLE = "yellow"
 # panel that comes and goes resizes the region on each one.
 _IDLE_LINE = "waiting for the next step"
 
+# What each part costs in rows beyond its content, for the height budget in
+# `dashboard_frame`. A panel is two borders; `run_table` is its title, two borders, the
+# header and the rule under it. Counted rather than measured: `Console.measure` gives a
+# width, and rendering a frame to find out how tall it is to decide what to put in it is
+# a loop. An estimate one row out costs one log line.
+_PANEL_CHROME = 2
+_TABLE_CHROME = 5
+
 
 def _one_line(message: str) -> str:
     """`message` with its whitespace collapsed onto one line.
@@ -144,7 +152,11 @@ class RunView:
     """The run as a subscriber can know it. Rich-free: this is what tests assert on (§12)."""
 
     headline: str = PLANNING_HEADLINE
+    # The engine's verdict arrived.
     finished: bool = False
+    # The stream detached — the run was cancelled, or the observer was torn down around a
+    # run that raised. Distinct from `finished`: there is no verdict, only an end.
+    stopped: bool = False
     # Insertion order is plan order, seeded from `Plan.subtasks` in one pass. Keyed by id
     # because every later event names a subtask, not a position.
     rows: dict[str, RunRow] = field(default_factory=dict)
@@ -160,6 +172,17 @@ class RunView:
         A list, not a count: concurrent subtasks have to be individually visible (#17).
         """
         return [row for row in self.rows.values() if row.status is SubtaskStatus.RUNNING]
+
+    @property
+    def resting(self) -> bool:
+        """Is the run over, as far as this view can know?
+
+        Either the engine gave its verdict or the stream detached. Nothing animates past
+        this: on Ctrl-C the rows are still `running` — the engine cancelled them, it did
+        not fail them — so a spinner in the last painted frame would claim work that
+        stopped happening (#39).
+        """
+        return self.finished or self.stopped
 
     def apply(self, event: TaskEvent) -> None:
         """Fold one event into the view.
@@ -268,32 +291,43 @@ def active_panel(view: RunView) -> Panel:
     return Panel(grid, title="Active", title_align="left")
 
 
-def event_log(view: RunView) -> Panel:
-    """The last `EVENT_LOG_LINES` events, oldest first. Pure — no console, no I/O.
+def event_log(view: RunView, *, lines: int = EVENT_LOG_LINES) -> Panel:
+    """The last `lines` events, oldest first. Pure — no console, no I/O.
 
     Elided, not wrapped, for the same reason as the table's detail column: a reflowed
     line changes the region's height and scrolls the frames above it off screen. That
     holds only because `event_line` collapses the message to one line first.
     """
+    shown = list(view.log)[-lines:] if lines else []
     return Panel(
-        Text("\n".join(event_line(event) for event in view.log), no_wrap=True, overflow="ellipsis"),
+        Text("\n".join(event_line(event) for event in shown), no_wrap=True, overflow="ellipsis"),
         title="Events",
         title_align="left",
     )
 
 
-def dashboard_frame(view: RunView) -> RenderableType:
+def dashboard_frame(view: RunView, *, height: int | None = None) -> RenderableType:
     """The whole `Live` region: the plan, who is working, and what just happened.
 
     The panels appear once there is a run to describe and then stay, even between steps:
     a box that comes and goes costs a region resize per handoff, which is worse than an
-    idle line saying so.
+    idle line saying so. Both go once the run is `resting` — a finished or abandoned run
+    has nothing working, and the last frame must not say otherwise.
+
+    `height` is the terminal's, when there is one. Each part is bounded on its own but the
+    sum is not, so a tall plan overran a short terminal and Rich cropped the frame from
+    the bottom (#39). The log is what gives way: the table is the deliverable and the
+    active panel is the smaller of the two. `None` leaves it unbounded.
     """
     parts: list[RenderableType] = [run_table(view)]
-    if view.rows and not view.finished:
+    spent = len(view.rows) + _TABLE_CHROME
+    if view.rows and not view.resting:
         parts.append(active_panel(view))
+        spent += max(1, len(view.active)) + _PANEL_CHROME
     if view.log:
-        parts.append(event_log(view))
+        budget = EVENT_LOG_LINES if height is None else height - spent - _PANEL_CHROME
+        if (lines := max(0, min(EVENT_LOG_LINES, budget))) > 0:
+            parts.append(event_log(view, lines=lines))
     return Group(*parts)
 
 
@@ -428,17 +462,28 @@ async def _consume(
             await _pump(queue, view, _write_line)
             return
 
+        # Read per frame, not once: a terminal resized mid-run has to be picked up, and
+        # `Console.size` is an `ioctl` against a run whose steps take seconds.
+        def frame() -> RenderableType:
+            return dashboard_frame(view, height=err_console.size.height)
+
         # One `Live`, on stderr (§5). `auto_refresh=False` keeps Rich's refresh thread out
         # of the event loop; refreshing per event is cheaper and prompter than its 4/s.
-        with Live(dashboard_frame(view), console=err_console, auto_refresh=False) as live:
+        with Live(frame(), console=err_console, auto_refresh=False) as live:
 
             def redraw(_event: TaskEvent) -> None:
-                live.update(dashboard_frame(view), refresh=True)
+                live.update(frame(), refresh=True)
 
             spinner = asyncio.create_task(_spin(live, view), name=SPINNER_TASK_NAME)
             try:
                 await _pump(queue, view, redraw)
             finally:
+                # One last frame, first: the stream is detached, so whatever the rows still
+                # say, nothing is running — and a spinner left in the region Ctrl-C freezes
+                # would claim otherwise (#39). Best-effort, like every other write here.
+                view.stopped = True
+                with suppress(OSError):
+                    live.update(frame(), refresh=True)
                 # Read before the cancel: `Task.cancel()` clears the unretrieved-exception
                 # flag even on a task that is already done, so a ticker that raised would
                 # otherwise go unreported. Inside the `with`, because Rich prints above a
@@ -462,7 +507,7 @@ async def _spin(live: Live, view: RunView) -> None:
     """
     while True:
         await asyncio.sleep(SPINNER_TICK_SECONDS)
-        if view.active:
+        if view.active and not view.resting:
             with suppress(OSError):
                 live.refresh()
 
