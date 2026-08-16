@@ -35,19 +35,19 @@ pytestmark = [
     pytest.mark.skipif(CONFIG is None, reason="the live report run needs ANTHROPIC_API_KEY"),
 ]
 
-# A model writes "$1.15M" for 1,153,000, so asserting the value as a substring would be
-# flaky. Both sides are reduced to significant digits instead — separators, currency and
-# scale suffixes drop out, and the digits themselves still have to come from the artifact.
-# Grouped form first, and only in threes: a looser comma rule reads a CSV row as one
-# number. A row the model itself printed, "Q2,576,441", still reads as one; the cost is a
-# false failure on a paid run, not a figure let through.
-_NUMBER = re.compile(r"\d{1,3}(?:,\d{3})+(?:\.\d+)?(?!\d)|\d+(?:\.\d+)?")
+# A model writes "$1.2M" for 1,153,000, so a substring assertion would be flaky. Both sides
+# are read as numbers instead, and compared at the precision the figure was written to.
+# The leading guard drops a digit that follows a letter, so the "3" of "2024Q3" is a label
+# rather than a number a figure may claim to have computed.
+_NUMBER = re.compile(
+    r"(?<![A-Za-z\d])(\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)\s*(%|bn|[KMB])?", re.IGNORECASE
+)
+_SCALE = {"k": 1e3, "m": 1e6, "b": 1e9, "bn": 1e9}
 
-# Below this a run is too short to tell a reading from a coincidence — two digits
-# prefix-match something in any artifact holding thirty numbers — so it is demanded whole
-# instead. The price is that "$1.2M" fails against 1,153,000 where "$1.15M" passes: at two
-# digits, rounding and accident are the same evidence, and this asserts against invention.
-_MIN_SIGNIFICANT = 3
+# A percentage stated in points against an artifact holding the fraction, or the reverse.
+# The only rescaling allowed: without it 23.4% would not meet 0.2343, and with anything
+# looser "$5.76B" would meet 5,760,000.
+_FACTORS = (1.0, 100.0, 0.01)
 
 
 @pytest.mark.asyncio
@@ -126,33 +126,31 @@ def _traces_to(value: str, payload: str) -> bool:
     """Does `payload` hold every number `value` states?
 
     Every, not any: a figure pairing one real number with one invented one is exactly the
-    hallucination this asserts against. Short runs are checked only where the figure states
-    nothing longer, so "3 quarters" beside a real total does not fail the run — and where
-    they are checked, a small count still meets a quarter label, which is the residual.
+    hallucination this asserts against.
     """
-    stated, found = _digit_runs(value), _digit_runs(payload)
-    significant = [run for run in stated if len(run) >= _MIN_SIGNIFICANT]
-    if not significant:
-        return bool(stated) and all(run in found for run in stated)
-    return all(any(_reads_as(item, run) for item in found) for run in significant)
+    stated = _numbers(value)
+    found = [number for number, _ in _numbers(payload)]
+    return bool(stated) and all(
+        any(_reads_as(item, number, tolerance) for item in found) for number, tolerance in stated
+    )
 
 
-def _digit_runs(text: str) -> list[str]:
-    """Every number in `text` as its mantissa: "1,234.50" and "123450" both -> "12345".
+def _numbers(text: str) -> list[tuple[float, float]]:
+    """Every number in `text` with the tolerance its own precision allows.
 
-    Scale goes with the separators, which is what lets "$5.76M" meet 5,760,000 — and the
-    price is that it also meets 5.76, so this proves the digits, not the magnitude.
+    "$1.2M" is 1,200,000 give or take 50,000, so it meets 1,153,000; "$1.15M" is the same
+    number to 5,000, so it does not meet 1,100,000. Writing a figure more precisely is
+    claiming more, and this holds it to the claim.
     """
-    runs = (re.sub(r"\D", "", match.group()).strip("0") for match in _NUMBER.finditer(text))
-    # A figure of zero states a number; without this it would state none and fail as if it
-    # had cited nothing.
-    return [run or "0" for run in runs]
+    numbers = []
+    for match in _NUMBER.finditer(text):
+        digits, suffix = match.group(1), (match.group(2) or "").lower()
+        scale = _SCALE.get(suffix, 1.0)
+        decimals = len(digits.partition(".")[2])
+        numbers.append((float(digits.replace(",", "")) * scale, 0.5 * 10**-decimals * scale))
+    return numbers
 
 
-def _reads_as(found: str, stated: str) -> bool:
-    """Is `stated` how `found` reads at `stated`'s precision?"""
-    if len(found) < len(stated):
-        return False
-    head, rest = found[: len(stated)], found[len(stated) :]
-    # Second branch: 1,153,000 reported as "$1.2M" is rounded, not invented.
-    return head == stated or (rest[:1] >= "5" and str(int(head) + 1).zfill(len(stated)) == stated)
+def _reads_as(found: float, stated: float, tolerance: float) -> bool:
+    """Is `stated` how `found` reads, to `tolerance`?"""
+    return any(abs(found * factor - stated) <= tolerance for factor in _FACTORS)
