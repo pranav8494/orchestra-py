@@ -11,6 +11,10 @@ pairs a prompt with the shape it must produce:
 
 Shapes are stated in roles and edges, never ids, so the same assertion holds for a canned
 draft and for whatever a live model names its steps.
+
+`fan_out` names two subjects held in two places. The planner is told what the team can
+retrieve (#10), so a prompt whose halves are two ranges of one CSV is legitimately one
+step — the split has to come from the request, not from the phrasing.
 """
 
 import itertools
@@ -19,6 +23,31 @@ from dataclasses import dataclass
 
 from orchestra.agents.planner import PlannerAction, PlannerDraft, SubtaskDraft
 from orchestra.core.state import AgentRole, Plan, Subtask
+
+# An exact count, or a range of permitted ones. Exact everywhere the scenario dictates the
+# shape; a range only for how finely the model divides one role's work.
+type Count = int | range
+
+
+def _holds(actual: int, expected: Count) -> bool:
+    """Does `actual` satisfy an exact count or a permitted range?"""
+    return actual == expected if isinstance(expected, int) else actual in expected
+
+
+def _describe(expected: Count) -> str:
+    """A count as failure-message text: `"3"`, or `"4 to 5"` for a range."""
+    if isinstance(expected, int):
+        return str(expected)
+    return f"{_lowest(expected)} to {_highest(expected)}"
+
+
+# Indexed, not `start`/`stop`: a stepped range's `stop - 1` is a count it can never hold.
+def _lowest(expected: Count) -> int:
+    return expected if isinstance(expected, int) else expected[0]
+
+
+def _highest(expected: Count) -> int:
+    return expected if isinstance(expected, int) else expected[-1]
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,13 +59,17 @@ class PlanShape:
         role_counts: subtasks per role. Every `AgentRole` must appear; an absent role is
             stated as `0`, which is the assertion role_omission turns on.
         precedes: `(earlier, later)` pairs; every `later` subtask must transitively depend
-            on every `earlier` one.
-        concurrent: a role whose subtasks must be pairwise independent. `None` where the
-            role has one subtask.
+            on at least one `earlier` one. "At least one" rather than "all": where a role
+            has several subtasks they are separate pieces of work, and a chart drawn from
+            one of them is not missing the others.
+        concurrent: a role whose subtasks must be pairwise independent, and which must
+            reconverge — some later subtask depending on all of them. Without the second
+            half, two branches that never meet would also pass. `None` where the role has
+            one subtask.
     """
 
-    steps: int
-    role_counts: Mapping[AgentRole, int]
+    steps: Count
+    role_counts: Mapping[AgentRole, Count]
     precedes: tuple[tuple[AgentRole, AgentRole], ...]
     concurrent: AgentRole | None = None
 
@@ -45,10 +78,10 @@ class PlanShape:
         count would accept plans they should reject."""
         if set(self.role_counts) != set(AgentRole):
             raise ValueError("every role needs a count, including the roles that must be absent")
-        if sum(self.role_counts.values()) != self.steps:
-            raise ValueError(
-                f"role counts sum to {sum(self.role_counts.values())}, not {self.steps}"
-            )
+        for bound in (_lowest, _highest):
+            total = sum(bound(count) for count in self.role_counts.values())
+            if total != bound(self.steps):
+                raise ValueError(f"role counts allow {total} subtasks, not {bound(self.steps)}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,34 +124,34 @@ def linear_draft() -> PlannerDraft:
 
 
 def fan_out_draft() -> PlannerDraft:
-    """Two retrievals, a comparison, then a chart. The missing edge between the retrievals
-    is what lets the engine run them at once."""
+    """Our figures and the industry's, then a comparison, then a chart. The missing edge
+    between the retrievals is what lets the engine run them at once."""
     return PlannerDraft(
         action=PlannerAction.PLAN,
         subtasks=[
             SubtaskDraft(
-                id="fetch_recent_quarters",
+                id="fetch_our_growth",
                 role=AgentRole.DATA_RETRIEVAL,
-                instruction="Load revenue for the last three quarters.",
+                instruction="Load revenue for the last three quarters from the financials.",
             ),
             SubtaskDraft(
-                id="fetch_prior_year_quarters",
+                id="fetch_industry_benchmarks",
                 role=AgentRole.DATA_RETRIEVAL,
-                instruction="Load revenue for the same three quarters of last year.",
+                instruction="Search for published growth benchmarks for comparable companies.",
             ),
             SubtaskDraft(
-                id="compare_quarters",
+                id="compare_against_benchmarks",
                 role=AgentRole.ANALYTICS,
-                instruction="Compute the year-over-year change for each of the three quarters.",
-                inputs=["fetch_recent_quarters", "fetch_prior_year_quarters"],
-                depends_on=["fetch_recent_quarters", "fetch_prior_year_quarters"],
+                instruction="Compute our quarterly growth and place it against the benchmarks.",
+                inputs=["fetch_our_growth", "fetch_industry_benchmarks"],
+                depends_on=["fetch_our_growth", "fetch_industry_benchmarks"],
             ),
             SubtaskDraft(
-                id="chart_comparison",
+                id="chart_growth_trend",
                 role=AgentRole.VISUALIZATION,
-                instruction="Plot both years' quarterly revenue as a grouped bar chart.",
-                inputs=["compare_quarters"],
-                depends_on=["compare_quarters"],
+                instruction="Plot the quarterly growth trend against the benchmark range.",
+                inputs=["compare_against_benchmarks"],
+                depends_on=["compare_against_benchmarks"],
             ),
         ],
     )
@@ -165,12 +198,14 @@ LINEAR = Scenario(
 
 FAN_OUT = Scenario(
     name="fan_out",
-    prompt="Compare the last 3 quarters against the same quarters last year and chart both",
+    prompt="Compare our last 3 quarters of revenue growth against industry benchmarks "
+    "and chart the trend",
     shape=PlanShape(
-        steps=4,
+        # Two retrievals and one chart, exactly; the comparison may be one step or two.
+        steps=range(4, 6),  # 4 or 5
         role_counts={
             AgentRole.DATA_RETRIEVAL: 2,
-            AgentRole.ANALYTICS: 1,
+            AgentRole.ANALYTICS: range(1, 3),
             AgentRole.VISUALIZATION: 1,
         },
         precedes=(
@@ -209,29 +244,37 @@ def assert_plan_shape(plan: Plan, shape: PlanShape) -> None:
     """Assert `plan` matches `shape`, rendering the offending plan when it does not."""
     rendered = _render(plan)
 
-    assert len(plan.subtasks) == shape.steps, (
-        f"expected {shape.steps} subtasks, got {len(plan.subtasks)}:\n{rendered}"
+    assert _holds(len(plan.subtasks), shape.steps), (
+        f"expected {_describe(shape.steps)} subtasks, got {len(plan.subtasks)}:\n{rendered}"
     )
 
     for role, expected in shape.role_counts.items():
         actual = len(with_role(plan, role))
-        assert actual == expected, f"expected {expected} {role} subtasks, got {actual}:\n{rendered}"
+        assert _holds(actual, expected), (
+            f"expected {_describe(expected)} {role} subtasks, got {actual}:\n{rendered}"
+        )
 
     ancestors = _ancestors(plan)
     for earlier, later in shape.precedes:
+        producers = {producer.id for producer in with_role(plan, earlier)}
         for consumer in with_role(plan, later):
-            for producer in with_role(plan, earlier):
-                assert producer.id in ancestors[consumer.id], (
-                    f"{consumer.id!r} ({later}) must run after {producer.id!r} ({earlier}), "
-                    f"directly or transitively:\n{rendered}"
-                )
+            assert ancestors[consumer.id] & producers, (
+                f"{consumer.id!r} ({later}) must run after a {earlier} subtask, directly or "
+                f"transitively:\n{rendered}"
+            )
 
     if shape.concurrent is not None:
-        for first, second in itertools.combinations(with_role(plan, shape.concurrent), 2):
+        branches = with_role(plan, shape.concurrent)
+        for first, second in itertools.combinations(branches, 2):
             assert second.id not in ancestors[first.id] and first.id not in ancestors[second.id], (
                 f"{first.id!r} and {second.id!r} are both {shape.concurrent} and need nothing "
                 f"from each other, so neither may depend on the other:\n{rendered}"
             )
+        branch_ids = {branch.id for branch in branches}
+        assert any(branch_ids <= ancestors[subtask.id] for subtask in plan.subtasks), (
+            f"the {shape.concurrent} subtasks fan out and never meet: no subtask depends on "
+            f"all of {sorted(branch_ids)}:\n{rendered}"
+        )
 
 
 def with_role(plan: Plan, role: AgentRole) -> list[Subtask]:
