@@ -5,6 +5,7 @@ from orchestra.prompts.analytics import SYSTEM_PROMPT as ANALYTICS_SYSTEM_PROMPT
 from orchestra.prompts.data_retrieval import SYSTEM_PROMPT as DATA_RETRIEVAL_SYSTEM_PROMPT
 from orchestra.prompts.planner import REFORMAT_INSTRUCTION as PLANNER_REFORMAT_INSTRUCTION
 from orchestra.prompts.planner import SYSTEM_PROMPT as PLANNER_SYSTEM_PROMPT
+from orchestra.prompts.visualization import SYSTEM_PROMPT as VISUALIZATION_SYSTEM_PROMPT
 
 __all__ = [
     "AGGREGATOR_SYSTEM_PROMPT",
@@ -12,4 +13,5 @@ __all__ = [
     "DATA_RETRIEVAL_SYSTEM_PROMPT",
     "PLANNER_REFORMAT_INSTRUCTION",
     "PLANNER_SYSTEM_PROMPT",
+    "VISUALIZATION_SYSTEM_PROMPT",
 ]

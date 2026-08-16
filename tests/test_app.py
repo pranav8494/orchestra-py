@@ -7,7 +7,9 @@ all of it — over `FakeProvider`, so no network (§12).
 Two structured calls per run, in order: the plan, then the report; `_responses()` queues
 both. Tests that build their own `Orchestra` use `EchoWorker` throughout, so a wiring
 failure stays distinguishable from an agent failure. The ones going through
-`build_orchestra` get the real #5 and #6 agents and so also queue `_turns()`.
+`build_orchestra` get the real #5-#7 agents and so also queue `_turns()`, plus `chart=True`
+when the run gets as far as the visualization step — #7 makes a structured call of its own,
+between those two.
 """
 
 import asyncio
@@ -30,8 +32,10 @@ from orchestra.agents.workers.analytics import AnalyticsWorker
 from orchestra.agents.workers.base import Worker
 from orchestra.agents.workers.data_retrieval import DataRetrievalWorker
 from orchestra.agents.workers.stub import EchoWorker
+from orchestra.agents.workers.visualization import ChartDraft
 from orchestra.app import Orchestra, build_orchestra, run_once
 from orchestra.artifacts import ArtifactStore
+from orchestra.charts import ChartKind, ChartSeries, ChartSpec
 from orchestra.config import Config
 from orchestra.core.errors import ProviderError
 from orchestra.core.events import Broker
@@ -47,16 +51,45 @@ SUMMARY = "Revenue grew in each of the last three quarters."
 # on a stale literal.
 FIRST_STEP = LINEAR.draft().subtasks[0].id
 FIRST_POINTER = f"artifact:{FIRST_STEP}.txt"
+CHART_STEP = next(
+    subtask.id for subtask in LINEAR.draft().subtasks if subtask.role is AgentRole.VISUALIZATION
+)
+# One category of `_chart_draft`'s spec, so the assertion tracks the fixture.
+CHART_CATEGORY = "2025Q3"
 
 
-def _responses(*, figure_source: str | None = None) -> list[BaseModel | BaseException | None]:
-    """The two answers a run consumes: the plan, then the report draft."""
+def _responses(
+    *, figure_source: str | None = None, chart: bool = False
+) -> list[BaseModel | BaseException | None]:
+    """The answers a run consumes, in order: the plan, the chart draft when the real
+    Visualization worker is wired in, then the report draft."""
     figures = (
         [FigureDraft(label="Q3 revenue", value="145", source=figure_source)]
         if figure_source is not None
         else []
     )
-    return [LINEAR.draft(), ReportDraft(executive_summary=SUMMARY, key_figures=figures)]
+    drafts = [_chart_draft()] if chart else []
+    return [
+        LINEAR.draft(),
+        *drafts,
+        ReportDraft(executive_summary=SUMMARY, key_figures=figures),
+    ]
+
+
+def _chart_draft() -> ChartDraft:
+    """A drawable chart for the plan's visualization step — two points, so the step
+    completes rather than degrading."""
+    return ChartDraft(
+        summary="Revenue rose in each quarter.",
+        spec=ChartSpec(
+            title="Quarterly revenue",
+            kind=ChartKind.LINE,
+            x_label="Quarter",
+            y_label="Revenue",
+            categories=[CHART_CATEGORY, "2025Q4"],
+            series=[ChartSeries(name="Revenue", values=[6_340_000.0, 7_015_000.0])],
+        ),
+    )
 
 
 # Run for real in a subprocess. Stdlib only: this proves the retrieval step's pointer
@@ -299,7 +332,7 @@ async def test_run_once_keeps_the_observer_attached_from_the_first_event_to_the_
 ) -> None:
     """The plan rides on the first event, so an observer entered late never learns the
     pending rows."""
-    provider = FakeProvider(responses=_responses(), turns=_turns())
+    provider = FakeProvider(responses=_responses(chart=True), turns=_turns())
     _offline_run(monkeypatch, tmp_path, provider)
     observer = RecordingObserver()
 
@@ -319,7 +352,7 @@ async def test_run_once_without_an_observer_runs_headless(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """The default path `cli/app.py` takes today: no subscriber, same ledger."""
-    provider = FakeProvider(responses=_responses(), turns=_turns())
+    provider = FakeProvider(responses=_responses(chart=True), turns=_turns())
     _offline_run(monkeypatch, tmp_path, provider)
 
     state = await run_once(LINEAR.prompt)
@@ -327,6 +360,27 @@ async def test_run_once_without_an_observer_runs_headless(
     assert state.final_result is not None
     assert not state.failed
     assert provider.closed
+
+
+@pytest.mark.asyncio
+async def test_run_once_carries_the_visualization_chart_into_the_report(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """#7's seam end to end: the worker draws and writes a receipt, the aggregator reads
+    both halves back out of it. Each half is covered alone elsewhere; only this proves
+    they meet."""
+    provider = FakeProvider(responses=_responses(chart=True), turns=_turns())
+    _offline_run(monkeypatch, tmp_path, provider)
+
+    state = await run_once(LINEAR.prompt)
+
+    report = state.final_result
+    assert report is not None
+    assert report.chart == f"artifact:{CHART_STEP}.html"
+    assert "<html" in ArtifactStore(tmp_path / "artifacts").get_text(report.chart)
+    # The drawing, not just a pointer to one: what the terminal prints is the criterion.
+    assert report.chart_ascii is not None
+    assert CHART_CATEGORY in report.chart_ascii
 
 
 @pytest.mark.asyncio
