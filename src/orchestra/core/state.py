@@ -10,6 +10,7 @@ event log, or the other agents' artifacts.
 
 from datetime import UTC, datetime
 from enum import StrEnum
+from pathlib import Path
 from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
@@ -197,6 +198,9 @@ class TaskState(BaseModel):
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
     user_request: str
+    # Where this run's pointers resolve, set by `app.py`. A path, not a payload, so the
+    # ledger stays pointers-not-blobs (§6) while being resolvable by whoever holds it.
+    artifact_dir: Path | None = None
     plan: Plan | None = None
     # Display counter for "Step X of N" only: the plan is a DAG, so under concurrent
     # dispatch there is no single step the run is "at".

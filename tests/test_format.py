@@ -6,6 +6,7 @@ asserted through `json.loads` because the contract is the document, not the inde
 """
 
 import json
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -24,9 +25,16 @@ from orchestra.core.state import (
 REQUEST = "Summarize the last 3 quarters' financial trends and create a chart"
 SUMMARY = "Revenue grew in each of the last three quarters."
 ASCII_CHART = "Q1 ######\nQ2 #######\nQ3 ########"
+RUN_DIR = Path("/artifacts/2026-08-16T09-30-00Z")
+CHART_PATH = str(RUN_DIR / "trend.html")
 
 
-def _state(*, report: FinalReport | None, failure_reason: str | None = None) -> TaskState:
+def _state(
+    *,
+    report: FinalReport | None,
+    failure_reason: str | None = None,
+    artifact_dir: Path | None = RUN_DIR,
+) -> TaskState:
     """A finished three-step run: two done, one failed, with `report` as its result."""
     plan = Plan(
         subtasks=[
@@ -44,6 +52,7 @@ def _state(*, report: FinalReport | None, failure_reason: str | None = None) -> 
         artifacts={"fetch": "artifact:fetch.txt"},
         final_result=report,
         failure_reason=failure_reason,
+        artifact_dir=artifact_dir,
     )
 
 
@@ -64,6 +73,10 @@ def _text(state: TaskState, *, quiet: bool = False) -> str:
     return format_result(state, output=OutputFormat.TEXT, quiet=quiet)
 
 
+# The document's keys, in one place: every shape test asserts the same set.
+_KEYS = {"request", "status", "report", "subtasks", "failure_reason", "artifact_dir"}
+
+
 def _document(state: TaskState) -> dict[str, Any]:
     document = json.loads(format_result(state, output=OutputFormat.JSON))
     assert isinstance(document, dict)  # one JSON object, not a fragment
@@ -80,18 +93,20 @@ def test_format_result_text_renders_summary_figures_chart_and_steps() -> None:
 
     assert rendered.startswith(SUMMARY)
     assert "Key figures:\n  Q3 revenue  145  artifact:fetch.txt" in rendered
-    assert "Chart: artifact:trend.html" in rendered
+    # A path the user can open, not the pointer they cannot.
+    assert f"Chart: {CHART_PATH}" in rendered
     # The line format `test_cli.py` and every downstream grep depend on.
     assert "done     fetch  artifact:fetch.txt" in rendered
     assert "failed   analyze  -" in rendered
     assert not rendered.endswith("\n")  # the console adds the newline (§5)
 
 
-def test_format_result_text_prints_the_ascii_chart_above_the_pointer() -> None:
-    """The drawing is read in the terminal; the pointer is what opens the file after it."""
+def test_format_result_text_prints_the_ascii_chart_above_the_resolved_path() -> None:
+    """The drawing is read in the terminal; the path is what opens the file after it. Both
+    at once is the only place the two features have to agree on an order."""
     rendered = _text(_state(report=_report(chart_ascii=ASCII_CHART)))
 
-    assert f"\n\n{ASCII_CHART}\n\nChart: artifact:trend.html" in rendered
+    assert f"\n\n{ASCII_CHART}\n\nChart: {CHART_PATH}\n\nArtifacts: {RUN_DIR}" in rendered
 
 
 def test_format_result_text_prints_the_ascii_chart_when_there_is_no_chart_file() -> None:
@@ -113,6 +128,20 @@ def test_format_result_text_without_an_ascii_chart_leaves_no_blank_block(
     assert rendered == _text(_state(report=_report()))
 
 
+def test_format_result_text_chart_falls_back_to_the_pointer_without_an_artifact_dir() -> None:
+    """A ledger that never recorded its directory still prints something (§ nothing raises)."""
+    rendered = _text(_state(report=_report(), artifact_dir=None))
+
+    assert "Chart: artifact:trend.html" in rendered
+
+
+def test_format_result_text_steps_block_opens_with_the_run_directory() -> None:
+    """Findable even when the run produced no chart to name."""
+    rendered = _text(_state(report=_report(chart=False)))
+
+    assert f"Artifacts: {RUN_DIR}\nSteps:" in rendered
+
+
 def test_format_result_text_without_figures_or_chart_omits_those_blocks() -> None:
     """An empty block is dropped whole: a heading with nothing under it reads as a bug."""
     rendered = _text(_state(report=_report(figures=False, chart=False)))
@@ -129,8 +158,9 @@ def test_format_result_text_quiet_drops_the_steps_but_keeps_the_report() -> None
 
     assert rendered.startswith(SUMMARY)
     assert "Key figures:" in rendered
-    assert "Chart: artifact:trend.html" in rendered
+    assert f"Chart: {CHART_PATH}" in rendered
     assert "Steps:" not in rendered
+    assert str(RUN_DIR) not in rendered.replace(CHART_PATH, "")  # the block's line went too
     assert "artifact:fetch.txt" in rendered  # as a figure's source, not as a step line
     assert "done" not in rendered
 
@@ -165,10 +195,13 @@ def test_format_result_text_with_neither_plan_nor_report_renders_one_line() -> N
 def test_format_result_json_has_the_documented_keys() -> None:
     document = _document(_state(report=_report()))
 
-    assert set(document) == {"request", "status", "report", "subtasks", "failure_reason"}
+    assert set(document) == _KEYS
     assert document["request"] == REQUEST
     assert document["status"] == "failed"  # one subtask failed
     assert document["failure_reason"] is None
+    assert document["artifact_dir"] == str(RUN_DIR)
+    # The pointer stays: `report` is a published contract, and the directory beside it is
+    # what makes the pointer resolvable.
     assert document["report"] == {
         "executive_summary": SUMMARY,
         "key_figures": [{"label": "Q3 revenue", "value": "145", "source": "artifact:fetch.txt"}],
@@ -192,6 +225,13 @@ def test_format_result_json_carries_the_ascii_chart_as_one_document() -> None:
 
     assert document["report"]["chart_ascii"] == ASCII_CHART
     assert document["report"]["chart"] == "artifact:trend.html"
+
+
+def test_format_result_json_artifact_dir_is_null_when_the_run_recorded_none() -> None:
+    """Null, never absent: a consumer reads one shape (`json.loads` also proves one document)."""
+    document = _document(_state(report=_report(), artifact_dir=None))
+
+    assert document["artifact_dir"] is None
 
 
 def test_format_result_json_carries_the_run_ending_reason() -> None:
@@ -236,7 +276,7 @@ def test_format_result_json_stays_parseable_on_a_half_finished_run(state: TaskSt
     document = _document(state)
 
     # Shape does not vary with how far the run got: `.report` is null, never absent.
-    assert set(document) == {"request", "status", "report", "subtasks", "failure_reason"}
+    assert set(document) == _KEYS
     assert document["request"] == REQUEST
 
 

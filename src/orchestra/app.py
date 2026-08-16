@@ -10,6 +10,8 @@ as the mapping's default, so a role added later runs rather than failing at star
 
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager, AsyncExitStack
+from datetime import UTC, datetime
+from pathlib import Path
 
 from orchestra.agents.aggregator import Aggregator
 from orchestra.agents.engine import ExecutionEngine
@@ -27,6 +29,20 @@ from orchestra.core.events import Broker
 from orchestra.core.state import AgentRole, TaskEvent, TaskState
 from orchestra.providers.base import Provider, create_provider
 
+# UTC and no colons: sortable as a plain string, and legal on Windows and in a shell.
+RUN_DIR_FORMAT = "%Y-%m-%dT%H-%M-%SZ"
+
+
+def _run_directory() -> str:
+    """This run's subdirectory name.
+
+    Generated here, not in `config.py`: a timestamp is not configuration, and §6 keeps
+    that module the only reader of the environment. Second granularity keeps the name
+    readable — two runs starting in the same second share a directory, and
+    `ArtifactStore._reserve`'s `-1` suffix already separates their files.
+    """
+    return datetime.now(UTC).strftime(RUN_DIR_FORMAT)
+
 
 class Orchestra:
     """The application: plan a request, execute the plan, report on it, hand back the ledger."""
@@ -39,13 +55,16 @@ class Orchestra:
         aggregator: Aggregator,
         provider: Provider,
         broker: Broker[TaskEvent],
+        artifact_dir: Path,
     ) -> None:
-        """Take the wired services. `provider` is held only so the run can release it."""
+        """Take the wired services. `provider` is held only so the run can release it;
+        `artifact_dir` is the store's root, recorded on each ledger this creates."""
         self._planner = planner
         self._engine = engine
         self._aggregator = aggregator
         self._provider = provider
         self._broker = broker
+        self._artifact_dir = artifact_dir
 
     @property
     def broker(self) -> Broker[TaskEvent]:
@@ -62,7 +81,7 @@ class Orchestra:
             TaskFailure: planning failed — an execution failure does *not* reach here.
             ProviderError: the provider failed while planning or synthesising.
         """
-        state = TaskState(user_request=prompt)
+        state = TaskState(user_request=prompt, artifact_dir=self._artifact_dir)
         await self._planner.create_plan(state)
         try:
             await self._engine.run(state)
@@ -91,7 +110,9 @@ def build_orchestra(config: Config) -> Orchestra:
         model=config.anthropic_model,
         max_tokens=config.anthropic_max_tokens,
     )
-    store = ArtifactStore(config.artifact_dir)
+    # Per run, not one flat directory for all time: a second run of the same plan would
+    # otherwise interleave with the first and be renamed around it by `_reserve`.
+    store = ArtifactStore(config.artifact_dir / _run_directory())
     broker: Broker[TaskEvent] = Broker()
     # A mapping, not a conditional in the engine: a real worker lands as one
     # reassignment. `fromkeys` first so a role added later runs as a stub rather than
@@ -130,6 +151,7 @@ def build_orchestra(config: Config) -> Orchestra:
         aggregator=Aggregator(provider, store),
         provider=provider,
         broker=broker,
+        artifact_dir=store.root,
     )
 
 

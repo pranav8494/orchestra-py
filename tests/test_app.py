@@ -16,6 +16,7 @@ import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
@@ -33,7 +34,7 @@ from orchestra.agents.workers.base import Worker
 from orchestra.agents.workers.data_retrieval import DataRetrievalWorker
 from orchestra.agents.workers.stub import EchoWorker
 from orchestra.agents.workers.visualization import ChartDraft
-from orchestra.app import Orchestra, build_orchestra, run_once
+from orchestra.app import RUN_DIR_FORMAT, Orchestra, build_orchestra, run_once
 from orchestra.artifacts import ArtifactStore
 from orchestra.charts import ChartKind, ChartSeries, ChartSpec
 from orchestra.config import Config
@@ -149,6 +150,7 @@ def _orchestra(
         aggregator=Aggregator(provider, store),
         provider=provider,
         broker=broker,
+        artifact_dir=store.root,
     )
 
 
@@ -162,6 +164,7 @@ async def test_run_task_plans_executes_and_returns_a_ledger_of_pointers(
 
     assert state.plan is not None
     assert state.user_request == LINEAR.prompt
+    assert state.artifact_dir == store.root  # the ledger names where its pointers resolve
     assert [subtask.status for subtask in state.plan.subtasks] == [SubtaskStatus.DONE] * 3
     assert state.failed_subtasks == []
     for subtask in state.plan.subtasks:
@@ -234,6 +237,70 @@ async def test_build_orchestra_wires_the_app_from_config_without_touching_the_ne
         assert orchestra.broker.subscriber_count == 0
     finally:
         await orchestra.aclose()
+
+
+@pytest.mark.asyncio
+async def test_build_orchestra_roots_the_run_in_a_timestamped_subdirectory(
+    tmp_path: Path,
+) -> None:
+    """Runs no longer share one flat directory, so a second run of a plan cannot bury the
+    first under `-1` suffixes."""
+    artifacts = tmp_path / "artifacts"
+    config = Config(anthropic_api_key=SecretStr("test-key"), artifact_dir=artifacts)
+
+    orchestra = build_orchestra(config)
+    try:
+        run_dirs = list(artifacts.iterdir())
+        assert len(run_dirs) == 1
+        assert run_dirs[0].is_dir()
+        # Parses as the stamp it claims to be, so the name stays sortable and portable.
+        datetime.strptime(run_dirs[0].name, RUN_DIR_FORMAT).replace(tzinfo=UTC)
+    finally:
+        await orchestra.aclose()
+
+
+@pytest.mark.asyncio
+async def test_build_orchestra_gives_each_run_its_own_directory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The clock is frozen rather than slept on: two runs in the same second are meant to
+    share a directory, so only a moved clock proves the name tracks it."""
+    artifacts = tmp_path / "artifacts"
+    config = Config(anthropic_api_key=SecretStr("test-key"), artifact_dir=artifacts)
+    stamps = iter(["2026-08-16T09-30-00Z", "2026-08-16T09-30-01Z"])
+    monkeypatch.setattr(app_module, "_run_directory", lambda: next(stamps))
+
+    first = build_orchestra(config)
+    second = build_orchestra(config)
+    try:
+        assert sorted(path.name for path in artifacts.iterdir()) == [
+            "2026-08-16T09-30-00Z",
+            "2026-08-16T09-30-01Z",
+        ]
+        assert first._artifact_dir != second._artifact_dir
+    finally:
+        await first.aclose()
+        await second.aclose()
+
+
+@pytest.mark.asyncio
+async def test_run_once_keeps_one_run_s_artifacts_together_and_says_where(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The ledger is self-describing: every pointer it holds resolves under the directory
+    it names, and that directory is a child of `ARTIFACT_DIR`, never `ARTIFACT_DIR` itself."""
+    artifacts = tmp_path / "artifacts"
+    provider = FakeProvider(responses=_responses(chart=True), turns=_turns())
+    _offline_run(monkeypatch, tmp_path, provider)
+
+    state = await run_once(LINEAR.prompt)
+
+    assert state.artifact_dir is not None
+    assert state.artifact_dir.parent == artifacts
+    assert state.artifacts  # the run wrote something to be wrong about
+    written = {path.name for path in state.artifact_dir.iterdir()}
+    for pointer in state.artifacts.values():
+        assert pointer.removeprefix("artifact:") in written
 
 
 @pytest.mark.asyncio
@@ -377,7 +444,9 @@ async def test_run_once_carries_the_visualization_chart_into_the_report(
     report = state.final_result
     assert report is not None
     assert report.chart == f"artifact:{CHART_STEP}.html"
-    assert "<html" in ArtifactStore(tmp_path / "artifacts").get_text(report.chart)
+    # Resolved through the run's own directory, which is where the store now writes.
+    assert state.artifact_dir is not None
+    assert "<html" in ArtifactStore(state.artifact_dir).get_text(report.chart)
     # The drawing, not just a pointer to one: what the terminal prints is the criterion.
     assert report.chart_ascii is not None
     assert CHART_CATEGORY in report.chart_ascii
