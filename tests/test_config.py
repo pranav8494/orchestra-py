@@ -98,6 +98,28 @@ def test_load_config_data_dir_env_var_overrides_default(
     assert load_config().data_dir == tmp_path / "fixtures"
 
 
+def test_load_config_without_a_search_key_leaves_it_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unset is the supported state, not a misconfiguration: it selects the offline corpus."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", FAKE_KEY)
+
+    assert load_config().tavily_api_key is None
+
+
+def test_load_config_search_key_is_read_and_redacted(monkeypatch: pytest.MonkeyPatch) -> None:
+    """§9: a second secret is a second thing that must not reach a log or a config dump."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", FAKE_KEY)
+    monkeypatch.setenv("TAVILY_API_KEY", "tvly-secret")
+
+    config = load_config()
+
+    assert config.tavily_api_key is not None
+    assert config.tavily_api_key.get_secret_value() == "tvly-secret"
+    assert "tvly-secret" not in repr(config)
+    assert "tvly-secret" not in config.model_dump_json()
+
+
 def test_load_config_missing_api_key_raises_config_error() -> None:
     with pytest.raises(ConfigError) as exc_info:
         load_config()

@@ -1,28 +1,61 @@
-"""The Data Retrieval agent's second tool: keyword lookup over a bundled offline corpus.
+"""The Data Retrieval agent's second tool: web search, or a bundled corpus without a key.
 
-**Why a canned corpus.** The whole run must work with no network and no key beyond the
-model's own, so "search" here means a few background notes shipped in `data/`. The
-description says exactly that (§6) — a tool that implies internet access gets asked for
-today's share price, and answers with fiction.
+**Two backends, one tool.** With `TAVILY_API_KEY` set this searches the web; without it,
+a few background notes shipped in `data/`. Not two tools, because which one answers is an
+operator's deployment choice and not a decision the model should be making — and a second
+entry in the toolset would mean the model picking between two things it cannot tell apart.
 
-**Why two tools and not one.** Giving the agent a choice is the point: `query_csv` holds
-this company's figures, this holds industry context. Each description names the other, so
-the boundary is in the prompt the model actually reads rather than in a comment.
+**The corpus is the floor, not a stub.** The offline path is what makes a run reproducible
+on any machine with no key and no network, so the live path degrades into it rather than
+replacing it: a failed request falls back and says so, instead of failing the subtask.
 
-**Why the corpus is validated.** A JSON file on disk is a trust boundary like any other
-(§7), so it is parsed through a pydantic model on first use. A malformed corpus is
-`is_error=True` content naming the file, never a `KeyError` unwinding the agent loop.
+**Provenance differs and the model is told which it got.** Corpus notes carry invented
+specifics and are labelled illustrative; live results carry a URL and are labelled sourced.
+The report's rule is that a figure traces to something (§5 of the research doc), and that
+rule is only enforceable if the model knows which kind of note it is reading.
+
+**Why both are validated.** A JSON file on disk and an HTTP response are both trust
+boundaries (§7), so each is parsed through a pydantic model. A malformed corpus or a
+surprising payload is content the model can read, never a `KeyError` unwinding the loop.
 """
 
 import asyncio
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, field_validator
+import httpx
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    TypeAdapter,
+    ValidationError,
+    field_validator,
+)
 
 from orchestra.tools.base import ToolCall, ToolResponse, ToolSpec
 
 TOOL_NAME = "search"
+
+# The live backend. One provider, named here rather than made configurable: a second
+# would need a second response shape, and `agents/toolsets.py` is where that choice
+# would belong if there were ever two.
+TAVILY_URL = "https://api.tavily.com/search"
+
+# Seconds for one live search. Bounded because the agent loop is bounded (§10) and a
+# hung request would spend the subtask's wall clock without spending its token budget.
+DEFAULT_TIMEOUT = 10.0
+
+# The two provenance clauses `_format` chooses between. Separate constants because the
+# difference between them is the whole anti-hallucination contract: one set of notes may
+# be quoted as fact and the other may not.
+_CORPUS_PROVENANCE = (
+    "from the bundled offline corpus (illustrative sample data, not this company's "
+    "figures and not sourced research — do not quote its numbers as fact)"
+)
+_LIVE_PROVENANCE = "from a live web search (each result cites the page it came from)"
 
 # Ceiling on `limit`. Stated in the schema so the model reads it before choosing, rather
 # than discovering it in an error: the corpus is small and ten notes is already more
@@ -34,17 +67,18 @@ MAX_RESULTS = 10
 # both spellings of a word rather than the matcher guessing at stems.
 _TOKEN = re.compile(r"[a-z0-9']+")
 
-# The description is a prompt (§6). Its job is to be honest about the two things this
-# tool is not: online, and informed about this company. See `query_csv.DESCRIPTION` for
-# why the text lives beside the params model instead of in `prompts/` (§11).
+# The description is a prompt (§6). It must hold for both backends, because the model is
+# shown one description whichever is configured — so it promises background context and
+# says what this tool is not, rather than promising live data it may not have. Each
+# result says which backend produced it. See `query_csv.DESCRIPTION` for why the text
+# lives beside the params model instead of in `prompts/` (§11).
 DESCRIPTION = (
-    "Search a small offline corpus of background notes bundled with this agent: industry "
-    "growth benchmarks, typical margin ranges, what drives a one-quarter cost change, "
-    "quarter-over-quarter reporting conventions, seasonality and the macro backdrop. Use "
-    "it to interpret or contextualise a figure. It does NOT reach the internet, so it has "
-    "no news, prices or anything dated, and it does NOT hold this company's own revenue, "
-    "costs or profit — use `query_csv` for those. Returns the best-matching notes, or a "
-    "plain message when nothing matches."
+    "Search for background and industry context: growth benchmarks, typical margin "
+    "ranges, what drives a one-quarter cost change, reporting conventions, seasonality, "
+    "the macro backdrop. Use it to interpret or contextualise a figure. It does NOT hold "
+    "this company's own revenue, costs or profit — use `query_csv` for those. Results say "
+    "where they came from; treat anything marked illustrative as context, not as fact to "
+    "quote. Returns the best-matching notes, or a plain message when nothing matches."
 )
 
 
@@ -63,6 +97,20 @@ class SearchParams(BaseModel):
         le=MAX_RESULTS,
         description=f"How many notes to return, at most {MAX_RESULTS}.",
     )
+
+
+@dataclass(frozen=True, slots=True)
+class SearchResult:
+    """One result, whichever backend produced it.
+
+    The shape both paths render through, so the two backends differ in where the text
+    came from and not in how it reads. A dataclass rather than a model: it is built from
+    already-validated input on both sides, so it is an internal value object (§7).
+    """
+
+    title: str
+    snippet: str
+    source: str = ""  # a URL from the live backend; empty for a bundled note
 
 
 class CorpusEntry(BaseModel):
@@ -89,26 +137,73 @@ class CorpusEntry(BaseModel):
         """
         return [keyword.lower() for keyword in keywords]
 
+    def as_result(self) -> SearchResult:
+        """Render this note in the shape both backends share. No source: it has no URL,
+        which is the whole reason its provenance line reads differently."""
+        return SearchResult(title=self.title, snippet=self.snippet)
+
 
 # One adapter, built at import: compiling the validator per call would be the cost of
 # validation without the caching pydantic already offers.
 _CORPUS = TypeAdapter(list[CorpusEntry])
 
 
-class SearchTool:
-    """Keyword search over a bundled corpus of background notes. Implements `BaseTool` (§6)."""
+class _LiveResult(BaseModel):
+    """One result from the live backend, as much of it as this tool uses.
 
-    def __init__(self, corpus: Path) -> None:
-        """Store the injected corpus path. Nothing is read yet.
+    `extra="ignore"`, unlike every other model here: the payload belongs to a vendor who
+    adds fields on their schedule, and forbidding them would turn a routine API addition
+    into a broken tool. The opposite of the rule for model output, where an unexpected
+    field means our own schema drifted (§7).
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    title: str = ""
+    url: str = ""
+    content: str = ""
+
+
+class _LiveResponse(BaseModel):
+    """The live backend's reply. Only `results` is read; the rest is metadata."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    results: list[_LiveResult] = Field(default_factory=list)
+
+
+class _LiveSearchError(Exception):
+    """The live backend could not answer. Never escapes `run` — it becomes the notice on
+    a fallback to the corpus, because a search outage should not end a subtask that has a
+    working offline source (§6)."""
+
+
+class SearchTool:
+    """Web search, falling back to a bundled corpus. Implements `BaseTool` (§6)."""
+
+    def __init__(
+        self,
+        corpus: Path,
+        *,
+        api_key: SecretStr | None = None,
+        timeout: float = DEFAULT_TIMEOUT,
+    ) -> None:
+        """Store the injected corpus path and, if there is one, the live backend's key.
 
         Args:
             corpus: the JSON array of notes, from `app.py` via `agents/toolsets.py`.
+            api_key: the live backend's credential, or `None` to search the corpus only.
+                Injected like everything else — a tool that read the environment could
+                not be pointed at a fixture, and only `config.py` may read it (§6, §9).
+            timeout: seconds allowed for one live request.
         """
         self._corpus = corpus
+        self._api_key = api_key
+        self._timeout = timeout
         self._entries: list[CorpusEntry] | None = None
 
     def info(self) -> ToolSpec:
-        """See `BaseTool.info`. Pure: the corpus is not touched here."""
+        """See `BaseTool.info`. Pure: no disk, no network."""
         return ToolSpec(
             name=TOOL_NAME,
             description=DESCRIPTION,
@@ -116,7 +211,7 @@ class SearchTool:
         )
 
     async def run(self, call: ToolCall) -> ToolResponse:
-        """Score the corpus against the query and return the best notes. See `BaseTool.run`."""
+        """Search the web if a key was configured, else the corpus. See `BaseTool.run`."""
         try:
             params = SearchParams.model_validate(call.arguments)
         except ValidationError as exc:
@@ -124,17 +219,36 @@ class SearchTool:
                 content=f"Invalid arguments for {TOOL_NAME}: {_problems(exc)}", is_error=True
             )
 
+        notice = ""
+        if self._api_key is not None:
+            try:
+                results = await self._live(params)
+            except _LiveSearchError as exc:
+                # Degraded, not failed: the corpus can still answer, and telling the model
+                # what happened is better than a silent downgrade it would read as the
+                # tool's normal output.
+                notice = f"(Live search was unavailable: {exc}. Answering from the corpus.)\n\n"
+            else:
+                if not results:
+                    return ToolResponse(content=_nothing_found(params.query), is_empty=True)
+                return ToolResponse(content=_format(params.query, results, _LIVE_PROVENANCE))
+
+        return await self._corpus_search(params, notice)
+
+    async def _corpus_search(self, params: "SearchParams", notice: str) -> ToolResponse:
+        """Rank the bundled notes. The offline path, and the live path's fallback."""
         try:
             entries = await self._load()
         except OSError as exc:
             return ToolResponse(
-                content=f"Could not read the corpus at {self._corpus}: {exc}", is_error=True
+                content=f"{notice}Could not read the corpus at {self._corpus}: {exc}",
+                is_error=True,
             )
         except ValidationError as exc:
             # Covers both a syntax error and a well-formed file of the wrong shape:
             # `validate_json` reports each as a validation error against `CorpusEntry`.
             return ToolResponse(
-                content=f"The corpus at {self._corpus} is malformed: {_problems(exc)}",
+                content=f"{notice}The corpus at {self._corpus} is malformed: {_problems(exc)}",
                 is_error=True,
             )
 
@@ -145,8 +259,57 @@ class SearchTool:
             # retry the same call, and an `is_error` result reads to it as "the tool
             # broke", not "no such note". `is_empty` is what stops a caller counting this
             # as something retrieved (§6).
-            return ToolResponse(content=_nothing_matched(params.query, entries), is_empty=True)
-        return ToolResponse(content=_format(params.query, matches))
+            return ToolResponse(
+                content=notice + _nothing_matched(params.query, entries), is_empty=True
+            )
+        results = [entry.as_result() for entry in matches]
+        return ToolResponse(content=notice + _format(params.query, results, _CORPUS_PROVENANCE))
+
+    async def _live(self, params: "SearchParams") -> list["SearchResult"]:
+        """Ask the live backend, and validate what comes back (§7).
+
+        A client per call rather than one held for the tool's life: `BaseTool` has no
+        close hook, so a pooled client would leak its sockets, and an agent makes a
+        handful of searches per run — the connection setup is not what costs here.
+
+        Raises:
+            _LiveSearchError: the request failed, was refused, or was not the shape this
+                tool reads. All three mean the same thing to `run`: use the corpus.
+        """
+        # Assigned before the request so the type is narrowed for mypy and the secret is
+        # unwrapped in exactly one place (§9).
+        key = self._api_key.get_secret_value() if self._api_key is not None else ""
+        payload = {
+            "query": params.query,
+            "max_results": params.limit,
+            "search_depth": "basic",  # 1 credit; `advanced` costs 2 and reranks
+        }
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout) as client:
+                response = await client.post(
+                    TAVILY_URL,
+                    headers={"Authorization": f"Bearer {key}"},
+                    json=payload,
+                )
+                response.raise_for_status()
+                body = _LiveResponse.model_validate_json(response.content)
+        except httpx.HTTPStatusError as exc:
+            # The status only, never the body: an auth failure echoes the request, and
+            # the request carries the key (§9).
+            raise _LiveSearchError(f"HTTP {exc.response.status_code}") from exc
+        except httpx.HTTPError as exc:
+            # Timeouts, DNS, connection resets. `httpx.HTTPError` is the SDK's own base
+            # class, so this is not a bare `except` (§8), and `CancelledError` is a
+            # BaseException that passes straight through (§10).
+            raise _LiveSearchError(f"{type(exc).__name__}") from exc
+        except ValidationError as exc:
+            raise _LiveSearchError(f"unexpected response shape ({_problems(exc)})") from exc
+
+        return [
+            SearchResult(title=item.title or item.url, snippet=item.content, source=item.url)
+            for item in body.results
+            if item.content
+        ]
 
     async def _load(self) -> list[CorpusEntry]:
         """Read and validate the corpus once, off the event loop (§10).
@@ -186,26 +349,33 @@ def _rank(query: str, entries: list[CorpusEntry]) -> list[CorpusEntry]:
     return [entry for _, entry in sorted(hits, key=lambda pair: pair[0], reverse=True)]
 
 
-def _format(query: str, matches: list[CorpusEntry]) -> str:
-    """Render matches as text the model can read.
+def _format(query: str, results: list[SearchResult], provenance: str) -> str:
+    """Render results as text the model can read, above all else honestly.
 
-    The provenance line is not decoration. The notes are written as prose and carry
-    specifics like "25% to 40%" that are illustrative, not researched, so without it the
-    model has read a paragraph about margins with nothing saying the numbers are neither
-    ours nor sourced — and unsourced figures in the report are the one thing this design
-    forbids. Said here rather than by blunting the notes, which would make the corpus
-    useless as context.
+    The provenance line is not decoration, and it is the one thing that differs between
+    the backends. Corpus notes are prose carrying invented specifics like "25% to 40%",
+    so without the label the model has read a paragraph about margins with nothing saying
+    the numbers are neither ours nor sourced — and an unsourced figure reaching the report
+    is the one thing this design forbids. Live results are sourced, so they carry their
+    URL instead and may be quoted. Said here rather than by blunting the corpus, which
+    would leave it useless as context.
     """
-    sections = [
-        f"{len(matches)} background note(s) matching {query!r}, from the offline corpus "
-        f"(illustrative sample data, not this company's figures and not sourced research "
-        f"— do not quote its numbers as fact):"
-    ]
+    sections = [f"{len(results)} result(s) matching {query!r}, {provenance}:"]
     sections += [
-        f"[{position}] {entry.title}\n{entry.snippet}"
-        for position, entry in enumerate(matches, start=1)
+        f"[{position}] {result.title}"
+        + (f"\n{result.source}" if result.source else "")
+        + f"\n{result.snippet}"
+        for position, result in enumerate(results, start=1)
     ]
     return "\n\n".join(sections)
+
+
+def _nothing_found(query: str) -> str:
+    """Say a live search returned nothing. No corpus listing — the web is not a menu."""
+    return (
+        f"The web search for {query!r} returned no usable results. Try different wording, "
+        f"or use `query_csv` for this company's own figures."
+    )
 
 
 def _nothing_matched(query: str, entries: list[CorpusEntry]) -> str:

@@ -66,6 +66,10 @@ class Config(BaseSettings):
     anthropic_model: str = DEFAULT_MODEL
     artifact_dir: Path = Field(default_factory=default_artifact_dir)
     data_dir: Path = Field(default_factory=default_data_dir)
+    # Optional by design: unset means the `search` tool reads the bundled corpus, which
+    # is the offline-safe path the demo depends on. `None` rather than "" so "no key" is
+    # a state the type carries, not a value every caller has to test for emptiness.
+    tavily_api_key: SecretStr | None = None
 
     @field_validator("artifact_dir", "data_dir")
     @classmethod

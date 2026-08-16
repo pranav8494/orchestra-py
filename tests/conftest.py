@@ -22,7 +22,15 @@ from orchestra.tools.base import ToolSpec
 
 # Every setting `Config` reads. Listed once so a new field cannot silently start
 # leaking the developer's shell into the suite.
-_SETTING_ENV_VARS = ("ANTHROPIC_API_KEY", "ANTHROPIC_MODEL", "ARTIFACT_DIR")
+_SETTING_ENV_VARS = (
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_MODEL",
+    "ARTIFACT_DIR",
+    "DATA_DIR",
+    # The one that would actually reach the network: with this exported, the `search`
+    # tool takes its live path and the suite starts making real requests (§12).
+    "TAVILY_API_KEY",
+)
 
 
 @pytest.fixture(autouse=True)

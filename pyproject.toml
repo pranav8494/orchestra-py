@@ -12,6 +12,7 @@ dependencies = [
     "pydantic>=2.7",
     "pydantic-settings>=2.3",
     "anthropic>=0.34",
+    "httpx>=0.27",        # live web search for the retrieval agent; already the SDK's client
     "pandas>=3.0",          # tabular analysis for the analytics agent
     "plotly>=6.9",          # chart generation for the visualization agent
 ]

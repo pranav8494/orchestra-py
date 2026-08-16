@@ -13,6 +13,8 @@ from matching the day one is renamed.
 
 from pathlib import Path
 
+from pydantic import SecretStr
+
 from orchestra.tools.base import BaseTool
 from orchestra.tools.query_csv import TOOL_NAME as QUERY_CSV_TOOL
 from orchestra.tools.query_csv import QueryCsvTool
@@ -34,20 +36,26 @@ FINANCIALS_CSV = "quarterly_financials.csv"
 SEARCH_CORPUS = "search_snippets.json"
 
 
-def data_retrieval_tools(data_dir: Path) -> tuple[BaseTool, ...]:
+def data_retrieval_tools(
+    data_dir: Path, *, search_api_key: SecretStr | None = None
+) -> tuple[BaseTool, ...]:
     """The Data Retrieval agent's toolset: the company's own figures, plus background.
 
     Two tools rather than one because the roles genuinely differ — `query_csv` is
-    authoritative and narrow, `search` is contextual and offline — and choosing between
-    them is the judgement the agent exists to make.
+    authoritative and narrow, `search` is contextual — and choosing between them is the
+    judgement the agent exists to make.
 
     Args:
         data_dir: the directory holding the bundled dataset, from `Config.data_dir`.
+        search_api_key: the live search credential, or `None` to search the bundled
+            corpus only. Optional here rather than required-and-nullable so a caller
+            that does not care about search — every test that is not about it — does not
+            have to say so.
 
     Returns:
         The tools, in the order the model is shown them.
     """
     return (
         QueryCsvTool(data_dir / FINANCIALS_CSV),
-        SearchTool(data_dir / SEARCH_CORPUS),
+        SearchTool(data_dir / SEARCH_CORPUS, api_key=search_api_key),
     )

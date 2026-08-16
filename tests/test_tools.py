@@ -15,14 +15,17 @@ over too fast to allow.
 """
 
 import asyncio
+import json
 import threading
 from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import httpx
 import pytest
 import pytest_asyncio
+from pydantic import SecretStr
 
 from orchestra.tools import query_csv as query_csv_module
 from orchestra.tools import search as search_module
@@ -348,14 +351,19 @@ def test_search_info_advertises_its_params_schema(search_tool: SearchTool) -> No
     assert properties(spec.input_schema)["limit"]["maximum"] == MAX_RESULTS
 
 
-def test_search_info_description_disclaims_the_internet_and_company_figures(
-    search_tool: SearchTool,
-) -> None:
-    """The one thing this description must not do is imply it can look things up online."""
+def test_search_info_description_holds_for_either_backend(search_tool: SearchTool) -> None:
+    """One description is shown whichever backend is configured, so it must fit both.
+
+    It used to promise no internet access. That became false the moment a key could be
+    configured, and a description that lies is worse than one that says less — so it now
+    disclaims only what is true of both: no company figures, and check the provenance.
+    """
     description = search_tool.info().description
 
-    assert "NOT reach the internet" in description
     assert "query_csv" in description
+    assert "illustrative" in description
+    # Neither backend may be promised, because only one of them is ever present.
+    assert "NOT reach the internet" not in description
 
 
 @pytest.mark.asyncio
@@ -535,3 +543,195 @@ async def test_search_propagates_cancellation(
 
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(task, timeout=TIMEOUT)
+
+
+# --------------------------------------------------------------------------
+# The live search backend. Still no network: `httpx.AsyncClient` is stubbed, so
+# what is under test is the request built, the payload validated, and the
+# fallback taken (§12).
+# --------------------------------------------------------------------------
+
+LIVE_KEY = SecretStr("tvly-test-key")
+LIVE_PAYLOAD = json.dumps(
+    {
+        "query": "saas margins",
+        "results": [
+            {
+                "title": "Gross margin benchmarks",
+                "url": "https://example.com/margins",
+                "content": "Median gross margin was 74%.",
+                "score": 0.9,
+                "an_unexpected_field": "the vendor added this",
+            }
+        ],
+    }
+)
+
+
+class StubResponse:
+    """Stands in for `httpx.Response`, with the two members the tool reads."""
+
+    def __init__(self, body: str, status_code: int = 200) -> None:
+        self.content = body.encode()
+        self.status_code = status_code
+
+    def raise_for_status(self) -> None:
+        if self.status_code < 400:
+            return
+        request = httpx.Request("POST", search_module.TAVILY_URL)
+        raise httpx.HTTPStatusError(
+            "error", request=request, response=httpx.Response(self.status_code, request=request)
+        )
+
+
+def stub_httpx(monkeypatch: pytest.MonkeyPatch, result: object) -> list[dict[str, object]]:
+    """Replace `httpx.AsyncClient` and record what the tool posted.
+
+    Patched on `httpx` itself rather than injected: the tool builds a client per call on
+    purpose (`BaseTool` has no close hook), so there is no seam to inject through, and the
+    module object the tool holds is this same one. `monkeypatch` restores it afterwards.
+    """
+    posts: list[dict[str, object]] = []
+
+    class StubClient:
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs = kwargs
+
+        async def __aenter__(self) -> "StubClient":
+            return self
+
+        async def __aexit__(self, *exc_info: object) -> None:
+            return None
+
+        async def post(self, url: str, *, headers: Mapping[str, str], json: object) -> object:
+            posts.append({"url": url, "headers": dict(headers), "json": json, "init": self.kwargs})
+            if isinstance(result, BaseException):
+                raise result
+            return result
+
+    monkeypatch.setattr(httpx, "AsyncClient", StubClient)
+    return posts
+
+
+def live_tool() -> SearchTool:
+    """The same corpus, plus a key — so a fallback has somewhere real to fall back to."""
+    return SearchTool(SNIPPETS, api_key=LIVE_KEY)
+
+
+@pytest.mark.asyncio
+async def test_search_with_a_key_returns_live_results_marked_as_sourced(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A live result cites its page, so unlike a corpus note it may be quoted."""
+    stub_httpx(monkeypatch, StubResponse(LIVE_PAYLOAD))
+
+    response = await live_tool().run(call("search", query="saas margins"))
+
+    assert not response.is_error and not response.is_empty
+    assert "https://example.com/margins" in response.content
+    assert "Median gross margin was 74%." in response.content
+    assert "live web search" in response.content
+    # The corpus disclaimer must not ride along on sourced results.
+    assert "illustrative" not in response.content
+
+
+@pytest.mark.asyncio
+async def test_search_sends_the_key_as_a_bearer_token_and_bounds_the_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The wire shape, asserted once: auth header, endpoint, body, and a timeout (§10)."""
+    posts = stub_httpx(monkeypatch, StubResponse(LIVE_PAYLOAD))
+
+    await live_tool().run(call("search", query="saas margins", limit=5))
+
+    assert posts[0]["url"] == search_module.TAVILY_URL
+    assert posts[0]["headers"] == {"Authorization": "Bearer tvly-test-key"}
+    assert posts[0]["json"] == {
+        "query": "saas margins",
+        "max_results": 5,
+        "search_depth": "basic",
+    }
+    assert posts[0]["init"] == {"timeout": search_module.DEFAULT_TIMEOUT}
+
+
+@pytest.mark.asyncio
+async def test_search_ignores_unknown_fields_in_the_live_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The vendor owns that schema. A field they add must not break the tool (§7)."""
+    stub_httpx(monkeypatch, StubResponse(LIVE_PAYLOAD))
+
+    response = await live_tool().run(call("search", query="saas margins"))
+
+    assert not response.is_error
+
+
+@pytest.mark.asyncio
+async def test_search_live_with_no_results_is_empty_not_a_corpus_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The web answered and had nothing — that is an answer, not a reason to fall back."""
+    stub_httpx(monkeypatch, StubResponse(json.dumps({"results": []})))
+
+    response = await live_tool().run(call("search", query="nothing at all"))
+
+    assert response.is_empty and not response.is_error
+    assert "no usable results" in response.content
+    # It did not quietly search the corpus instead.
+    assert "illustrative" not in response.content
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure", "expected"),
+    [
+        (StubResponse("", status_code=401), "HTTP 401"),
+        (httpx.ConnectTimeout("timed out"), "ConnectTimeout"),
+        (StubResponse("{not json"), "unexpected response shape"),
+    ],
+    ids=["rejected", "timed_out", "malformed"],
+)
+async def test_search_falls_back_to_the_corpus_when_the_live_backend_fails(
+    monkeypatch: pytest.MonkeyPatch, failure: object, expected: str
+) -> None:
+    """A search outage degrades the run; it does not end a subtask that has a corpus.
+
+    The notice matters as much as the fallback: without it the model reads bundled
+    sample data as though it were the live results it asked for.
+    """
+    stub_httpx(monkeypatch, failure)
+
+    response = await live_tool().run(call("search", query="typical gross margin for software"))
+
+    assert not response.is_error
+    assert "Live search was unavailable" in response.content
+    assert expected in response.content
+    # And it really is the corpus that answered.
+    assert "illustrative" in response.content
+
+
+@pytest.mark.asyncio
+async def test_search_failure_notice_never_carries_the_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§9: an auth failure is the one error most likely to echo the credential."""
+    stub_httpx(monkeypatch, StubResponse("", status_code=401))
+
+    response = await live_tool().run(call("search", query="typical gross margin for software"))
+
+    assert "tvly-test-key" not in response.content
+
+
+@pytest.mark.asyncio
+async def test_search_without_a_key_never_opens_a_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The default path is offline, and offline has to mean no request was attempted."""
+    posts = stub_httpx(monkeypatch, StubResponse(LIVE_PAYLOAD))
+
+    response = await SearchTool(SNIPPETS).run(
+        call("search", query="typical gross margin for software")
+    )
+
+    assert posts == []
+    assert "illustrative" in response.content
