@@ -47,6 +47,15 @@ DESCRIPTION = (
 )
 
 
+# What the planner is told this puts within reach (`ToolSpec.provides`). Coarser than
+# `DESCRIPTION` on purpose: a planner chooses between subjects, and columns and filters are
+# the worker's problem. The quarter range is a literal here for the same reason it is there.
+PROVIDES = (
+    "this company's own quarterly revenue, costs and profit, 2024Q1 through 2025Q4 — "
+    "no share price, headcount, or any other measure"
+)
+
+
 class QueryCsvParams(BaseModel):
     """The arguments the model may send, and the check applied to what it sent.
 
@@ -93,6 +102,7 @@ class QueryCsvTool:
             name=TOOL_NAME,
             description=DESCRIPTION,
             input_schema=QueryCsvParams.model_json_schema(),
+            provides=PROVIDES,
         )
 
     async def run(self, call: ToolCall) -> ToolResponse:

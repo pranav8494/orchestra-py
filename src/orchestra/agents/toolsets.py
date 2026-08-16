@@ -7,6 +7,7 @@ Tool names are re-exported rather than restated: a worker branches on which tool
 answered, and a second literal would stop matching the day one is renamed (§1.5).
 """
 
+from collections.abc import Sequence
 from pathlib import Path
 
 from pydantic import SecretStr
@@ -26,6 +27,7 @@ __all__ = [
     "SEARCH_TOOL",
     "analytics_tools",
     "data_retrieval_tools",
+    "retrievable_data",
 ]
 
 # Filenames inside `Config.data_dir`. Here, not in the tools: the tools take a path, so
@@ -53,6 +55,20 @@ def data_retrieval_tools(
         QueryCsvTool(data_dir / FINANCIALS_CSV),
         SearchTool(data_dir / SEARCH_CORPUS, api_key=search_api_key),
     )
+
+
+def retrievable_data(tools: Sequence[BaseTool]) -> str:
+    """What `tools` put within reach, one bullet each, for the planner's prompt (#10).
+
+    Here because this module already answers "which tools does an agent get"; the answer
+    to "so what data can the team obtain" is the same question read from the other end.
+    Composed from `ToolSpec.provides` rather than restated, or the day a dataset changes
+    the planner would go on offering the old one.
+
+    Tools that supply no data are skipped, so an interpreter or a prompt does not read as
+    a source.
+    """
+    return "\n".join(f"- {provides}" for tool in tools if (provides := tool.info().provides))
 
 
 def analytics_tools(store: ArtifactStore) -> tuple[BaseTool, ...]:

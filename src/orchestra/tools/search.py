@@ -71,6 +71,14 @@ DESCRIPTION = (
     "quote. Returns the best-matching notes, or a plain message when nothing matches."
 )
 
+# What the planner is told this puts within reach (`ToolSpec.provides`). Written as prose
+# and no figures, because that is what it returns: a plan that needs numbers to compute
+# with cannot be built on this one.
+PROVIDES = (
+    "written background and industry context from the web — definitions, benchmarks, "
+    "market backdrop; prose, never a table of figures to compute over"
+)
+
 
 class SearchParams(BaseModel):
     """The arguments the model may send. Published verbatim as the tool's `input_schema`."""
@@ -193,6 +201,7 @@ class SearchTool:
             name=TOOL_NAME,
             description=DESCRIPTION,
             input_schema=SearchParams.model_json_schema(),
+            provides=PROVIDES,
         )
 
     async def run(self, call: ToolCall) -> ToolResponse:

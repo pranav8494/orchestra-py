@@ -33,8 +33,9 @@ from orchestra.cli.format import OutputFormat, format_result
 from orchestra.core.events import Broker
 from orchestra.core.state import AgentRole, EventKind, SubtaskStatus, TaskEvent, TaskState
 
-# Shown before `plan_created` arrives: an empty opening frame reads as a hang, and
-# planning is the slowest part of a short run.
+# Printed before `plan_created` arrives, above the region rather than in it (see
+# `_consume`): planning is the slowest part of a short run, and an empty opening frame
+# reads as a hang. Also `RunView`'s opening headline, which only the plain sink now draws.
 PLANNING_HEADLINE = "Planning the request"
 
 # Named so a leaked task is identifiable in a task dump, and a constant so a test
@@ -456,6 +457,20 @@ async def _consume(
             await _pump(queue, view, _write_line)
             return
 
+        # The region must not own the terminal before the first event: the planner's
+        # clarification round (#10) prompts on this stream while it is still planning, and
+        # a `Live` up at that moment leaves the cursor inside it. `plan_created` is that
+        # first event, published once planning has settled either way.
+        err_console.print(PLANNING_HEADLINE)
+        try:
+            view.apply(await queue.get())
+        except asyncio.CancelledError:
+            # `_pump`'s contract, one phase earlier: a run torn down before it drew
+            # anything still folds what it was sent, or the view describes the moment the
+            # region would have opened rather than the run.
+            _drain(queue, view, _undrawn)
+            raise
+
         # Read per frame, not once: a terminal resized mid-run has to be picked up, and
         # `Console.size` is an `ioctl` against a run whose steps take seconds.
         def frame() -> RenderableType:
@@ -519,15 +534,26 @@ async def _pump(
         while True:
             _fold(await queue.get(), view, draw)
     except asyncio.CancelledError:
-        while not queue.empty():
-            _fold(queue.get_nowait(), view, draw)
+        _drain(queue, view, draw)
         raise  # never swallowed (§10)
+
+
+def _drain(
+    queue: asyncio.Queue[TaskEvent], view: RunView, draw: Callable[[TaskEvent], None]
+) -> None:
+    """Fold everything already queued. Sync throughout, so cancellation cannot cut it."""
+    while not queue.empty():
+        _fold(queue.get_nowait(), view, draw)
 
 
 def _fold(event: TaskEvent, view: RunView, draw: Callable[[TaskEvent], None]) -> None:
     """Update the model, then the screen — `draw` reads the view it was just given."""
     view.apply(event)
     draw(event)
+
+
+def _undrawn(_event: TaskEvent) -> None:
+    """Draw nothing: no region has opened yet, so folding is all a late event can get."""
 
 
 def _write_line(event: TaskEvent) -> None:
