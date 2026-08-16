@@ -211,27 +211,27 @@ def assert_plan_shape(plan: Plan, shape: PlanShape) -> None:
     )
 
     for role, expected in shape.role_counts.items():
-        actual = len(_with_role(plan, role))
+        actual = len(with_role(plan, role))
         assert actual == expected, f"expected {expected} {role} subtasks, got {actual}:\n{rendered}"
 
     ancestors = _ancestors(plan)
     for earlier, later in shape.precedes:
-        for consumer in _with_role(plan, later):
-            for producer in _with_role(plan, earlier):
+        for consumer in with_role(plan, later):
+            for producer in with_role(plan, earlier):
                 assert producer.id in ancestors[consumer.id], (
                     f"{consumer.id!r} ({later}) must run after {producer.id!r} ({earlier}), "
                     f"directly or transitively:\n{rendered}"
                 )
 
     if shape.concurrent is not None:
-        for first, second in itertools.combinations(_with_role(plan, shape.concurrent), 2):
+        for first, second in itertools.combinations(with_role(plan, shape.concurrent), 2):
             assert second.id not in ancestors[first.id] and first.id not in ancestors[second.id], (
                 f"{first.id!r} and {second.id!r} are both {shape.concurrent} and need nothing "
                 f"from each other, so neither may depend on the other:\n{rendered}"
             )
 
 
-def _with_role(plan: Plan, role: AgentRole) -> list[Subtask]:
+def with_role(plan: Plan, role: AgentRole) -> list[Subtask]:
     """The plan's subtasks carrying `role`, in plan order."""
     return [subtask for subtask in plan.subtasks if subtask.role is role]
 

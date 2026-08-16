@@ -13,6 +13,7 @@ between those two.
 """
 
 import asyncio
+import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -47,6 +48,7 @@ from orchestra.core.state import (
     EventKind,
     SubtaskStatus,
     TaskEvent,
+    artifact_path,
 )
 from orchestra.providers.anthropic import AnthropicProvider
 from orchestra.providers.base import AssistantTurn, Provider
@@ -59,11 +61,18 @@ SUMMARY = "Revenue grew in each of the last three quarters."
 # on a stale literal.
 FIRST_STEP = LINEAR.draft().subtasks[0].id
 FIRST_POINTER = f"{ARTIFACT_PREFIX}{FIRST_STEP}.txt"
+ANALYSIS_STEP = next(
+    subtask.id for subtask in LINEAR.draft().subtasks if subtask.role is AgentRole.ANALYTICS
+)
+ANALYSIS_POINTER = f"{ARTIFACT_PREFIX}{ANALYSIS_STEP}.json"
 CHART_STEP = next(
     subtask.id for subtask in LINEAR.draft().subtasks if subtask.role is AgentRole.VISUALIZATION
 )
 # One category of `_chart_draft`'s spec, so the assertion tracks the fixture.
 CHART_CATEGORY = "2025Q3"
+# What `_turns` asks for and `_ANALYSIS_CODE` counts, so the fixture figure is one the run
+# computes rather than one invented here.
+QUARTERS_ANALYSED = 3
 
 
 def _responses(
@@ -72,7 +81,7 @@ def _responses(
     """The answers a run consumes, in order: the plan, the chart draft when the real
     Visualization worker is wired in, then the report draft."""
     figures = (
-        [FigureDraft(label="Q3 revenue", value="145", source=figure_source)]
+        [FigureDraft(label="Quarters analysed", value=str(QUARTERS_ANALYSED), source=figure_source)]
         if figure_source is not None
         else []
     )
@@ -119,7 +128,9 @@ def _turns() -> list[AssistantTurn | BaseException]:
     return [
         AssistantTurn(
             text="",
-            tool_calls=(ToolCall(id="c1", name=QUERY_CSV_TOOL, arguments={"last_n": 3}),),
+            tool_calls=(
+                ToolCall(id="c1", name=QUERY_CSV_TOOL, arguments={"last_n": QUARTERS_ANALYSED}),
+            ),
             usage_tokens=100,
         ),
         AssistantTurn(text="Retrieved the last three quarters.", usage_tokens=50),
@@ -475,6 +486,50 @@ async def test_run_once_carries_the_visualization_chart_into_the_report(
     # The drawing, not just a pointer to one: what the terminal prints is the criterion.
     assert report.chart_ascii is not None
     assert CHART_CATEGORY in report.chart_ascii
+
+
+@pytest.mark.asyncio
+async def test_run_once_reports_a_computed_figure_and_its_chart_in_both_output_shapes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """#8's criterion end to end: the report cites a number the analytics subprocess really
+    printed, sourced to the pointer that step minted, and both shapes carry it.
+
+    Checked against the analysis artifact rather than a literal, so this fails the day the
+    step stops computing it instead of passing on the fixture.
+    """
+    provider = FakeProvider(
+        responses=_responses(figure_source=ANALYSIS_POINTER, chart=True), turns=_turns()
+    )
+    _offline_run(monkeypatch, tmp_path, provider)
+
+    state = await run_once(LINEAR.prompt)
+
+    report = state.final_result
+    assert report is not None
+    assert state.artifact_dir is not None
+    store = ArtifactStore(state.artifact_dir)
+    # Survived the aggregator's backing filter, citing a pointer this run actually minted.
+    (figure,) = report.key_figures
+    assert figure.source == state.artifacts[ANALYSIS_STEP]
+    assert f"quarters analysed: {figure.value}" in store.get_text(figure.source)
+    assert report.chart is not None
+    # `artifact_path`, not `store.path_for`: the store raises on a missing file, so that
+    # assertion could only ever raise, never fail.
+    assert artifact_path(state.artifact_dir, report.chart).is_file()
+
+    # That the figure reached the text, not how it is laid out there — the column widths
+    # are `test_format.py`'s to pin.
+    text = format_result(state, output=OutputFormat.TEXT)
+    assert figure.value in text
+    assert figure.source in text
+    assert CHART_CATEGORY in text
+    # One document, not a fragment; the stream it goes out on is `test_cli.py`'s.
+    document = json.loads(format_result(state, output=OutputFormat.JSON))
+    assert document["report"]["key_figures"] == [
+        {"label": figure.label, "value": figure.value, "source": figure.source}
+    ]
+    assert CHART_CATEGORY in document["report"]["chart_ascii"]
 
 
 @pytest.mark.asyncio
