@@ -17,11 +17,13 @@ import orchestra.cli.app as cli_app
 from orchestra import __version__
 from orchestra.app import RunObserver
 from orchestra.cli.app import app, error_boundary
+from orchestra.cli.chat import HINT
 from orchestra.cli.console import console, err_console
 from orchestra.cli.prompt import ConsoleAsker
 from orchestra.cli.render import RenderMode
 from orchestra.config import load_config
 from orchestra.core.errors import ConfigError, ExitCode, ProviderError, TaskFailure
+from orchestra.core.interrupt import Chat
 from orchestra.core.question import Asker
 from orchestra.core.state import (
     AgentRole,
@@ -141,22 +143,30 @@ def _stub_run_once(
     outcome: TaskState | BaseException,
     *,
     askers: list[Asker | None] | None = None,
+    chats: list[Chat | None] | None = None,
 ) -> list[RunObserver | None]:
     """Replace the delegation target, leaving the command's own behaviour under test.
 
     Returns the list the command's observer is recorded in, so a test can assert which
     dashboard the flags asked for without running one. `askers` is the same seam for
-    whoever the command offered to answer clarifying questions (#10).
+    whoever the command offered to answer clarifying questions (#10), and `chats` for
+    whoever it offered to interrupt the run (#12).
     """
     observers: list[RunObserver | None] = []
 
     async def fake_run_once(
-        prompt: str, *, observer: RunObserver | None = None, asker: Asker | None = None
+        prompt: str,
+        *,
+        observer: RunObserver | None = None,
+        asker: Asker | None = None,
+        chat: Chat | None = None,
     ) -> TaskState:
         assert prompt == PROMPT  # the command passes the argument through unchanged
         observers.append(observer)
         if askers is not None:
             askers.append(asker)
+        if chats is not None:
+            chats.append(chat)
         if isinstance(outcome, BaseException):
             raise outcome
         return outcome
@@ -294,6 +304,24 @@ def test_asker_needs_both_streams_to_be_a_terminal(
     asker = cli_app._asker()
 
     assert isinstance(asker, ConsoleAsker) is offered
+    # The interrupt key needs the same two streams (#12): the key comes off stdin and
+    # everything the pause shows goes to stderr.
+    assert cli_app._interactive() is offered
+
+
+def test_run_with_a_piped_stdin_offers_nobody_to_interrupt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#12: no terminal, no key to press — so the command hands `run_once` no chat and the
+    run simply never pauses."""
+    chats: list[Chat | None] = []
+    _stub_run_once(monkeypatch, _finished_state(SubtaskStatus.DONE), chats=chats)
+
+    result = runner.invoke(app, ["run", PROMPT], prog_name=PROG)
+
+    assert result.exit_code == ExitCode.SUCCESS
+    assert chats == [None]
+    assert HINT not in result.stderr  # nothing to advertise
 
 
 def test_run_on_a_terminal_asks_for_the_live_dashboard(monkeypatch: pytest.MonkeyPatch) -> None:
