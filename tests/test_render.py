@@ -58,6 +58,8 @@ from orchestra.core.state import (
     TaskEvent,
     TaskState,
 )
+from scenarios import FAN_OUT
+from test_engine import ScriptedWorker, _planned
 
 PROMPT = "Summarize the last 3 quarters' financial trends"
 SUMMARY = "Revenue grew in each of the last three quarters."
@@ -1008,6 +1010,54 @@ async def test_dashboard_follows_a_real_engine_run_to_every_row_done(store: Arti
     assert view.rows["fetch"].detail == state.artifacts["fetch"]  # the pointer it minted
     assert view.finished
     assert view.headline == "2 of 2 subtasks completed"
+
+
+@pytest.mark.asyncio
+async def test_dashboard_shows_both_fan_out_retrievals_spinning_at_once() -> None:
+    """#17's dashboard AC, and the gap the two `active` tests above leave: they fold
+    hand-written `started` events, so both would pass with the retrievals run one after the
+    other. `test_engine` proves the engine dispatches them together; this is the one that
+    proves the frame says so. The gate holds both open, so the frame read here is the run's
+    rather than whichever moment the assertion arrived in.
+    """
+    retrievals = ["fetch_our_growth", "fetch_industry_benchmarks"]
+    state = await _planned(FAN_OUT)
+    assert state.plan is not None
+    instructions = {subtask.id: subtask.instruction for subtask in state.plan.subtasks}
+    gate = asyncio.Event()
+    worker = ScriptedWorker(gate=gate, gate_ids=frozenset(retrievals))
+    workers: dict[AgentRole, Worker] = dict.fromkeys(AgentRole, worker)
+    broker: Broker[TaskEvent] = Broker()
+
+    async with dashboard(broker, mode=RenderMode.LIVE) as view:
+        run = asyncio.create_task(ExecutionEngine(workers=workers, broker=broker).run(state))
+        await wait_until(lambda: len(view.active) == 2, what="both retrievals to report started")
+
+        # The renderable (§12): one spinner each, naming the work rather than the count.
+        # Read off the plan, not spelled out, so the wording stays `scenarios.py`'s.
+        grid = _active_grid(view)
+        assert [row.id for row in view.active] == retrievals
+        assert [type(cell) for cell in grid.columns[0].cells] == [Spinner, Spinner]
+        assert [str(cell) for cell in grid.columns[1].cells] == [
+            f"{AgentRole.DATA_RETRIEVAL.value}  {instructions[subtask_id]}"
+            for subtask_id in retrievals
+        ]
+
+        # And painted, for the "visibly" in the AC: two rows in the one panel, each still
+        # its own agent's work. Asserted on the head of the instruction — an 80-column
+        # panel elides the tail, which is the behaviour above it.
+        with console.capture() as painted:
+            console.print(active_panel(view))
+        drawn = painted.get().splitlines()[1:-1]  # between the panel's two borders
+        assert len(drawn) == 2
+        for subtask_id, line in zip(retrievals, drawn, strict=True):
+            assert f"{AgentRole.DATA_RETRIEVAL.value}  {instructions[subtask_id][:20]}" in line
+
+        gate.set()
+        await run
+
+    # Released, the gated run still finished — the frame above was mid-run, not a stall.
+    assert {row.status for row in view.rows.values()} == {SubtaskStatus.DONE}
 
 
 # --------------------------------------------------------------------------

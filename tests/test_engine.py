@@ -277,6 +277,35 @@ async def test_run_dispatches_independent_subtasks_concurrently() -> None:
 
 
 @pytest.mark.asyncio
+async def test_run_starts_both_retrievals_before_either_completes() -> None:
+    """The same overlap read off the event stream instead of sampled inside the worker
+    (#17): both retrievals are `subtask_started` before the first `subtask_completed`.
+
+    The gate holds every dispatch open until both starts are on the ledger, so the
+    ordering asserted is the engine's and not the scheduler's.
+    """
+    state = await _planned(FAN_OUT)
+    gate = asyncio.Event()
+    worker = ScriptedWorker(gate=gate)
+
+    run = asyncio.create_task(_engine(worker).run(state))
+    await wait_until(
+        lambda: _kinds(state.events).count(EventKind.SUBTASK_STARTED) == 2,
+        what="both retrievals to report started",
+    )
+    gate.set()
+    await run
+
+    first_completion = _kinds(state.events).index(EventKind.SUBTASK_COMPLETED)
+    assert {
+        event.subtask_id
+        for event in state.events[:first_completion]
+        if event.kind is EventKind.SUBTASK_STARTED
+    } == {"fetch_our_growth", "fetch_industry_benchmarks"}
+    assert set(_statuses(state).values()) == {SubtaskStatus.DONE}
+
+
+@pytest.mark.asyncio
 async def test_run_bounds_concurrency_with_the_semaphore() -> None:
     """§10: never unbounded fan-out. Same plan, same result, one at a time."""
     state = await _planned(FAN_OUT)
@@ -333,7 +362,7 @@ async def test_run_starts_a_subtask_without_waiting_for_an_unrelated_slow_one() 
 @pytest.mark.asyncio
 async def test_run_marks_a_failed_subtask_and_leaves_its_dependents_pending() -> None:
     state = await _planned(FAN_OUT)
-    worker = ScriptedWorker(fail_ids=frozenset({"fetch_recent_quarters"}))
+    worker = ScriptedWorker(fail_ids=frozenset({"fetch_our_growth"}))
     broker = _broker()
 
     async with broker.subscribe() as queue:
@@ -341,16 +370,16 @@ async def test_run_marks_a_failed_subtask_and_leaves_its_dependents_pending() ->
         published = _drain(queue)
 
     assert _statuses(state) == {
-        "fetch_recent_quarters": SubtaskStatus.FAILED,
+        "fetch_our_growth": SubtaskStatus.FAILED,
         # Independent of the failure, so it still runs.
-        "fetch_prior_year_quarters": SubtaskStatus.DONE,
-        "compare_quarters": SubtaskStatus.PENDING,
-        "chart_comparison": SubtaskStatus.PENDING,
+        "fetch_industry_benchmarks": SubtaskStatus.DONE,
+        "compare_against_benchmarks": SubtaskStatus.PENDING,
+        "chart_growth_trend": SubtaskStatus.PENDING,
     }
     assert EventKind.SUBTASK_FAILED in _kinds(published)
     # Ends rather than deadlocking on a dependency that will never arrive.
     assert _kinds(published)[-1] is EventKind.RUN_FINISHED
-    assert [subtask.id for subtask in state.failed_subtasks] == ["fetch_recent_quarters"]
+    assert [subtask.id for subtask in state.failed_subtasks] == ["fetch_our_growth"]
 
 
 @pytest.mark.asyncio
@@ -541,7 +570,7 @@ async def test_run_cancellation_stops_in_flight_subtasks_and_propagates() -> Non
 
     assert worker.running == 0  # every in-flight worker unwound
     # Not marked failed: a cancelled subtask did not fail.
-    assert _statuses(state)["fetch_recent_quarters"] is SubtaskStatus.RUNNING
+    assert _statuses(state)["fetch_our_growth"] is SubtaskStatus.RUNNING
 
 
 @pytest.mark.asyncio
@@ -557,5 +586,5 @@ async def test_run_cancellation_is_not_retried_as_a_failed_attempt() -> None:
     with pytest.raises(asyncio.CancelledError):
         await run
 
-    assert _dispatches(worker, "fetch_recent_quarters") == 1
+    assert _dispatches(worker, "fetch_our_growth") == 1
     assert EventKind.SUBTASK_WARNING not in _kinds(state.events)

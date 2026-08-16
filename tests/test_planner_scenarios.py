@@ -9,7 +9,7 @@ import pytest
 
 from conftest import FakeProvider
 from orchestra.agents.planner import Planner
-from orchestra.core.state import AgentRole, TaskState
+from orchestra.core.state import AgentRole, Plan, Subtask, TaskState
 from scenarios import FAN_OUT, LINEAR, ROLE_OMISSION, SCENARIOS, Scenario, assert_plan_shape
 from scenarios import scenario_id as _id
 
@@ -62,3 +62,34 @@ async def test_assert_plan_shape_rejects_a_plan_of_the_wrong_shape() -> None:
 
     with pytest.raises(AssertionError, match="expected 3 subtasks, got 4"):
         assert_plan_shape(plan, LINEAR.shape)
+
+
+def test_assert_plan_shape_rejects_two_branches_that_never_meet() -> None:
+    """The fan-out shape allows the comparison to be one step or two, so the count alone no
+    longer proves the branches rejoin. Two retrievals feeding nothing in common is not a
+    fan-out; it is two plans."""
+    plan = Plan(
+        subtasks=[
+            Subtask(id="fetch_ours", role=AgentRole.DATA_RETRIEVAL, instruction="Load revenue"),
+            Subtask(
+                id="fetch_theirs", role=AgentRole.DATA_RETRIEVAL, instruction="Find benchmarks"
+            ),
+            Subtask(
+                id="summarise",
+                role=AgentRole.ANALYTICS,
+                instruction="Describe our growth",
+                inputs=["fetch_ours"],
+                depends_on=["fetch_ours"],
+            ),
+            Subtask(
+                id="chart",
+                role=AgentRole.VISUALIZATION,
+                instruction="Plot our growth",
+                inputs=["summarise"],
+                depends_on=["summarise"],
+            ),
+        ]
+    )
+
+    with pytest.raises(AssertionError, match="fan out and never meet"):
+        assert_plan_shape(plan, FAN_OUT.shape)
