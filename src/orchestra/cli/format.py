@@ -58,6 +58,7 @@ class ReportView(BaseModel):
     executive_summary: str
     key_figures: list[FigureView]
     chart: ArtifactPointer | None
+    chart_ascii: str | None
 
 
 class SubtaskView(BaseModel):
@@ -116,6 +117,9 @@ def _text(state: TaskState, *, quiet: bool) -> str:
                     ]
                 )
             )
+        # The drawing first, then the pointer that opens the real one.
+        if report.chart_ascii:
+            blocks.append(report.chart_ascii)
         if report.chart is not None:
             blocks.append(f"Chart: {report.chart}")
 
@@ -159,6 +163,7 @@ def _document(state: TaskState) -> ResultDocument:
                 for figure in report.key_figures
             ],
             chart=report.chart,
+            chart_ascii=report.chart_ascii,
         ),
         subtasks=[
             SubtaskView(

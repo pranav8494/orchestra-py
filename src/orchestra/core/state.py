@@ -186,6 +186,9 @@ class FinalReport(BaseModel):
     executive_summary: str
     key_figures: list[KeyFigure] = Field(default_factory=list)
     chart: ArtifactPointer | None = None
+    # Inline, unlike `chart`: `cli/format.py` does no I/O, so text that is printed must
+    # already be here — and this report is written once at the end, never re-sent to a model.
+    chart_ascii: str | None = None
 
 
 class TaskState(BaseModel):
