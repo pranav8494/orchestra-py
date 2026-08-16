@@ -22,6 +22,7 @@ what artifact to write, stay with the worker.
 from collections import Counter
 from dataclasses import dataclass
 
+from orchestra.agents.workers.briefing import build_briefing
 from orchestra.core.errors import TaskFailure
 from orchestra.core.events import Broker
 from orchestra.core.state import EventKind, SubtaskContext, TaskEvent
@@ -133,7 +134,14 @@ class ToolLoop:
             TaskFailure: a bound was hit, or the reply was truncated.
             asyncio.CancelledError: propagated from the provider or a tool (§10).
         """
-        messages = [ProviderMessage(role=MessageRole.USER, content=_briefing(context))]
+        # Earlier artifacts are named, not resolved: the pointers are there so the model
+        # does not re-fetch something the run already has.
+        named = ", ".join(f"{name} ({pointer})" for name, pointer in sorted(context.inputs.items()))
+        messages = [
+            ProviderMessage(
+                role=MessageRole.USER, content=build_briefing(context, [named] if named else [])
+            )
+        ]
         kept: list[ToolOutcome] = []
         summary = ""
         spent = 0
@@ -252,28 +260,3 @@ def _exchange(turn: AssistantTurn, results: tuple[ToolResult, ...]) -> list[Prov
         ),
         ProviderMessage(role=MessageRole.USER, tool_results=results),
     ]
-
-
-def _briefing(context: SubtaskContext) -> str:
-    """Build the user turn: the step, the request behind it, and what already exists.
-
-    Formatting lives here, not in `prompts/` (§11), and the untrusted text stays out of
-    the system prompt.
-
-    Earlier artifacts are named, not resolved: the pointers are here so the model does not
-    re-fetch something the run already has.
-    """
-    lines = [
-        f"Subtask: {context.subtask.instruction}",
-        f"The request this serves: {context.user_request}",
-    ]
-    if context.inputs:
-        lines.append(
-            "Earlier steps already produced: "
-            + ", ".join(f"{name} ({pointer})" for name, pointer in sorted(context.inputs.items()))
-        )
-    lines += [
-        f"Clarification asked: {item.question}\nThe user answered: {item.answer}"
-        for item in context.clarifications
-    ]
-    return "\n".join(lines)

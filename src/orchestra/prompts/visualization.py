@@ -19,8 +19,6 @@ a figure you cannot see.
 Choose the shape from the data: a line for a series over time, a bar for a comparison \
 across categories. One chart, however many series it needs.
 
-Give every series exactly one value per category, in the same order as the categories.
-
-If the previews hold fewer than two points, return what you can see anyway - thin data \
-is reported for you, and a guessed point would be worse.\
+If the previews hold fewer than two points, return what you can see anyway - a guessed \
+point would be worse.\
 """

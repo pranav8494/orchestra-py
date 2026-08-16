@@ -18,6 +18,7 @@ from collections.abc import Mapping
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from orchestra.agents.workers.briefing import build_briefing
 from orchestra.artifacts import DEFAULT_PREVIEW_LIMIT, ArtifactStore
 from orchestra.charts import ChartSpec, insufficient_data, render_ascii, render_html
 from orchestra.core.errors import TaskFailure
@@ -45,9 +46,6 @@ class ChartDraft(BaseModel):
 
 class VisualizationResult(BaseModel):
     """The artifact this worker writes, and the aggregator reads back.
-
-    A contract between two agents, so it is frozen and forbids extras: a field that
-    drifted on one side would otherwise be dropped in silence on the other.
 
     Field order is the preview budget, as in `AnalysisResult`: the aggregator is shown
     `ArtifactStore.preview`, and what it needs to *write about* is the summary. It reads
@@ -98,7 +96,9 @@ class VisualizationWorker:
                 aggregator: a chart is not worth a retried outage.
             asyncio.CancelledError: propagated from the provider or the store (§10).
         """
-        briefing = await self._briefing(context)
+        # Previews, not pointers: this agent has no tool to open an artifact with, so what
+        # it is shown is all it can chart.
+        briefing = build_briefing(context, await asyncio.to_thread(self._previews, context.inputs))
         draft = await self._provider.parse_structured(
             system=VISUALIZATION_SYSTEM_PROMPT,
             messages=[ProviderMessage(role=MessageRole.USER, content=briefing)],
@@ -126,12 +126,7 @@ class VisualizationWorker:
         )
 
     async def _write_chart(self, context: SubtaskContext, spec: ChartSpec) -> ArtifactPointer:
-        """Render the chart file and store it, off the event loop.
-
-        Both halves in the one thread: Plotly's HTML is built in Python and the write is
-        blocking I/O, and either on the loop would serialise the engine's concurrent
-        dispatch (§10).
-        """
+        """Render the chart file and store it in one thread — the build and the write both block."""
         name = f"{context.subtask.id}.html"
         return await asyncio.to_thread(lambda: self._store.put_text(name, render_html(spec)))
 
@@ -148,28 +143,6 @@ class VisualizationWorker:
                 message=reason,
             )
         )
-
-    async def _briefing(self, context: SubtaskContext) -> str:
-        """Build the user turn: the step, the request behind it, and the numbers to draw.
-
-        Formatting lives here, not in `prompts/` (§11), and the untrusted text stays out
-        of the system prompt.
-
-        Previews, not pointers, unlike the tool loop's briefing: this agent has no tool
-        to open an artifact with, so what it is shown is all it can chart.
-        """
-        lines = [
-            f"Subtask: {context.subtask.instruction}",
-            f"The request this serves: {context.user_request}",
-        ]
-        if context.inputs:
-            lines.append("Earlier steps produced:")
-            lines += await asyncio.to_thread(self._previews, context.inputs)
-        lines += [
-            f"Clarification asked: {item.question}\nThe user answered: {item.answer}"
-            for item in context.clarifications
-        ]
-        return "\n".join(lines)
 
     def _previews(self, inputs: Mapping[str, ArtifactPointer]) -> list[str]:
         """Read every input's preview. Blocking — call it in a thread.

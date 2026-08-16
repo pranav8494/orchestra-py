@@ -7,8 +7,9 @@ all of it — over `FakeProvider`, so no network (§12).
 Two structured calls per run, in order: the plan, then the report; `_responses()` queues
 both. Tests that build their own `Orchestra` use `EchoWorker` throughout, so a wiring
 failure stays distinguishable from an agent failure. The ones going through
-`build_orchestra` get the real #5-#7 agents and so also queue `_turns()`, plus — since #7
-makes a structured call of its own, between those two — `chart=True`.
+`build_orchestra` get the real #5-#7 agents and so also queue `_turns()`, plus `chart=True`
+when the run gets as far as the visualization step — #7 makes a structured call of its own,
+between those two.
 """
 
 import asyncio
@@ -50,6 +51,11 @@ SUMMARY = "Revenue grew in each of the last three quarters."
 # on a stale literal.
 FIRST_STEP = LINEAR.draft().subtasks[0].id
 FIRST_POINTER = f"artifact:{FIRST_STEP}.txt"
+CHART_STEP = next(
+    subtask.id for subtask in LINEAR.draft().subtasks if subtask.role is AgentRole.VISUALIZATION
+)
+# One category of `_chart_draft`'s spec, so the assertion tracks the fixture.
+CHART_CATEGORY = "2025Q3"
 
 
 def _responses(
@@ -80,7 +86,7 @@ def _chart_draft() -> ChartDraft:
             kind=ChartKind.LINE,
             x_label="Quarter",
             y_label="Revenue",
-            categories=["2025Q3", "2025Q4"],
+            categories=[CHART_CATEGORY, "2025Q4"],
             series=[ChartSeries(name="Revenue", values=[6_340_000.0, 7_015_000.0])],
         ),
     )
@@ -354,6 +360,27 @@ async def test_run_once_without_an_observer_runs_headless(
     assert state.final_result is not None
     assert not state.failed
     assert provider.closed
+
+
+@pytest.mark.asyncio
+async def test_run_once_carries_the_visualization_chart_into_the_report(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """#7's seam end to end: the worker draws and writes a receipt, the aggregator reads
+    both halves back out of it. Each half is covered alone elsewhere; only this proves
+    they meet."""
+    provider = FakeProvider(responses=_responses(chart=True), turns=_turns())
+    _offline_run(monkeypatch, tmp_path, provider)
+
+    state = await run_once(LINEAR.prompt)
+
+    report = state.final_result
+    assert report is not None
+    assert report.chart == f"artifact:{CHART_STEP}.html"
+    assert "<html" in ArtifactStore(tmp_path / "artifacts").get_text(report.chart)
+    # The drawing, not just a pointer to one: what the terminal prints is the criterion.
+    assert report.chart_ascii is not None
+    assert CHART_CATEGORY in report.chart_ascii
 
 
 @pytest.mark.asyncio

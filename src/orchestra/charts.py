@@ -20,14 +20,17 @@ from pydantic import BaseModel, ConfigDict, Field
 # connect or a bar to be compared against.
 MIN_POINTS = 2
 
+# The worker uses a rejection verbatim as the subtask summary, so the opening is contract.
+THIN_DATA_PREFIX = "Insufficient data to chart: "
+
 _BAR = "█"
-_BLANK = ""
 
 # All values equal leaves nothing to scale against, so every bar gets this instead.
 _FLAT_BAR_LENGTH = 1
 
 _VALUE_DECIMALS = 2
 
+# Only a caller that skipped `insufficient_data` can reach this.
 _NOTHING_TO_DRAW = "(no data to chart)"
 
 
@@ -85,24 +88,30 @@ def insufficient_data(spec: ChartSpec) -> str | None:
     The one place drawability is decided — the renderers below trust its verdict rather
     than each re-deriving it. The first problem is returned, not all of them: the message
     reaches the user as the subtask's summary, where one plain sentence beats a list.
+
+    Ragged is judged strictly: one short series rejects the whole spec, rather than the
+    good series being drawn alone. A chart missing a series it names misleads more quietly
+    than no chart does.
     """
     if not spec.series:
-        return "Insufficient data to chart: the model returned no series."
+        return f"{THIN_DATA_PREFIX}the model returned no series."
     if not spec.categories:
-        return "Insufficient data to chart: the model returned no categories."
+        return f"{THIN_DATA_PREFIX}the model returned no categories."
     if len(spec.categories) < MIN_POINTS:
         return (
-            f"Insufficient data to chart: {len(spec.categories)} point is not a trend, "
+            f"{THIN_DATA_PREFIX}{len(spec.categories)} point is not a trend, "
             f"{MIN_POINTS} are needed."
         )
-    if all(not series.values for series in spec.series):
-        return "Insufficient data to chart: every series is empty."
     for series in spec.series:
         if len(series.values) != len(spec.categories):
             return (
-                f"Insufficient data to chart: series {series.name!r} has "
+                f"{THIN_DATA_PREFIX}series {series.name!r} has "
                 f"{len(series.values)} values for {len(spec.categories)} categories."
             )
+    # Shape is right, numbers are not: `nan`/`inf` plot as an empty figure, which reads as
+    # a working chart. One finite value is enough — the renderers stub out the rest.
+    if not any(math.isfinite(value) for series in spec.series for value in series.values):
+        return f"{THIN_DATA_PREFIX}no value is a finite number."
     return None
 
 
@@ -142,15 +151,14 @@ def render_ascii(spec: ChartSpec, *, width: int = 40) -> str:
     Text, not Rich: this string is stored in an artifact the aggregator reads back, so it
     has to survive being a value in a JSON file (§5 — no styling outside `cli/`).
 
-    Never raises, on any spec — including one `insufficient_data` rejected. It is called
-    on the worker's degraded path, where a second failure mode would be the bug.
+    Callers are expected to have run `insufficient_data` first. One that does not still
+    gets a string: this never raises, on any spec.
 
     Args:
         width: the longest bar, in characters. No bar exceeds it.
     """
     lines = _heading(spec)
-    # Ragged input is truncated rather than rejected: the caller already had its chance
-    # to reject, and this path exists for the specs that got through anyway.
+    # Truncated rather than rejected, for the same reason: degrade, don't raise.
     blocks = [
         [
             (label, value, _format_value(value))
@@ -174,7 +182,7 @@ def render_ascii(spec: ChartSpec, *, width: int = 40) -> str:
 
     named = len(spec.series) > 1
     for series, block in zip(spec.series, blocks, strict=True):
-        lines.append(_BLANK)
+        lines.append("")
         if named:
             lines.append(f"{series.name}:")
         lines += [

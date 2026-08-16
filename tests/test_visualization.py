@@ -21,7 +21,7 @@ from orchestra.agents.workers.visualization import (
     VisualizationWorker,
 )
 from orchestra.artifacts import ArtifactStore
-from orchestra.charts import ChartKind, ChartSeries, ChartSpec, insufficient_data
+from orchestra.charts import ChartKind, ChartSeries, ChartSpec
 from orchestra.core.errors import TaskFailure
 from orchestra.core.events import Broker
 from orchestra.core.state import (
@@ -47,9 +47,10 @@ UPSTREAM_FIGURE = "2025Q4 revenue growth: 10.65% QoQ"
 QUARTERS = ["2025Q2", "2025Q3", "2025Q4"]
 REVENUE = [5_820_000.0, 6_340_000.0, 7_015_000.0]
 
-# The message `charts.insufficient_data` returns; asserted as a prefix, since the rest of
-# it names the point count.
-THIN = "Insufficient data to chart"
+# What the receipt says in place of a drawing when the model returns a single point.
+# Spelled out rather than re-derived from `charts.insufficient_data`: this is the sentence
+# the user reads as the subtask's summary, so the body is pinned here too.
+ONE_POINT = "Insufficient data to chart: 1 point is not a trend, 2 are needed."
 
 
 def _spec(points: int = len(QUARTERS)) -> ChartSpec:
@@ -134,24 +135,20 @@ async def test_worker_with_one_point_warns_and_completes_without_a_chart(
 ) -> None:
     """§8: one point is not a chart, but it is not a broken run either. The receipt says so
     in place of the drawing, and the operator hears about it on the event stream (§6)."""
-    draft = _draft(points=1)
-    provider = FakeProvider(responses=[draft])
+    provider = FakeProvider(responses=[_draft(points=1)])
     broker: Broker[TaskEvent] = Broker()
 
     async with broker.subscribe() as queue:
         pointer = await _worker(provider, store, broker).run(_context())
         published = [queue.get_nowait() for _ in range(queue.qsize())]
 
-    reason = insufficient_data(draft.spec)
-    assert reason is not None
-    assert reason.startswith(THIN)
     result = _stored(store, pointer)
     assert result.chart is None
-    assert not (store.root / f"{SUBTASK}.html").exists()  # nothing half-written either
-    assert result.ascii_chart == reason
-    assert result.summary == reason  # the model's summary described a chart that is absent
+    assert not (store.root / f"{SUBTASK}.html").exists()  # the chart write never started
+    assert result.ascii_chart == ONE_POINT
+    assert result.summary == ONE_POINT  # the model's summary described a chart that is absent
     warnings = [event for event in published if event.kind is EventKind.SUBTASK_WARNING]
-    assert [(event.subtask_id, event.message) for event in warnings] == [(SUBTASK, reason)]
+    assert [(event.subtask_id, event.message) for event in warnings] == [(SUBTASK, ONE_POINT)]
 
 
 @pytest.mark.asyncio
@@ -162,7 +159,7 @@ async def test_worker_that_got_no_chart_back_fails_the_subtask(store: ArtifactSt
     with pytest.raises(TaskFailure, match=SUBTASK):
         await _worker(provider, store).run(_context())
 
-    assert list(store.root.iterdir()) == []  # no orphan chart left behind
+    assert list(store.root.iterdir()) == []  # the step failed before either write started
 
 
 @pytest.mark.asyncio

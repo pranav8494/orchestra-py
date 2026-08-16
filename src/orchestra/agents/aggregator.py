@@ -99,7 +99,8 @@ class Aggregator:
             asyncio.CancelledError: propagated, never swallowed (§10).
         """
         completed = _completed(state)
-        # From the ledger, not the model: the chart is a fact the run already recorded.
+        # From the visualization step's own receipt, never from the report draft: the
+        # chart is a fact the run recorded, not one the model may claim.
         chart, chart_ascii = await self._chart_outputs(completed)
 
         report = await self._synthesise(state, completed, chart, chart_ascii) if completed else None
