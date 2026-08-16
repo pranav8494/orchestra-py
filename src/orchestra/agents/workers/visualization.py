@@ -18,6 +18,7 @@ from collections.abc import Mapping
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from orchestra.agents.structured import parse_validated
 from orchestra.agents.workers.briefing import build_briefing
 from orchestra.artifacts import DEFAULT_PREVIEW_LIMIT, ArtifactStore
 from orchestra.charts import ChartSpec, insufficient_data, render_ascii, render_html
@@ -29,7 +30,7 @@ from orchestra.core.state import (
     SubtaskContext,
     TaskEvent,
 )
-from orchestra.prompts import VISUALIZATION_SYSTEM_PROMPT
+from orchestra.prompts import STRUCTURED_REFORMAT_INSTRUCTION, VISUALIZATION_SYSTEM_PROMPT
 from orchestra.providers.base import MessageRole, Provider, ProviderMessage
 
 
@@ -91,22 +92,27 @@ class VisualizationWorker:
         """Draw the subtask's chart and store it. See `Worker.run`.
 
         Raises:
-            TaskFailure: the model returned no chart, or the store rejected a write.
-            ProviderError: the provider failed. One call and no retry, as in the
-                aggregator: a chart is not worth a retried outage.
+            TaskFailure: no usable chart across every attempt, or the store rejected a write.
+            ProviderError: the provider failed. Unusable output is retried; an outage is
+                not — a chart is not worth doubling one.
             asyncio.CancelledError: propagated from the provider or the store (§10).
         """
         # Previews, not pointers: this agent has no tool to open an artifact with, so what
         # it is shown is all it can chart.
         briefing = build_briefing(context, await asyncio.to_thread(self._previews, context.inputs))
-        draft = await self._provider.parse_structured(
+        # Identity `validate`: pydantic already checked the shape, so a retry here is for
+        # a refusal or a truncated reply.
+        draft, _ = await parse_validated(
+            provider=self._provider,
             system=VISUALIZATION_SYSTEM_PROMPT,
             messages=[ProviderMessage(role=MessageRole.USER, content=briefing)],
             output_format=ChartDraft,
+            validate=lambda chart_draft: chart_draft,
+            instruction=STRUCTURED_REFORMAT_INSTRUCTION,
         )
         if draft is None:
-            # A refusal or a truncated reply. Nothing to draw and nothing to invent, so
-            # the step fails and the report names it (§8).
+            # Nothing to draw and nothing to invent, so the step fails and the report
+            # names it (§8).
             raise TaskFailure(
                 f"Visualization for {context.subtask.id!r} got no chart back from the model."
             )

@@ -152,13 +152,25 @@ async def test_worker_with_one_point_warns_and_completes_without_a_chart(
 
 
 @pytest.mark.asyncio
+async def test_worker_retries_an_unusable_reply_and_charts_the_second(store: ArtifactStore) -> None:
+    """A refusal is unusable output, so it is retried; the step still completes."""
+    provider = FakeProvider(responses=[None, _draft()])
+
+    pointer = await _worker(provider, store).run(_context())
+
+    assert len(provider.calls) == 2
+    assert _stored(store, pointer).summary == SUMMARY
+
+
+@pytest.mark.asyncio
 async def test_worker_that_got_no_chart_back_fails_the_subtask(store: ArtifactStore) -> None:
-    """A refusal or a truncated reply: nothing to draw and nothing to invent."""
-    provider = FakeProvider(responses=[None])
+    """Every attempt refused or truncated: nothing to draw and nothing to invent."""
+    provider = FakeProvider(responses=[None, None, None])
 
     with pytest.raises(TaskFailure, match=SUBTASK):
         await _worker(provider, store).run(_context())
 
+    assert len(provider.calls) == 3
     assert list(store.root.iterdir()) == []  # the step failed before either write started
 
 

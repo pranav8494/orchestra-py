@@ -178,6 +178,50 @@ async def test_loop_over_its_token_budget_fails_with_its_label() -> None:
 
 
 @pytest.mark.asyncio
+async def test_loop_repeating_one_call_and_result_fails_before_the_turn_cap() -> None:
+    """The third bound: six identical steps inside the cap and the budget still terminate."""
+    provider = FakeProvider(
+        turns=[
+            AssistantTurn(
+                text="",
+                tool_calls=(tool_call(LOOKUP, "c1", q="a"), tool_call(LOOKUP, "c2", q="a")),
+                usage_tokens=10,
+            )
+            for _ in range(3)
+        ]
+    )
+    tool = FakeTool(LOOKUP, [ToolResponse(content="same") for _ in range(6)])
+
+    with pytest.raises(TaskFailure, match=r"Analysis for .* the same lookup call for the same"):
+        await _loop(provider, [tool]).run(_context())
+
+    # Tripped on the sixth call, so the third turn was never answered.
+    assert len(tool.calls) == 6
+
+
+@pytest.mark.asyncio
+async def test_loop_repeating_one_call_with_a_new_result_each_time_continues() -> None:
+    """A call whose answer changes is progress, not a loop."""
+    provider = FakeProvider(
+        turns=[
+            *(
+                AssistantTurn(
+                    text="", tool_calls=(tool_call(LOOKUP, f"c{turn}", q="a"),), usage_tokens=10
+                )
+                for turn in range(7)
+            ),
+            AssistantTurn(text="Done.", usage_tokens=10),
+        ]
+    )
+    tool = FakeTool(LOOKUP, [ToolResponse(content=f"page {page}") for page in range(7)])
+
+    result = await _loop(provider, [tool], max_turns=8).run(_context())
+
+    assert result.summary == "Done."
+    assert len(result.kept) == 7
+
+
+@pytest.mark.asyncio
 async def test_loop_with_a_truncated_reply_fails_with_its_label() -> None:
     """A reply cut off by the output limit has no tool call — the same shape as "done"."""
     provider = FakeProvider(

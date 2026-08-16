@@ -367,6 +367,8 @@ async def test_run_once_enforces_the_configured_turn_cap_on_a_real_worker(
     """The bound is not just held, it bites: one turn, a model still calling tools, and the
     retrieval step fails naming the cap it was given rather than the default."""
     monkeypatch.setenv("WORKER_MAX_TURNS", "1")
+    # One attempt, so this stays a test of the turn cap rather than of the retry cap.
+    monkeypatch.setenv("SUBTASK_ATTEMPTS", "1")
     provider = FakeProvider(responses=_responses(), turns=_turns()[:1])
     _offline_run(monkeypatch, tmp_path, provider)
 

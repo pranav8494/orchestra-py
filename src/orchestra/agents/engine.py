@@ -6,13 +6,14 @@ re-scans on every completion. `asyncio.Semaphore` bounds concurrency (§10); `in
 not `status` — is what stops a double dispatch, because a subtask is only `RUNNING` once
 it holds the semaphore and a queued one should not show as running.
 
-**A failed subtask ends a step, not the run.** Its dependents never become ready, and
-everything independent of it still completes. The verdict is the caller's to draw from
-state — partial results beat no results (§8, #8).
+**A failed subtask ends a step, not the run.** A dispatch that raises is retried up to
+`subtask_attempts` times; only the last failure marks it `FAILED`. Its dependents then
+never become ready, and everything independent of it still completes. The verdict is the
+caller's to draw from state — partial results beat no results (§8, #8).
 
-**One thing does end the run**: the global step cap, the crude backstop against a plan
-that would run forever. #9 replaces it with per-subtask attempt caps and a token budget.
-Exceeding it is a `TaskFailure`, never a retry (§10).
+**One thing does end the run**: the global step cap, the backstop against a plan that
+would run forever. Every attempt counts against it, so it bounds retries too. Exceeding
+it is a `TaskFailure`, never a retry (§10).
 
 **Settling `inputs`.** `Subtask.inputs` names upstream subtask ids, and `state.artifacts`
 is keyed by producing subtask id — so the two readings the planner flagged as unsettled
@@ -36,9 +37,10 @@ from orchestra.core.state import (
 )
 
 DEFAULT_MAX_CONCURRENCY = 4
-# Counts dispatches, so with no retries yet it only trips on an oversized plan; #9 makes
-# it a real budget.
+# Counts every dispatch, retries included: the run's whole work budget.
 DEFAULT_STEP_CAP = 15
+# Total attempts per subtask, not extra ones — 1 means no retry.
+DEFAULT_SUBTASK_ATTEMPTS = 3
 
 
 class ExecutionEngine:
@@ -51,6 +53,7 @@ class ExecutionEngine:
         broker: Broker[TaskEvent],
         max_concurrency: int = DEFAULT_MAX_CONCURRENCY,
         step_cap: int = DEFAULT_STEP_CAP,
+        subtask_attempts: int = DEFAULT_SUBTASK_ATTEMPTS,
     ) -> None:
         """Wire the engine.
 
@@ -58,6 +61,7 @@ class ExecutionEngine:
             workers: the worker for each role, wired in `app.py`. A role the plan uses and
                 this mapping lacks fails the run.
             step_cap: how many dispatches the run may make in total.
+            subtask_attempts: how many times one subtask may be dispatched before it fails.
 
         Raises:
             ValueError: a non-positive bound — a wiring bug, not a user-facing error.
@@ -66,10 +70,13 @@ class ExecutionEngine:
             raise ValueError(f"max_concurrency must be at least 1, got {max_concurrency}")
         if step_cap < 1:
             raise ValueError(f"step_cap must be at least 1, got {step_cap}")
+        if subtask_attempts < 1:
+            raise ValueError(f"subtask_attempts must be at least 1, got {subtask_attempts}")
         self._workers = workers
         self._broker = broker
         self._max_concurrency = max_concurrency
         self._step_cap = step_cap
+        self._subtask_attempts = subtask_attempts
 
     async def run(self, state: TaskState) -> None:
         """Execute `state.plan`, updating the ledger and emitting events as it goes.
@@ -108,6 +115,8 @@ class ExecutionEngine:
         finished = asyncio.Event()
         dispatched = 0
         capped = False
+        # Per run, not on `Subtask`: the model is the ledger's and forbids extra fields.
+        attempts: dict[str, int] = {}
 
         async with asyncio.TaskGroup() as group:
             while True:
@@ -121,9 +130,17 @@ class ExecutionEngine:
                             capped = True
                             break
                         dispatched += 1
+                        attempts[subtask.id] = attempts.get(subtask.id, 0) + 1
                         in_flight.add(subtask.id)
                         group.create_task(
-                            self._dispatch(state, subtask, semaphore, in_flight, finished),
+                            self._dispatch(
+                                state,
+                                subtask,
+                                semaphore,
+                                in_flight,
+                                finished,
+                                attempt=attempts[subtask.id],
+                            ),
                             name=f"subtask:{subtask.id}",
                         )
                 if not in_flight:
@@ -157,8 +174,13 @@ class ExecutionEngine:
         semaphore: asyncio.Semaphore,
         in_flight: set[str],
         finished: asyncio.Event,
+        *,
+        attempt: int,
     ) -> None:
-        """Run one subtask under the semaphore and record the outcome in `state`."""
+        """Run one subtask under the semaphore and record the outcome in `state`.
+
+        `attempt` is this dispatch's 1-based number, counted by `run()`.
+        """
         try:
             async with semaphore:
                 subtask.status = SubtaskStatus.RUNNING
@@ -184,11 +206,24 @@ class ExecutionEngine:
                 )
         except Exception as exc:
             # Not `BaseException`: `CancelledError` must propagate so the TaskGroup can
-            # unwind, and a cancelled subtask is not a failed one (§10).
-            subtask.status = SubtaskStatus.FAILED
-            await self._emit(
-                state, EventKind.SUBTASK_FAILED, subtask_id=subtask.id, message=str(exc)
-            )
+            # unwind, and a cancelled subtask is neither failed nor retried (§10).
+            if attempt < self._subtask_attempts:
+                # Back to pending so `_ready` picks it up again; a warning, because
+                # `subtask_failed` means the subtask is finished, unsuccessfully.
+                subtask.status = SubtaskStatus.PENDING
+                await self._emit(
+                    state,
+                    EventKind.SUBTASK_WARNING,
+                    subtask_id=subtask.id,
+                    message=(
+                        f"Attempt {attempt} of {self._subtask_attempts} failed, retrying: {exc}"
+                    ),
+                )
+            else:
+                subtask.status = SubtaskStatus.FAILED
+                await self._emit(
+                    state, EventKind.SUBTASK_FAILED, subtask_id=subtask.id, message=str(exc)
+                )
         finally:
             in_flight.discard(subtask.id)
             finished.set()

@@ -173,16 +173,28 @@ async def test_create_plan_retries_once_when_no_structured_output_comes_back() -
 
 
 @pytest.mark.asyncio
-async def test_create_plan_raises_after_a_second_failure_without_retrying_again() -> None:
-    provider = FakeProvider(responses=[_broken_plan(), _broken_plan()])
+async def test_create_plan_accepts_a_third_attempt_after_two_rejections() -> None:
+    """Two extra calls, each carrying the reason the last was rejected."""
+    provider = FakeProvider(responses=[_broken_plan(), None, _financial_plan()])
+
+    plan = await Planner(provider).create_plan(TaskState(user_request=REQUEST))
+
+    assert len(plan.subtasks) == 3
+    assert len(provider.calls) == 3
+    assert len(provider.calls[2].messages) == 3  # request, then one turn per rejection
+
+
+@pytest.mark.asyncio
+async def test_create_plan_raises_after_the_last_attempt_without_retrying_again() -> None:
+    provider = FakeProvider(responses=[_broken_plan(), _broken_plan(), _broken_plan()])
     state = TaskState(user_request=REQUEST)
 
-    # Exit 5, not 4: the provider answered both times; this run just has no plan.
+    # Exit 5, not 4: the provider answered every time; this run just has no plan.
     with pytest.raises(TaskFailure) as exc_info:
         await Planner(provider).create_plan(state)
 
     assert exc_info.value.exit_code == ExitCode.TASK_FAILURE
-    assert len(provider.calls) == 2
+    assert len(provider.calls) == 3
     # A failed plan is not a plan: the ledger must not be left half-written.
     assert state.plan is None
     assert state.events == []

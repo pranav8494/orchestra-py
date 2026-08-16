@@ -144,7 +144,10 @@ def build_orchestra(config: Config) -> Orchestra:
     return Orchestra(
         planner=Planner(provider),
         engine=ExecutionEngine(
-            workers=workers, broker=broker, max_concurrency=config.max_concurrency
+            workers=workers,
+            broker=broker,
+            max_concurrency=config.max_concurrency,
+            subtask_attempts=config.subtask_attempts,
         ),
         # The workers' own store: the aggregator resolves the pointers they minted.
         aggregator=Aggregator(provider, store),

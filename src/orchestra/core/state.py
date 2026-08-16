@@ -8,6 +8,7 @@ resolving one is `orchestra.artifacts`' job, since `core/` does no I/O (§3.2).
 event log, or the other agents' artifacts.
 """
 
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
@@ -238,6 +239,15 @@ class TaskState(BaseModel):
         conditional of its own (§4).
         """
         return bool(self.failure_reason or self.failed_subtasks)
+
+    def backed_figures(self, figures: Iterable[KeyFigure]) -> list[KeyFigure]:
+        """Keep only the figures sourced to a pointer this run produced.
+
+        The ledger's rule, not the aggregator's: a figure citing an artifact nobody wrote
+        is invention, whichever agent states it.
+        """
+        produced = set(self.artifacts.values())
+        return [figure for figure in figures if figure.source in produced]
 
     def state_slice(self, subtask: Subtask) -> SubtaskContext:
         """Narrow the ledger to what one worker needs — pointers, never payloads (§6).

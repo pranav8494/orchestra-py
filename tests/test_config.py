@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from orchestra.agents.engine import DEFAULT_MAX_CONCURRENCY
+from orchestra.agents.engine import DEFAULT_MAX_CONCURRENCY, DEFAULT_SUBTASK_ATTEMPTS
 from orchestra.agents.workers.tool_loop import DEFAULT_MAX_TURNS, DEFAULT_TOKEN_BUDGET
 from orchestra.config import DEFAULT_MODEL, load_config
 from orchestra.core.errors import ConfigError, ExitCode
@@ -49,6 +49,7 @@ def test_load_config_bounds_default_to_what_their_consumers_ship_with(
 
     assert config.anthropic_max_tokens == DEFAULT_MAX_TOKENS
     assert config.max_concurrency == DEFAULT_MAX_CONCURRENCY
+    assert config.subtask_attempts == DEFAULT_SUBTASK_ATTEMPTS
     assert config.worker_token_budget == DEFAULT_TOKEN_BUDGET
     assert config.worker_max_turns == DEFAULT_MAX_TURNS
 
@@ -68,7 +69,13 @@ def test_load_config_bound_env_vars_override_the_defaults(monkeypatch: pytest.Mo
 
 @pytest.mark.parametrize(
     "variable",
-    ["ANTHROPIC_MAX_TOKENS", "MAX_CONCURRENCY", "WORKER_TOKEN_BUDGET", "WORKER_MAX_TURNS"],
+    [
+        "ANTHROPIC_MAX_TOKENS",
+        "MAX_CONCURRENCY",
+        "SUBTASK_ATTEMPTS",
+        "WORKER_TOKEN_BUDGET",
+        "WORKER_MAX_TURNS",
+    ],
 )
 def test_load_config_rejects_a_non_positive_bound(
     monkeypatch: pytest.MonkeyPatch, variable: str

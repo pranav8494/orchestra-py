@@ -8,8 +8,10 @@ anything; the conversion to `FinalReport` is where it is checked against this ru
 artifacts (§7). The chart is not in the draft — it is the ledger's, read back from the
 visualization step's own artifact rather than asked for again.
 
-**Why one call and no retry.** The artifacts are already paid for, so a refusal or figures
-citing nothing real degrades to a ledger-only report rather than raising (§8, §10). The
+**A synthesis failure never loses the report.** The artifacts are already paid for, so a
+refusal, unbacked figures, a provider outage or an unreadable artifact all degrade to a
+ledger-only report; the reason lands on `state.failure_reason`, marking the run failed
+(exit 5 via `TaskState.failed`) rather than exiting with an empty stdout (§8, §10). The
 same path serves a run with nothing completed.
 """
 
@@ -17,8 +19,10 @@ import asyncio
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from orchestra.agents.structured import parse_validated
 from orchestra.agents.workers.visualization import VisualizationResult
 from orchestra.artifacts import DEFAULT_PREVIEW_LIMIT, ArtifactStore
+from orchestra.core.errors import OrchestraError
 from orchestra.core.state import (
     AgentRole,
     ArtifactPointer,
@@ -28,7 +32,7 @@ from orchestra.core.state import (
     SubtaskStatus,
     TaskState,
 )
-from orchestra.prompts import AGGREGATOR_SYSTEM_PROMPT
+from orchestra.prompts import AGGREGATOR_SYSTEM_PROMPT, STRUCTURED_REFORMAT_INSTRUCTION
 from orchestra.providers.base import MessageRole, Provider, ProviderMessage
 
 # How many artifacts may be previewed at once (§10). The reads share the process-wide
@@ -89,21 +93,28 @@ class Aggregator:
     async def write_report(self, state: TaskState) -> FinalReport:
         """Synthesise the run's artifacts, record the report in `state`, and return it.
 
-        `state.final_result` is always set on return, including when the model refused and
-        when nothing completed.
+        `state.final_result` is always set on return, including when the model refused,
+        when synthesis failed, and when nothing completed.
 
         Raises:
-            TaskFailure: an artifact the ledger claims to hold is gone from the store, so
-                the run has lost data (§8). Raised by the store, passed through here.
-            ProviderError: the provider failed; a report is not worth a retried outage.
-            asyncio.CancelledError: propagated, never swallowed (§10).
+            asyncio.CancelledError: propagated, never swallowed (§10). Nothing else: an
+                `OrchestraError` degrades the report and marks the run failed instead.
         """
         completed = _completed(state)
-        # From the visualization step's own receipt, never from the report draft: the
-        # chart is a fact the run recorded, not one the model may claim.
-        chart, chart_ascii = await self._chart_outputs(completed)
+        chart: ArtifactPointer | None = None
+        chart_ascii: str | None = None
+        report: FinalReport | None = None
+        try:
+            # From the visualization step's own receipt, never from the report draft: the
+            # chart is a fact the run recorded, not one the model may claim.
+            chart, chart_ascii = await self._chart_outputs(completed)
+            if completed:
+                report = await self._synthesise(state, completed, chart, chart_ascii)
+        except OrchestraError as exc:
+            # A lost artifact or a provider outage costs the synthesis, not the run's
+            # answer. A chart read that failed leaves both chart fields `None`.
+            _record_failure(state, f"The report could not be synthesised: {exc}")
 
-        report = await self._synthesise(state, completed, chart, chart_ascii) if completed else None
         if report is None:
             report = _ledger_report(state.user_request, completed, chart, chart_ascii)
 
@@ -120,7 +131,7 @@ class Aggregator:
         Returns `(None, None)` when no visualization ran, and when its artifact is not a
         `VisualizationResult` — `EchoWorker` still backs the role and writes plain text,
         which costs the report its chart, not the run (§8). A `TaskFailure` from the store
-        still propagates, as the previews' reads do: that is lost data, not a bad shape.
+        is raised, not caught here: `write_report` turns lost data into a degraded report.
         """
         receipts = [
             pointer for subtask, pointer in completed if subtask.role is AgentRole.VISUALIZATION
@@ -143,39 +154,40 @@ class Aggregator:
         chart: ArtifactPointer | None,
         chart_ascii: str | None,
     ) -> FinalReport | None:
-        """Ask the model for one report and validate what comes back.
+        """Ask the model for one report, retrying an unusable reply with the reason fed back.
 
         Returns:
-            The report, or `None` when the model gave nothing usable — a refusal, a
+            The report, or `None` when every attempt gave nothing usable — a refusal, a
             truncated reply, or figures citing no artifact of this run.
         """
         briefing = await self._briefing(state.user_request, completed)
-        draft = await self._provider.parse_structured(
+
+        def validate(draft: ReportDraft) -> FinalReport:
+            """Trust boundary (§7): the ledger decides which figures are real."""
+            figures = state.backed_figures(_key_figures(draft))
+            if draft.key_figures and not figures:
+                # Every number it cited traces to nothing, so its summary is no better read.
+                raise ValueError(
+                    "None of those figures cite an artifact this run produced. Cite only the "
+                    "`artifact:` pointers shown in the briefing, copied exactly, and drop any "
+                    "figure you cannot source to one."
+                )
+            return FinalReport(
+                executive_summary=draft.executive_summary,
+                key_figures=figures,
+                chart=chart,
+                chart_ascii=chart_ascii,
+            )
+
+        report, _ = await parse_validated(
+            provider=self._provider,
             system=AGGREGATOR_SYSTEM_PROMPT,
             messages=[ProviderMessage(role=MessageRole.USER, content=briefing)],
             output_format=ReportDraft,
+            validate=validate,
+            instruction=STRUCTURED_REFORMAT_INSTRUCTION,
         )
-        if draft is None:
-            return None
-
-        # Trust boundary (§7), not the guardrail framework #9 will add: a figure survives
-        # only if its source is an artifact this run produced, per the ledger.
-        produced = set(state.artifacts.values())
-        figures = [
-            KeyFigure(label=figure.label, value=figure.value, source=figure.source)
-            for figure in draft.key_figures
-            if figure.source in produced
-        ]
-        if draft.key_figures and not figures:
-            # Every number it cited traces to nothing, so its summary is no better read.
-            return None
-
-        return FinalReport(
-            executive_summary=draft.executive_summary,
-            key_figures=figures,
-            chart=chart,
-            chart_ascii=chart_ascii,
-        )
+        return report
 
     async def _briefing(self, user_request: str, completed: list[_Completed]) -> str:
         """Build the user turn: the request, then one section per completed subtask.
@@ -206,6 +218,26 @@ class Aggregator:
             for (subtask, pointer), preview in zip(completed, previews, strict=True)
         ]
         return "\n\n".join(sections)
+
+
+def _key_figures(draft: ReportDraft) -> list[KeyFigure]:
+    """The draft's figures as ledger figures, dropping any whose `source` is not a pointer.
+
+    A drop, not a rejection: a malformed pointer is as unbacked as an unknown one, and one
+    bad citation must not cost the report the figures beside it.
+    """
+    figures = []
+    for figure in draft.key_figures:
+        try:
+            figures.append(KeyFigure(label=figure.label, value=figure.value, source=figure.source))
+        except ValidationError:
+            continue
+    return figures
+
+
+def _record_failure(state: TaskState, reason: str) -> None:
+    """Add a reason to the ledger, keeping any the engine already recorded."""
+    state.failure_reason = f"{state.failure_reason}\n{reason}" if state.failure_reason else reason
 
 
 def _completed(state: TaskState) -> list[_Completed]:

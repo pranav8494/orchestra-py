@@ -10,7 +10,7 @@ from pathlib import Path
 from pydantic import Field, SecretStr, ValidationError, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from orchestra.agents.engine import DEFAULT_MAX_CONCURRENCY
+from orchestra.agents.engine import DEFAULT_MAX_CONCURRENCY, DEFAULT_SUBTASK_ATTEMPTS
 from orchestra.agents.workers.tool_loop import DEFAULT_MAX_TURNS, DEFAULT_TOKEN_BUDGET
 from orchestra.core.errors import ConfigError
 
@@ -68,6 +68,7 @@ class Config(BaseSettings):
     # setting nothing runs exactly as before. `app.py` is what carries them to the engine
     # and the workers.
     max_concurrency: int = Field(default=DEFAULT_MAX_CONCURRENCY, ge=1)
+    subtask_attempts: int = Field(default=DEFAULT_SUBTASK_ATTEMPTS, ge=1)
     worker_token_budget: int = Field(default=DEFAULT_TOKEN_BUDGET, ge=1)
     worker_max_turns: int = Field(default=DEFAULT_MAX_TURNS, ge=1)
 
