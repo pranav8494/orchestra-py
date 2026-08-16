@@ -4,7 +4,7 @@ Almost nothing here asserts on Rich's drawn output. The subject is the data hand
 renderer: `RunView` is what the events fold into, and `run_table`/`active_panel`/
 `event_log`/`event_line`/`result_renderable` are pure functions of it. The exceptions are
 the two layout regressions — the folded report panel and the wrapped active row — where
-the defect *was* the rendering, and no assertion on the model would have caught either.
+the defect *was* the rendering.
 
 The async tests cover what goes wrong in a subscriber rather than a function: the startup
 race and teardown.
@@ -246,8 +246,8 @@ def test_run_view_seeds_each_row_with_its_instruction() -> None:
 
 
 def test_run_view_active_lists_every_running_row_in_plan_order() -> None:
-    """The fan-out signal (#17): two subtasks dispatched at once are two entries, so the
-    panel below draws two spinners rather than one summary line."""
+    """The fan-out signal (#17): two subtasks dispatched at once are two spinners, not one
+    summary line."""
     view = _seeded_view()
     view.apply(_started("fetch"))
     view.apply(_started("crunch"))
@@ -273,8 +273,8 @@ def test_run_view_log_keeps_the_most_recent_events_and_drops_the_oldest() -> Non
 
 
 def test_run_view_log_records_an_event_for_a_subtask_it_has_no_row_for() -> None:
-    """`apply` drops such an event from the table on purpose; the log is where it stays
-    visible, which is the only way an operator sees a plan/stream mismatch."""
+    """`apply` drops such an event from the table on purpose; the log is the only place a
+    plan/stream mismatch stays visible."""
     view = _seeded_view()
 
     view.apply(TaskEvent(kind=EventKind.SUBTASK_FAILED, subtask_id="ghost", message="boom"))
@@ -290,8 +290,7 @@ def _active_grid(view: RunView) -> Table:
 
 
 def test_active_panel_draws_one_spinner_per_running_subtask() -> None:
-    """The renderable, not Rich's painting of it (§12): one `Spinner` per active row, and
-    the role and instruction beside it."""
+    """The renderable, not Rich's painting of it (§12): one `Spinner` per active row."""
     view = _seeded_view()
     view.apply(_started("fetch"))
     view.apply(_started("crunch"))
@@ -307,9 +306,8 @@ def test_active_panel_draws_one_spinner_per_running_subtask() -> None:
 
 def test_active_panel_elides_a_long_instruction_instead_of_wrapping_it() -> None:
     """Regression: the label was a `Spinner(text=...)`, and `Spinner.render` rebuilds it
-    through `Text.assemble`, which drops `no_wrap`. A planner instruction is one unbounded
-    sentence, so the panel wrapped on an 80-column terminal — resizing the region every
-    frame and leaving the glyph on the first line only."""
+    through `Text.assemble`, which drops `no_wrap`. An unbounded planner instruction
+    wrapped on an 80-column terminal, resizing the region every frame."""
     plan = Plan(
         subtasks=[Subtask(id="fetch", role=AgentRole.DATA_RETRIEVAL, instruction="Pull " * 40)]
     )
@@ -347,9 +345,9 @@ def test_event_log_shows_the_stream_oldest_first() -> None:
 
 
 def test_dashboard_frame_grows_to_three_panels_and_keeps_them() -> None:
-    """Before the first event there is only the table; once there is a plan the panels
-    stay, so a handoff between steps costs no region resize. `run_finished` drops the
-    active panel for good — a finished run has nothing working."""
+    """Before the first event there is only the table; once there is a plan the panels stay
+    put, so a handoff costs no region resize. `run_finished` drops the active panel for
+    good."""
     empty = dashboard_frame(RunView())
     assert isinstance(empty, Group)
     assert [type(part) for part in empty.renderables] == [Table]
@@ -402,8 +400,7 @@ def test_dashboard_frame_without_a_height_keeps_the_whole_log() -> None:
 
 def test_dashboard_frame_trims_the_log_to_fit_a_short_terminal() -> None:
     """Each part is bounded but the sum was not, so an 8-step plan overran a 24-line
-    terminal and Rich cropped the frame from the bottom (#39). The log gives way: the
-    table is the deliverable."""
+    terminal and Rich cropped the frame from the bottom (#39). The log gives way."""
     view = _long_run()
 
     frame = dashboard_frame(view, height=24)
@@ -424,9 +421,8 @@ def test_dashboard_frame_drops_the_log_when_the_plan_alone_fills_the_terminal() 
 
 
 def test_dashboard_frame_drops_the_active_panel_once_the_stream_detaches() -> None:
-    """Ctrl-C cancels the steps rather than failing them, so the rows still read
-    `running`. Animating them in the frame Ctrl-C freezes would claim work that stopped
-    (#39)."""
+    """Ctrl-C cancels the steps rather than failing them, so the rows still read `running`;
+    animating them in the frame it freezes would claim work that stopped (#39)."""
     view = _seeded_view()
     view.apply(_started("fetch"))
     running = dashboard_frame(view)
@@ -443,8 +439,8 @@ def test_dashboard_frame_drops_the_active_panel_once_the_stream_detaches() -> No
 
 def test_event_line_collapses_a_multi_line_message_onto_one_line() -> None:
     """Regression: `engine.py` publishes `subtask_failed` with `str(exc)`, and
-    `str(ValidationError)` is multi-line. An embedded newline defeats every `no_wrap`
-    here — it adds a row to the region rather than a wrap inside a cell."""
+    `str(ValidationError)` is multi-line — a newline adds a row to the region rather than
+    wrapping inside a cell."""
     event = TaskEvent(
         kind=EventKind.SUBTASK_FAILED,
         subtask_id="crunch",
@@ -561,10 +557,8 @@ def test_result_renderable_panel_folds_a_long_line_instead_of_cropping_it() -> N
 def test_result_renderable_panel_embeds_the_ascii_chart_and_its_openable_path(
     tmp_path: Path,
 ) -> None:
-    """#11's last polish item, pinned where the criterion is written rather than where the
-    string is built: `cli/format.py` already covers both blocks (`test_format.py`), and
-    this says the final *panel* carries them. The drawing is inline so a piped run still
-    shows it, and the path is resolved against the run's directory so it can be opened."""
+    """#11's last polish item, pinned at the panel rather than the string: `test_format.py`
+    already covers both blocks, and this says the final *panel* carries them."""
     state = _finished_state()
     state.artifact_dir = tmp_path
     state.final_result = FinalReport(
@@ -704,8 +698,7 @@ async def test_dashboard_live_mode_redraws_between_events_so_the_spinners_advanc
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Rich advances a spinner only when the region is redrawn, and lifecycle events arrive
-    seconds apart — without the tick a "spinner" is a still frame. Counting refreshes, not
-    reading frames: which glyph Rich picked is Rich's business (§12)."""
+    seconds apart. Counting refreshes, not frames: which glyph Rich picked is Rich's (§12)."""
     monkeypatch.setattr(render, "SPINNER_TICK_SECONDS", 0.001)
     refreshes = 0
 
@@ -764,8 +757,7 @@ async def test_dashboard_reports_a_ticker_that_died_instead_of_losing_it(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """§8: `Task.cancel()` clears the unretrieved-exception flag even on a task that has
-    already raised, so cancelling the ticker without reading it first would erase the
-    failure from both the log and the terminal."""
+    already raised, so cancelling the ticker without reading it first erases the failure."""
 
     async def boom(_live: Live, _view: RunView) -> None:
         raise RuntimeError("ticker bug")
@@ -809,9 +801,8 @@ async def test_dashboard_marks_the_view_stopped_so_the_last_frame_does_not_anima
 async def test_dashboard_cancelled_while_a_step_runs_leaks_no_ticker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """§15 wants cancellation covered for new async code, and the other teardown tests all
-    cancel a ticker parked in `sleep` having never refreshed. This one cancels it mid-work,
-    which is the window this change introduced."""
+    """§15: the other teardown tests cancel a ticker parked in `sleep` having never
+    refreshed. This one cancels it mid-work."""
     monkeypatch.setattr(render, "SPINNER_TICK_SECONDS", 0.001)
     broker: Broker[TaskEvent] = Broker()
     working = asyncio.Event()
