@@ -195,3 +195,18 @@ def test_load_config_error_drops_the_pydantic_cause(monkeypatch: pytest.MonkeyPa
     rendered = "".join(traceback.format_exception(exc))
     assert "input_value" not in rendered
     assert "errors.pydantic.dev" not in rendered
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_load_config_blank_search_key_is_treated_as_unset(
+    monkeypatch: pytest.MonkeyPatch, blank: str
+) -> None:
+    """`TAVILY_API_KEY=` is the .env.example line uncommented but not filled in.
+
+    Left as an empty secret it selects the live path with no credential: every search
+    401s and falls back, so the run works but reports itself degraded throughout.
+    """
+    monkeypatch.setenv("ANTHROPIC_API_KEY", FAKE_KEY)
+    monkeypatch.setenv("TAVILY_API_KEY", blank)
+
+    assert load_config().tavily_api_key is None

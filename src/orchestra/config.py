@@ -71,6 +71,21 @@ class Config(BaseSettings):
     # a state the type carries, not a value every caller has to test for emptiness.
     tavily_api_key: SecretStr | None = None
 
+    @field_validator("tavily_api_key")
+    @classmethod
+    def _blank_is_unset(cls, value: SecretStr | None) -> SecretStr | None:
+        """Treat `TAVILY_API_KEY=` as no key at all.
+
+        The line copied from `.env.example` and uncommented but not filled in would
+        otherwise select the live path with an empty credential: every search would 401
+        and fall back, so the run still works but reports itself degraded the whole way
+        through. `ANTHROPIC_API_KEY` guards the same mistake with `min_length=1`; here
+        the value is optional, so the empty case folds to the default instead of failing.
+        """
+        if value is None or not value.get_secret_value().strip():
+            return None
+        return value
+
     @field_validator("artifact_dir", "data_dir")
     @classmethod
     def _absolute_path(cls, value: Path) -> Path:
