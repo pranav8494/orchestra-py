@@ -3,6 +3,9 @@
 Exit code, stdout, and stderr are asserted separately throughout: asserting only stdout is
 how stream-contract regressions ship (§12). Assertions collapse whitespace because Rich
 pads help output to the console width — the contract is the text, not the rendering.
+
+`run` is stubbed here; the un-stubbed CLI cases, which drive the real agents, are in
+`test_end_to_end.py`.
 """
 
 import json

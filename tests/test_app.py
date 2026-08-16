@@ -24,7 +24,15 @@ from typing import Any, cast
 import pytest
 from pydantic import BaseModel, SecretStr
 
-from conftest import FakeProvider, ScriptedAsker, ScriptedChat, wait_until
+from conftest import (
+    FakeProvider,
+    OfflineRun,
+    ScriptedAsker,
+    ScriptedChat,
+    answer_turn,
+    tool_turn,
+    wait_until,
+)
 from orchestra import app as app_module
 from orchestra.agents.aggregator import Aggregator, FigureDraft, ReportDraft
 from orchestra.agents.engine import DEFAULT_STEP_CAP, ExecutionEngine
@@ -53,8 +61,7 @@ from orchestra.core.state import (
     artifact_path,
 )
 from orchestra.providers.anthropic import AnthropicProvider
-from orchestra.providers.base import AssistantTurn, Provider
-from orchestra.tools.base import ToolCall
+from orchestra.providers.base import AssistantTurn
 from orchestra.tools.python_exec import TOOL_NAME as RUN_PYTHON_TOOL
 from scenarios import LINEAR
 
@@ -128,29 +135,15 @@ def _turns() -> list[AssistantTurn | BaseException]:
     that one worker's pointer reaches the next one's subprocess.
     """
     return [
-        AssistantTurn(
-            text="",
-            tool_calls=(
-                ToolCall(id="c1", name=QUERY_CSV_TOOL, arguments={"last_n": QUARTERS_ANALYSED}),
-            ),
-            usage_tokens=100,
+        tool_turn(QUERY_CSV_TOOL, call_id="c1", last_n=QUARTERS_ANALYSED),
+        answer_turn("Retrieved the last three quarters."),
+        tool_turn(
+            RUN_PYTHON_TOOL,
+            call_id="c2",
+            code=_ANALYSIS_CODE,
+            inputs=["artifact:fetch_quarterly_financials.json"],
         ),
-        AssistantTurn(text="Retrieved the last three quarters.", usage_tokens=50),
-        AssistantTurn(
-            text="",
-            tool_calls=(
-                ToolCall(
-                    id="c2",
-                    name=RUN_PYTHON_TOOL,
-                    arguments={
-                        "code": _ANALYSIS_CODE,
-                        "inputs": ["artifact:fetch_quarterly_financials.json"],
-                    },
-                ),
-            ),
-            usage_tokens=100,
-        ),
-        AssistantTurn(text="Revenue rose in each quarter.", usage_tokens=50),
+        answer_turn("Revenue rose in each quarter."),
     ]
 
 
@@ -353,12 +346,12 @@ async def test_build_orchestra_gives_each_run_its_own_directory(
 
 @pytest.mark.asyncio
 async def test_run_once_keeps_one_run_s_artifacts_together_and_says_where(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    offline_run: OfflineRun,
 ) -> None:
     """The ledger is self-describing: every pointer it holds resolves under the directory
     it names, and that directory is a child of `ARTIFACT_DIR`, never `ARTIFACT_DIR` itself."""
     provider = FakeProvider(responses=_responses(chart=True), turns=_turns())
-    artifacts = _offline_run(monkeypatch, tmp_path, provider)
+    artifacts = offline_run(provider)
 
     state = await run_once(LINEAR.prompt)
 
@@ -404,7 +397,7 @@ async def test_build_orchestra_carries_every_configured_bound_to_its_consumer(
 
 @pytest.mark.asyncio
 async def test_run_once_enforces_the_configured_turn_cap_on_a_real_worker(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, offline_run: OfflineRun
 ) -> None:
     """The bound is not just held, it bites: one turn, a model still calling tools, and the
     retrieval step fails naming the cap it was given rather than the default."""
@@ -412,7 +405,7 @@ async def test_run_once_enforces_the_configured_turn_cap_on_a_real_worker(
     # One attempt, so this stays a test of the turn cap rather than of the retry cap.
     monkeypatch.setenv("SUBTASK_ATTEMPTS", "1")
     provider = FakeProvider(responses=_responses(), turns=_turns()[:1])
-    _offline_run(monkeypatch, tmp_path, provider)
+    offline_run(provider)
 
     state = await run_once(LINEAR.prompt)
 
@@ -465,32 +458,14 @@ class WatchingAsker(ScriptedAsker):
         return await super().ask(question)
 
 
-def _offline_run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, provider: FakeProvider) -> Path:
-    """Let `run_once` load its own config and wire its own services; the vendor adapter is
-    swapped at the provider port, the one seam that keeps this offline (§12).
-
-    Returns the `ARTIFACT_DIR` it exported, so a caller asserting on where the run wrote
-    reads it from here rather than rebuilding the path.
-    """
-    artifacts = tmp_path / "artifacts"
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
-    monkeypatch.setenv("ARTIFACT_DIR", str(artifacts))
-
-    def _create_provider(*, api_key: SecretStr, model: str, max_tokens: int) -> Provider:
-        return provider
-
-    monkeypatch.setattr(app_module, "create_provider", _create_provider)
-    return artifacts
-
-
 @pytest.mark.asyncio
 async def test_run_once_keeps_the_observer_attached_from_the_first_event_to_the_last(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    offline_run: OfflineRun,
 ) -> None:
     """The plan rides on the first event, so an observer entered late never learns the
     pending rows."""
     provider = FakeProvider(responses=_responses(chart=True), turns=_turns())
-    _offline_run(monkeypatch, tmp_path, provider)
+    offline_run(provider)
     observer = RecordingObserver()
 
     state = await run_once(LINEAR.prompt, observer=observer)
@@ -506,7 +481,7 @@ async def test_run_once_keeps_the_observer_attached_from_the_first_event_to_the_
 
 @pytest.mark.asyncio
 async def test_run_once_answers_the_planners_question_before_the_run_starts(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    offline_run: OfflineRun,
 ) -> None:
     """#10 through the composition root: an ambiguous request stops for one question, the
     answer lands on the ledger, and the run proceeds."""
@@ -518,7 +493,7 @@ async def test_run_once_answers_the_planners_question_before_the_run_starts(
     responses = _responses(chart=True)
     responses.insert(0, PlannerDraft(action=PlannerAction.CLARIFY, questions=[metric]))
     provider = FakeProvider(responses=responses, turns=_turns())
-    _offline_run(monkeypatch, tmp_path, provider)
+    offline_run(provider)
     observer = RecordingObserver()
     asker = WatchingAsker(answers=["revenue"], observer=observer)
 
@@ -536,12 +511,10 @@ async def test_run_once_answers_the_planners_question_before_the_run_starts(
 
 
 @pytest.mark.asyncio
-async def test_run_once_without_an_observer_runs_headless(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+async def test_run_once_without_an_observer_runs_headless(offline_run: OfflineRun) -> None:
     """The default path `cli/app.py` takes today: no subscriber, same ledger."""
     provider = FakeProvider(responses=_responses(chart=True), turns=_turns())
-    _offline_run(monkeypatch, tmp_path, provider)
+    offline_run(provider)
 
     state = await run_once(LINEAR.prompt)
 
@@ -552,13 +525,13 @@ async def test_run_once_without_an_observer_runs_headless(
 
 @pytest.mark.asyncio
 async def test_run_once_carries_the_visualization_chart_into_the_report(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    offline_run: OfflineRun,
 ) -> None:
     """#7's seam end to end: the worker draws and writes a receipt, the aggregator reads
     both halves back out of it. Each half is covered alone elsewhere; only this proves
     they meet."""
     provider = FakeProvider(responses=_responses(chart=True), turns=_turns())
-    _offline_run(monkeypatch, tmp_path, provider)
+    offline_run(provider)
 
     state = await run_once(LINEAR.prompt)
 
@@ -581,7 +554,7 @@ async def test_run_once_carries_the_visualization_chart_into_the_report(
 
 @pytest.mark.asyncio
 async def test_run_once_reports_a_computed_figure_and_its_chart_in_both_output_shapes(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    offline_run: OfflineRun,
 ) -> None:
     """#8's criterion end to end: the report cites a number the analytics subprocess really
     printed, sourced to the pointer that step minted, and both shapes carry it.
@@ -592,7 +565,7 @@ async def test_run_once_reports_a_computed_figure_and_its_chart_in_both_output_s
     provider = FakeProvider(
         responses=_responses(figure_source=ANALYSIS_POINTER, chart=True), turns=_turns()
     )
-    _offline_run(monkeypatch, tmp_path, provider)
+    offline_run(provider)
 
     state = await run_once(LINEAR.prompt)
 
@@ -625,14 +598,14 @@ async def test_run_once_reports_a_computed_figure_and_its_chart_in_both_output_s
 
 @pytest.mark.asyncio
 async def test_run_once_reports_over_the_ledger_when_the_synthesis_call_fails(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    offline_run: OfflineRun,
 ) -> None:
     """#9's trade, above the unit: a good plan and three good steps, then an outage on the
     synthesis call. The run keeps its report and exits 5, not 4 with an empty stdout."""
     responses = _responses(chart=True)
     responses[-1] = ProviderError("503 overloaded_error")  # the report call, not the plan
     provider = FakeProvider(responses=responses, turns=_turns())
-    _offline_run(monkeypatch, tmp_path, provider)
+    offline_run(provider)
 
     state = await run_once(LINEAR.prompt)
 
@@ -646,12 +619,10 @@ async def test_run_once_reports_over_the_ledger_when_the_synthesis_call_fails(
 
 
 @pytest.mark.asyncio
-async def test_run_once_exits_the_observer_when_the_run_raises(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+async def test_run_once_exits_the_observer_when_the_run_raises(offline_run: OfflineRun) -> None:
     """A provider failure while planning: `Live` must not be left owning the terminal (§5)."""
     provider = FakeProvider(responses=[ProviderError("The provider is unavailable.")])
-    _offline_run(monkeypatch, tmp_path, provider)
+    offline_run(provider)
     observer = RecordingObserver()
 
     with pytest.raises(ProviderError):
@@ -663,12 +634,12 @@ async def test_run_once_exits_the_observer_when_the_run_raises(
 
 @pytest.mark.asyncio
 async def test_run_once_cancellation_exits_the_observer_and_closes_the_provider(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    offline_run: OfflineRun,
 ) -> None:
     """Ctrl-C's path (§10): observer torn down, provider released, cancellation re-raised
     rather than swallowed into a ledger nobody asked for."""
     provider = FakeProvider(responses=_responses(), blocker=asyncio.Event())  # never set
-    _offline_run(monkeypatch, tmp_path, provider)
+    offline_run(provider)
     observer = RecordingObserver()
 
     run = asyncio.create_task(run_once(LINEAR.prompt, observer=observer))
