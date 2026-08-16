@@ -694,6 +694,35 @@ async def test_dashboard_live_mode_folds_events_in_and_leaves_stdout_alone(
 
 
 @pytest.mark.asyncio
+async def test_dashboard_live_mode_opens_no_region_until_the_first_event(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """#10: the planner asks its questions before the first event, and a `Live` already
+    owning the terminal would swallow the prompt. So the region waits, and a plain line
+    says the run is alive."""
+    started = 0
+    start = Live.start
+
+    def counting_start(live: Live, refresh: bool = False) -> None:
+        nonlocal started
+        started += 1
+        start(live, refresh=refresh)
+
+    monkeypatch.setattr(Live, "start", counting_start)
+    broker: Broker[TaskEvent] = Broker()
+
+    async with dashboard(broker, mode=RenderMode.LIVE) as view:
+        assert started == 0  # nothing has been published, so nothing owns the terminal
+        await broker.publish_lifecycle(_plan_created())
+        await wait_until(lambda: started == 1, what="the region to open on the first event")
+
+    assert view.rows  # the event that opened it was folded in, not dropped
+    captured = capsys.readouterr()
+    assert PLANNING_HEADLINE in captured.err  # a diagnostic, so stderr (§5)
+    assert captured.out == ""
+
+
+@pytest.mark.asyncio
 async def test_dashboard_live_mode_redraws_between_events_so_the_spinners_advance(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -766,6 +795,8 @@ async def test_dashboard_reports_a_ticker_that_died_instead_of_losing_it(
     broker: Broker[TaskEvent] = Broker()
 
     async with dashboard(broker, mode=RenderMode.LIVE):
+        # The ticker belongs to the region, and the region opens on the first event.
+        await broker.publish_lifecycle(_plan_created())
         await asyncio.sleep(0)  # let the ticker start and die
         outcome = "the run still produced its result"
 

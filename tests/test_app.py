@@ -24,11 +24,11 @@ from typing import Any, cast
 import pytest
 from pydantic import BaseModel, SecretStr
 
-from conftest import FakeProvider, wait_until
+from conftest import FakeProvider, ScriptedAsker, wait_until
 from orchestra import app as app_module
 from orchestra.agents.aggregator import Aggregator, FigureDraft, ReportDraft
 from orchestra.agents.engine import DEFAULT_STEP_CAP, ExecutionEngine
-from orchestra.agents.planner import Planner
+from orchestra.agents.planner import Planner, PlannerAction, PlannerDraft
 from orchestra.agents.toolsets import QUERY_CSV_TOOL
 from orchestra.agents.workers.analytics import AnalyticsWorker
 from orchestra.agents.workers.base import Worker
@@ -42,6 +42,7 @@ from orchestra.cli.format import OutputFormat, format_result
 from orchestra.config import Config
 from orchestra.core.errors import ProviderError
 from orchestra.core.events import Broker
+from orchestra.core.question import Question, QuestionKind
 from orchestra.core.state import (
     ARTIFACT_PREFIX,
     AgentRole,
@@ -270,6 +271,23 @@ async def test_build_orchestra_wires_the_app_from_config_without_touching_the_ne
 
 
 @pytest.mark.asyncio
+async def test_build_orchestra_tells_the_planner_what_the_retrieval_agent_can_obtain(
+    tmp_path: Path,
+) -> None:
+    """The roster is composed from the toolset the retrieval worker was actually given, so
+    the planner cannot plan for a source that agent does not have (#10). Read through the
+    private attribute for the reason the bounds test gives: a roster nothing carries would
+    only show up in a live run that planned three steps and produced nothing."""
+    orchestra = build_orchestra(_config(tmp_path))
+    try:
+        system = orchestra._planner._system
+        assert "revenue" in system and "no share price" in system
+        assert "no data sources at all" not in system
+    finally:
+        await orchestra.aclose()
+
+
+@pytest.mark.asyncio
 async def test_build_orchestra_roots_the_run_in_a_timestamped_subdirectory(
     tmp_path: Path,
 ) -> None:
@@ -392,10 +410,13 @@ class RecordingObserver:
     entered: int = 0
     exited: int = 0
     events: list[TaskEvent] = field(default_factory=list)
+    # Held while attached, so a test can ask what had been published at a given moment.
+    queue: asyncio.Queue[TaskEvent] | None = None
 
     @asynccontextmanager
     async def __call__(self, broker: Broker[TaskEvent]) -> AsyncIterator[None]:
         async with broker.subscribe() as queue:
+            self.queue = queue
             self.entered += 1
             try:
                 yield
@@ -405,6 +426,19 @@ class RecordingObserver:
                 # cancellation too, which is the point (§10).
                 self.events.extend(queue.get_nowait() for _ in range(queue.qsize()))
                 self.exited += 1
+
+
+@dataclass
+class WatchingAsker(ScriptedAsker):
+    """`ScriptedAsker`, plus how much had reached the observer when it was asked."""
+
+    observer: RecordingObserver | None = None
+    published_before_asking: list[int] = field(default_factory=list)
+
+    async def ask(self, question: Question) -> str:
+        queue = None if self.observer is None else self.observer.queue
+        self.published_before_asking.append(0 if queue is None else queue.qsize())
+        return await super().ask(question)
 
 
 def _offline_run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, provider: FakeProvider) -> Path:
@@ -444,6 +478,37 @@ async def test_run_once_keeps_the_observer_attached_from_the_first_event_to_the_
     assert kinds[-1] is EventKind.RUN_FINISHED  # and it was still attached at the end
     assert state.final_result is not None
     assert provider.closed
+
+
+@pytest.mark.asyncio
+async def test_run_once_answers_the_planners_question_before_the_run_starts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """#10 through the composition root: an ambiguous request stops for one question, the
+    answer lands on the ledger, and the run proceeds."""
+    metric = Question(
+        kind=QuestionKind.SINGLE_CHOICE,
+        text="Which metric should the chart show?",
+        choices=["revenue", "profit"],
+    )
+    responses = _responses(chart=True)
+    responses.insert(0, PlannerDraft(action=PlannerAction.CLARIFY, questions=[metric]))
+    provider = FakeProvider(responses=responses, turns=_turns())
+    _offline_run(monkeypatch, tmp_path, provider)
+    observer = RecordingObserver()
+    asker = WatchingAsker(answers=["revenue"], observer=observer)
+
+    state = await run_once("Make a chart of performance", observer=observer, asker=asker)
+
+    assert asker.asked == [metric]
+    assert [(entry.question, entry.answer) for entry in state.clarifications] == [
+        (metric.text, "revenue")
+    ]
+    # Nothing had been published when the question was put: `cli/render.py` opens its
+    # `Live` region on the first event, so a prompt must come before one (#10).
+    assert asker.published_before_asking == [0]
+    assert state.final_result is not None
+    assert not state.failed
 
 
 @pytest.mark.asyncio

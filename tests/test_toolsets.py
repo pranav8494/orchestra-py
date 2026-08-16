@@ -12,8 +12,11 @@ from orchestra.agents.toolsets import (
     QUERY_CSV_TOOL,
     SEARCH_CORPUS,
     SEARCH_TOOL,
+    analytics_tools,
     data_retrieval_tools,
+    retrievable_data,
 )
+from orchestra.artifacts import ArtifactStore
 from orchestra.config import default_data_dir
 
 
@@ -29,6 +32,23 @@ def test_data_retrieval_tools_describe_themselves_for_the_model() -> None:
         spec = tool.info()
         assert spec.description.strip()
         assert spec.input_schema.get("type") == "object"
+
+
+def test_retrievable_data_lists_what_each_tool_supplies() -> None:
+    """The planner plans against this: one bullet per source, naming what is on file and
+    what is not, so it stops offering data nothing can fetch (#10)."""
+    roster = retrievable_data(data_retrieval_tools(default_data_dir()))
+
+    assert roster.count("- ") == 2
+    # The bundled dataset's own subject and range, from the tool that holds it.
+    assert "revenue" in roster and "2025Q4" in roster
+    # And the boundary that made a stock-price run plan three steps and produce nothing.
+    assert "no share price" in roster
+
+
+def test_retrievable_data_skips_a_tool_that_supplies_none(tmp_path: Path) -> None:
+    """An interpreter is not a source. Listing it would read to the planner as one."""
+    assert retrievable_data(analytics_tools(ArtifactStore(tmp_path))) == ""
 
 
 def test_data_retrieval_tools_read_the_committed_dataset() -> None:

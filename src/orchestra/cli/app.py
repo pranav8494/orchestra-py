@@ -8,6 +8,7 @@ with no `.env`, and a `ConfigError` has to land under the boundary that makes it
 """
 
 import asyncio
+import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
 from functools import partial
@@ -19,8 +20,10 @@ from orchestra import __version__
 from orchestra.app import run_once
 from orchestra.cli.console import console, err_console
 from orchestra.cli.format import OutputFormat
+from orchestra.cli.prompt import ConsoleAsker
 from orchestra.cli.render import RenderMode, dashboard, result_renderable
 from orchestra.core.errors import ExitCode, OrchestraError
+from orchestra.core.question import Asker
 
 app = typer.Typer(
     no_args_is_help=True,
@@ -91,7 +94,7 @@ def run(
         # Ctrl-C unwinds the TaskGroup inside `asyncio.run` and re-raises here, so the
         # dashboard is always torn down and the boundary maps it to 130 (§8).
         observer = partial(dashboard, mode=_render_mode(quiet=quiet, output=output))
-        state = asyncio.run(run_once(prompt, observer=observer))
+        state = asyncio.run(run_once(prompt, observer=observer, asker=_asker()))
         if state.failure_reason is not None:
             # Diagnostic, so stderr even under `-o json` and `--quiet` (§5, §8): which
             # stream says what must not depend on the format or the noise level.
@@ -102,6 +105,16 @@ def run(
         )
         # A run that fell short still prints its report; only the code says it failed.
         raise typer.Exit(ExitCode.TASK_FAILURE if state.failed else ExitCode.SUCCESS)
+
+
+def _asker() -> Asker | None:
+    """Who answers the planner's clarifying questions, or `None` when nobody can (#10).
+
+    Both streams: the question is written to stderr, the answer read from stdin. Redirect
+    either and the run would block on a prompt nobody can see or answer, so the planner is
+    told there is nobody instead.
+    """
+    return ConsoleAsker() if sys.stdin.isatty() and err_console.is_terminal else None
 
 
 def _render_mode(*, quiet: bool, output: OutputFormat) -> RenderMode:

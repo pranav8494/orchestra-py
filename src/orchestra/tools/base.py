@@ -24,6 +24,12 @@ class ToolSpec:
     # `object` rather than `Any`: this crosses into `providers/` and mypy is strict
     # outside the SDK adapter (§7).
     input_schema: Mapping[str, object]
+    # What data this puts within reach, in one clause, for the planner (#10). A second
+    # audience, not a second description: `description` tells a worker's model how and
+    # when to call this, and carries the argument-level detail a planner cannot act on.
+    # Stated here rather than composed in `agents/toolsets.py` so the tool that owns the
+    # data is the one that says what it holds. Empty for a tool that supplies none.
+    provides: str = ""
 
 
 @dataclass(frozen=True, slots=True)
