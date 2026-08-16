@@ -66,10 +66,15 @@ _STATUS_STYLES: Mapping[SubtaskStatus, str] = {
 _EVENT_LABELS: Mapping[EventKind, str] = {
     EventKind.PLAN_CREATED: "plan",
     EventKind.SUBTASK_STARTED: "start",
+    EventKind.SUBTASK_WARNING: "warn",
     EventKind.SUBTASK_COMPLETED: "done",
     EventKind.SUBTASK_FAILED: "failed",
     EventKind.RUN_FINISHED: "finish",
 }
+
+# What a warning is drawn in. Not a `SubtaskStatus` style: the step is going to finish
+# `done`, and colouring the status would say the run went worse than it did.
+_WARNING_STYLE = "yellow"
 
 
 class RenderMode(StrEnum):
@@ -96,6 +101,11 @@ class RunRow:
     role: AgentRole
     status: SubtaskStatus
     detail: str = ""
+    # Held apart from `detail` rather than written into it, because the two arrive in the
+    # wrong order: a warning is raised mid-step and the completion that overwrites
+    # `detail` lands after it. A degraded result that stopped saying so the instant it
+    # succeeded would be worse than never having said it.
+    warning: str = ""
 
 
 @dataclass(slots=True)
@@ -142,10 +152,19 @@ class RunView:
             self.finished = True
             return
 
-        status = _STATUS_BY_KIND.get(event.kind)
         row = self.rows.get(event.subtask_id or "")
-        if status is None or row is None:
-            return  # an unknown kind, or an unknown subtask — see the docstring
+        if row is None:
+            return  # an unknown subtask — see the docstring
+
+        if event.kind is EventKind.SUBTASK_WARNING:
+            # Status and detail untouched: the step has not transitioned, it has just
+            # acquired a caveat that outlives whatever it finishes as.
+            self.rows[row.id] = replace(row, warning=event.message)
+            return
+
+        status = _STATUS_BY_KIND.get(event.kind)
+        if status is None:
+            return  # an unknown kind — see the docstring
         # `message` is the instruction, the artifact pointer, or the error text,
         # depending on the kind: in every case it is what the row's line should say next.
         self.rows[row.id] = replace(row, status=status, detail=event.message)
@@ -178,7 +197,10 @@ def run_table(view: RunView) -> Table:
             Text(row.id),
             Text(row.role.value),
             Text(row.status.value, style=_STATUS_STYLES.get(row.status, "")),
-            Text(row.detail),
+            # The warning wins the cell. A degraded step's `detail` is its artifact
+            # pointer, which the final report prints anyway; that the answer is not made
+            # of what the operator assumes is the thing they only get to see here.
+            Text(row.warning, style=_WARNING_STYLE) if row.warning else Text(row.detail),
         )
     return table
 

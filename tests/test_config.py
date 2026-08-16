@@ -73,6 +73,53 @@ def test_load_config_artifact_dir_is_always_absolute(
     assert "~" not in str(artifact_dir)
 
 
+def test_load_config_data_dir_defaults_to_the_committed_dataset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bundled mock data is versioned with the code, so it is found from any cwd.
+
+    Asserted by reading a file, not by comparing paths: what matters is that the
+    default points at the dataset the agents actually query (#5).
+    """
+    monkeypatch.setenv("ANTHROPIC_API_KEY", FAKE_KEY)
+
+    data_dir = load_config().data_dir
+
+    assert data_dir.is_absolute()
+    assert (data_dir / "quarterly_financials.csv").is_file()
+
+
+def test_load_config_data_dir_env_var_overrides_default(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", FAKE_KEY)
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "fixtures"))
+
+    assert load_config().data_dir == tmp_path / "fixtures"
+
+
+def test_load_config_without_a_search_key_leaves_it_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unset is the supported state, not a misconfiguration: it selects the offline corpus."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", FAKE_KEY)
+
+    assert load_config().tavily_api_key is None
+
+
+def test_load_config_search_key_is_read_and_redacted(monkeypatch: pytest.MonkeyPatch) -> None:
+    """§9: a second secret is a second thing that must not reach a log or a config dump."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", FAKE_KEY)
+    monkeypatch.setenv("TAVILY_API_KEY", "tvly-secret")
+
+    config = load_config()
+
+    assert config.tavily_api_key is not None
+    assert config.tavily_api_key.get_secret_value() == "tvly-secret"
+    assert "tvly-secret" not in repr(config)
+    assert "tvly-secret" not in config.model_dump_json()
+
+
 def test_load_config_missing_api_key_raises_config_error() -> None:
     with pytest.raises(ConfigError) as exc_info:
         load_config()
@@ -148,3 +195,18 @@ def test_load_config_error_drops_the_pydantic_cause(monkeypatch: pytest.MonkeyPa
     rendered = "".join(traceback.format_exception(exc))
     assert "input_value" not in rendered
     assert "errors.pydantic.dev" not in rendered
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_load_config_blank_search_key_is_treated_as_unset(
+    monkeypatch: pytest.MonkeyPatch, blank: str
+) -> None:
+    """`TAVILY_API_KEY=` is the .env.example line uncommented but not filled in.
+
+    Left as an empty secret it selects the live path with no credential: every search
+    401s and falls back, so the run works but reports itself degraded throughout.
+    """
+    monkeypatch.setenv("ANTHROPIC_API_KEY", FAKE_KEY)
+    monkeypatch.setenv("TAVILY_API_KEY", blank)
+
+    assert load_config().tavily_api_key is None
