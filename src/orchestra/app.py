@@ -8,25 +8,28 @@ Phase A wires the stub worker into every role. Phase B replaces those entries on
 time (#5-#7); nothing else in the application changes when it does.
 """
 
+from orchestra.agents.aggregator import Aggregator
 from orchestra.agents.engine import ExecutionEngine
 from orchestra.agents.planner import Planner
 from orchestra.agents.workers.base import Worker
 from orchestra.agents.workers.stub import EchoWorker
 from orchestra.artifacts import ArtifactStore
 from orchestra.config import Config, load_config
+from orchestra.core.errors import TaskFailure
 from orchestra.core.events import Broker
 from orchestra.core.state import AgentRole, TaskEvent, TaskState
 from orchestra.providers.base import Provider, create_provider
 
 
 class Orchestra:
-    """The application: plan a request, execute the plan, hand back the ledger."""
+    """The application: plan a request, execute the plan, report on it, hand back the ledger."""
 
     def __init__(
         self,
         *,
         planner: Planner,
         engine: ExecutionEngine,
+        aggregator: Aggregator,
         provider: Provider,
         broker: Broker[TaskEvent],
     ) -> None:
@@ -35,11 +38,13 @@ class Orchestra:
         Args:
             planner: turns the request into a plan.
             engine: executes it.
+            aggregator: synthesises the artifacts into the run's final report.
             provider: held only so the run can release it; agents get it injected.
             broker: the run's event stream, exposed for the renderer to subscribe to (#11).
         """
         self._planner = planner
         self._engine = engine
+        self._aggregator = aggregator
         self._provider = provider
         self._broker = broker
 
@@ -49,23 +54,32 @@ class Orchestra:
         return self._broker
 
     async def run_task(self, prompt: str) -> TaskState:
-        """Plan and execute `prompt`.
+        """Plan `prompt`, execute the plan, and write the run's report.
 
         Args:
             prompt: the user's plain-language request.
 
         Returns:
-            The ledger, whether or not every subtask succeeded — a partially failed run
-            still has artifacts worth reporting. The caller reads `failed_subtasks` to
-            decide the exit code (§8).
+            The ledger, with `final_result` set, whether the run completed, partly
+            failed, or stopped short. The caller reads `failed` for the exit code (§8)
+            and `failure_reason` for why.
 
         Raises:
-            OrchestraError: planning failed, or the run hit a limit that ends it.
+            TaskFailure: planning failed — no plan, so nothing to report on. An
+                execution failure does *not* reach here.
+            ProviderError: the provider failed while planning or synthesising.
             asyncio.CancelledError: the run was cancelled; propagated (§10).
         """
         state = TaskState(user_request=prompt)
         await self._planner.create_plan(state)
-        await self._engine.run(state)
+        try:
+            await self._engine.run(state)
+        except TaskFailure as exc:
+            # The step cap, or a role with no worker. Recorded rather than raised, so the
+            # report still names the artifacts on disk instead of exiting 5 in silence.
+            # `CancelledError` is not an `Exception`, so a cancelled run unwinds untouched.
+            state.failure_reason = str(exc)
+        await self._aggregator.write_report(state)
         return state
 
     async def aclose(self) -> None:
@@ -95,6 +109,8 @@ def build_orchestra(config: Config) -> Orchestra:
     return Orchestra(
         planner=Planner(provider),
         engine=ExecutionEngine(workers=workers, broker=broker),
+        # The workers' own store: the aggregator resolves the pointers they minted.
+        aggregator=Aggregator(provider, store),
         provider=provider,
         broker=broker,
     )
@@ -110,10 +126,11 @@ async def run_once(prompt: str) -> TaskState:
         prompt: the user's plain-language request.
 
     Returns:
-        The run's ledger.
+        The run's ledger, carrying the report the command prints.
 
     Raises:
-        OrchestraError: configuration, planning or execution failed.
+        OrchestraError: configuration or planning failed. A run that started and then
+            stopped short returns its ledger instead.
     """
     orchestra = build_orchestra(load_config())
     try:

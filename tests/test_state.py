@@ -12,6 +12,8 @@ from orchestra.core.state import (
     AgentRole,
     Clarification,
     EventKind,
+    FinalReport,
+    KeyFigure,
     Plan,
     Subtask,
     SubtaskStatus,
@@ -68,6 +70,71 @@ def test_task_state_round_trip_preserves_subtask_status_transitions() -> None:
         SubtaskStatus.RUNNING,
     ]
     assert restored.plan.subtasks[0].output_pointer == "artifact:revenue.csv"
+
+
+def test_task_state_round_trip_preserves_the_final_report() -> None:
+    """The report is the run's result; `--output json` serialises the ledger to emit it."""
+    state = TaskState(
+        user_request=REQUEST,
+        final_result=FinalReport(
+            executive_summary="Revenue grew in each of the last three quarters.",
+            key_figures=[KeyFigure(label="Q3 growth", value="10.7%", source="artifact:growth.md")],
+            chart="artifact:trend.html",
+        ),
+    )
+
+    restored = TaskState.model_validate_json(state.model_dump_json())
+
+    assert restored == state
+
+
+def test_key_figure_rejects_a_source_that_is_not_a_pointer() -> None:
+    """An unsourced figure is a claim nobody can check, so the type refuses one (§7)."""
+    with pytest.raises(ValidationError):
+        KeyFigure(label="Q3 growth", value="10.7%", source="the analytics step")
+
+
+def test_final_report_rejects_a_chart_that_is_not_a_pointer() -> None:
+    with pytest.raises(ValidationError):
+        FinalReport(executive_summary="Revenue grew.", chart="/tmp/trend.html")
+
+
+def test_final_report_is_frozen() -> None:
+    """Written once, at the end of the run, then read by the CLI."""
+    report = FinalReport(executive_summary="Revenue grew.")
+
+    with pytest.raises(ValidationError):
+        report.executive_summary = "something else"  # type: ignore[misc]
+
+
+def test_task_state_failed_is_false_for_a_clean_run() -> None:
+    plan = Plan(subtasks=[_fetch(), _analyse()])
+    for subtask in plan.subtasks:
+        subtask.status = SubtaskStatus.DONE
+
+    assert not TaskState(user_request=REQUEST, plan=plan).failed
+
+
+def test_task_state_failed_is_true_when_a_subtask_failed() -> None:
+    plan = Plan(subtasks=[_fetch(), _analyse()])
+    plan.subtasks[1].status = SubtaskStatus.FAILED
+
+    state = TaskState(user_request=REQUEST, plan=plan)
+
+    assert state.failed
+    assert state.failed_subtasks == [plan.subtasks[1]]
+
+
+def test_task_state_failed_is_true_when_a_failure_reason_is_set() -> None:
+    """The run the engine ended early: every subtask that ran is fine, the run is not."""
+    plan = Plan(subtasks=[_fetch(), _analyse()])
+    for subtask in plan.subtasks:
+        subtask.status = SubtaskStatus.DONE
+
+    state = TaskState(user_request=REQUEST, plan=plan, failure_reason="Step cap exceeded")
+
+    assert state.failed
+    assert state.failed_subtasks == []
 
 
 def test_subtask_rejects_unknown_status() -> None:
