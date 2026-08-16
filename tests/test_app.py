@@ -367,6 +367,8 @@ async def test_run_once_enforces_the_configured_turn_cap_on_a_real_worker(
     """The bound is not just held, it bites: one turn, a model still calling tools, and the
     retrieval step fails naming the cap it was given rather than the default."""
     monkeypatch.setenv("WORKER_MAX_TURNS", "1")
+    # One attempt, so this stays a test of the turn cap rather than of the retry cap.
+    monkeypatch.setenv("SUBTASK_ATTEMPTS", "1")
     provider = FakeProvider(responses=_responses(), turns=_turns()[:1])
     _offline_run(monkeypatch, tmp_path, provider)
 
@@ -530,6 +532,28 @@ async def test_run_once_reports_a_computed_figure_and_its_chart_in_both_output_s
         {"label": figure.label, "value": figure.value, "source": figure.source}
     ]
     assert CHART_CATEGORY in document["report"]["chart_ascii"]
+
+
+@pytest.mark.asyncio
+async def test_run_once_reports_over_the_ledger_when_the_synthesis_call_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """#9's trade, above the unit: a good plan and three good steps, then an outage on the
+    synthesis call. The run keeps its report and exits 5, not 4 with an empty stdout."""
+    responses = _responses(chart=True)
+    responses[-1] = ProviderError("503 overloaded_error")  # the report call, not the plan
+    provider = FakeProvider(responses=responses, turns=_turns())
+    _offline_run(monkeypatch, tmp_path, provider)
+
+    state = await run_once(LINEAR.prompt)
+
+    assert state.failed
+    assert state.final_result is not None
+    assert "No synthesis was available" in state.final_result.executive_summary
+    assert state.failure_reason is not None
+    assert "overloaded_error" in state.failure_reason
+    # What did finish is still reported, chart and all.
+    assert state.final_result.chart == f"{ARTIFACT_PREFIX}{CHART_STEP}.html"
 
 
 @pytest.mark.asyncio

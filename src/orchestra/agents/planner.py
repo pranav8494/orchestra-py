@@ -5,13 +5,14 @@ conversion between them is where model output is validated (§7). Engine-owned f
 (`status`, `output_pointer`) stay out of the schema so the model cannot declare a step
 already done.
 
-**Why one retry.** Structured output guarantees JSON *shape*; the retry is for what a
-schema cannot say — unique ids, known `depends_on`, acyclic graph. One reformat attempt
-with the rejection fed back, then the run fails. General retry policy is #9's.
+**Why retries.** Structured output guarantees JSON *shape*; the retry is for what a
+schema cannot say — unique ids, known `depends_on`, acyclic graph. `agents/structured.py`
+runs up to three attempts with each rejection fed back, then the run fails.
 """
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field
 
+from orchestra.agents.structured import Rejected, parse_validated
 from orchestra.core.errors import TaskFailure
 from orchestra.core.state import (
     AgentRole,
@@ -67,26 +68,21 @@ class Planner:
         """Plan `state.user_request`, set `state.plan`, append `plan_created`, return it.
 
         Raises:
-            TaskFailure: an unusable plan twice. Exit 5, not 4 — the provider answered
-                both times, so "retry the provider" is the wrong advice (§8, §10).
+            TaskFailure: no usable plan across every attempt. Exit 5, not 4 — the provider
+                answered each time, so "retry the provider" is the wrong advice (§8, §10).
             ProviderError: the provider failed; passed through from the adapter.
             asyncio.CancelledError: propagated, never swallowed (§10).
         """
-        messages = [ProviderMessage(role=MessageRole.USER, content=state.user_request)]
-
-        plan, rejection = await self._draft_plan(messages)
+        plan, rejection = await parse_validated(
+            provider=self._provider,
+            system=PLANNER_SYSTEM_PROMPT,
+            messages=[ProviderMessage(role=MessageRole.USER, content=state.user_request)],
+            output_format=PlanDraft,
+            validate=_to_plan,
+            instruction=PLANNER_REFORMAT_INSTRUCTION,
+        )
         if plan is None:
-            messages.append(
-                ProviderMessage(
-                    role=MessageRole.USER,
-                    content=f"{PLANNER_REFORMAT_INSTRUCTION}\n\n{rejection}",
-                )
-            )
-            plan, rejection = await self._draft_plan(messages)
-        if plan is None:
-            # Not a loop: a model that failed the same schema twice with the error in
-            # front of it will not succeed on the third try, and the user is waiting.
-            raise TaskFailure(f"The planner returned an unusable plan twice. Last: {rejection}")
+            raise TaskFailure(f"The planner returned no usable plan. Last rejection: {rejection}")
 
         state.plan = plan
         state.events.append(
@@ -96,39 +92,6 @@ class Planner:
             )
         )
         return plan
-
-    async def _draft_plan(self, messages: list[ProviderMessage]) -> tuple[Plan | None, str]:
-        """Request one plan and validate it.
-
-        Returns:
-            The plan and an empty string, or `None` and the reason to feed back.
-        """
-        draft = await self._provider.parse_structured(
-            system=PLANNER_SYSTEM_PROMPT,
-            messages=messages,
-            output_format=PlanDraft,
-        )
-        if draft is None:
-            # A refusal and off-schema JSON are indistinguishable at the adapter, so the
-            # feedback has to fit either.
-            return None, (
-                "No usable plan was returned. Reply with a plan matching the schema "
-                "exactly, and nothing else."
-            )
-        try:
-            return _to_plan(draft), ""
-        except (ValidationError, _RejectedDraftError) as exc:
-            # The rejected draft goes back with the reason: the model cannot see its own
-            # previous message as data, and "fix this" needs a "this".
-            return None, f"{exc}\n\nThe rejected plan was:\n{draft.model_dump_json(indent=2)}"
-
-
-class _RejectedDraftError(ValueError):
-    """The draft is well-formed JSON but not a runnable plan.
-
-    Handled identically to the `ValidationError` `Plan` raises; separate only because
-    `Plan` does not check `inputs` — see `_check_inputs`.
-    """
 
 
 def _check_inputs(draft: PlanDraft) -> None:
@@ -140,18 +103,16 @@ def _check_inputs(draft: PlanDraft) -> None:
     engine can start a consumer before its producer has written anything.
 
     Raises:
-        _RejectedDraftError: an input names an unknown subtask, or one not depended on.
+        Rejected: an input names an unknown subtask, or one not depended on.
     """
     known = {subtask.id for subtask in draft.subtasks}
     for subtask in draft.subtasks:
         unknown = sorted(set(subtask.inputs) - known)
         if unknown:
-            raise _RejectedDraftError(
-                f"subtask {subtask.id!r} takes inputs from unknown steps: {unknown}"
-            )
+            raise Rejected(f"subtask {subtask.id!r} takes inputs from unknown steps: {unknown}")
         unordered = sorted(set(subtask.inputs) - set(subtask.depends_on))
         if unordered:
-            raise _RejectedDraftError(
+            raise Rejected(
                 f"subtask {subtask.id!r} consumes {unordered} but does not depend on them; "
                 "every id in `inputs` must also appear in `depends_on`"
             )
@@ -162,7 +123,7 @@ def _to_plan(draft: PlanDraft) -> Plan:
 
     Raises:
         ValidationError: the draft is not a runnable DAG.
-        _RejectedDraftError: the draft's data edges are unknown or unordered.
+        Rejected: the draft's data edges are unknown or unordered — see `_check_inputs`.
     """
     _check_inputs(draft)
     return Plan(

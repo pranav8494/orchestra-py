@@ -23,7 +23,7 @@ from orchestra.agents.workers.base import Worker
 from orchestra.agents.workers.stub import EchoWorker
 from orchestra.agents.workers.visualization import VisualizationResult
 from orchestra.artifacts import DEFAULT_PREVIEW_LIMIT, ArtifactStore
-from orchestra.core.errors import ExitCode, ProviderError, TaskFailure
+from orchestra.core.errors import ProviderError, TaskFailure
 from orchestra.core.events import Broker
 from orchestra.core.state import (
     ARTIFACT_PREFIX,
@@ -197,12 +197,33 @@ async def test_write_report_drops_a_figure_citing_an_artifact_the_run_never_prod
 
 
 @pytest.mark.asyncio
+async def test_write_report_drops_a_figure_whose_source_is_not_a_pointer(
+    store: ArtifactStore,
+) -> None:
+    """A malformed citation is as unbacked as an unknown one, and costs only its own figure."""
+    state = _finished_run(store)
+    provider = FakeProvider(
+        responses=[
+            _draft(
+                FigureDraft(label="Q3 revenue", value="145", source=state.artifacts["fetch"]),
+                FigureDraft(label="Q4 forecast", value="160", source="the spreadsheet"),
+            )
+        ]
+    )
+
+    report = await Aggregator(provider, store).write_report(state)
+
+    assert [figure.label for figure in report.key_figures] == ["Q3 revenue"]
+    assert len(provider.calls) == 1  # dropped, so no retry was needed
+
+
+@pytest.mark.asyncio
 async def test_write_report_falls_back_to_the_ledger_when_the_model_returns_nothing(
     store: ArtifactStore,
 ) -> None:
     """A refusal or a truncated reply costs the summary, never the run (§10)."""
     state = _finished_run(store)
-    provider = FakeProvider(responses=[None])
+    provider = FakeProvider(responses=[None, None, None])
 
     report = await Aggregator(provider, store).write_report(state)
 
@@ -213,8 +234,33 @@ async def test_write_report_falls_back_to_the_ledger_when_the_model_returns_noth
     for subtask_id, pointer in state.artifacts.items():
         assert f"{subtask_id} (" in report.executive_summary
         assert pointer in report.executive_summary
-    assert len(provider.calls) == 1  # one call, no retry loop
-    assert not state.failed
+    assert len(provider.calls) == 3  # the retries, then the ledger
+    assert not state.failed  # a model with nothing to say is not a broken run
+
+
+@pytest.mark.asyncio
+async def test_write_report_retries_unbacked_figures_with_the_reason_fed_back(
+    store: ArtifactStore,
+) -> None:
+    """The drop is the ledger's rule (§7); the retry is what makes it actionable."""
+    state = _finished_run(store)
+    backed = FigureDraft(label="Q3 revenue", value="145", source=state.artifacts["fetch"])
+    provider = FakeProvider(
+        responses=[
+            _draft(
+                FigureDraft(label="Q4 revenue", value="160", source=f"{ARTIFACT_PREFIX}ghost.csv")
+            ),
+            _draft(backed),
+        ]
+    )
+
+    report = await Aggregator(provider, store).write_report(state)
+
+    assert [figure.label for figure in report.key_figures] == ["Q3 revenue"]
+    assert len(provider.calls) == 2
+    retry = provider.calls[1].messages[1].content
+    assert "cite an artifact this run produced" in retry
+    assert f"{ARTIFACT_PREFIX}ghost.csv" in retry  # the rejected draft goes back too
 
 
 @pytest.mark.asyncio
@@ -223,13 +269,10 @@ async def test_write_report_falls_back_when_every_figure_is_unbacked(
 ) -> None:
     """Figures that all trace to nothing discredit the summary drawn from them."""
     state = _finished_run(store)
-    provider = FakeProvider(
-        responses=[
-            _draft(
-                FigureDraft(label="Q4 revenue", value="160", source=f"{ARTIFACT_PREFIX}ghost.csv")
-            )
-        ]
+    unbacked = _draft(
+        FigureDraft(label="Q4 revenue", value="160", source=f"{ARTIFACT_PREFIX}ghost.csv")
     )
+    provider = FakeProvider(responses=[unbacked, unbacked, unbacked])
 
     report = await Aggregator(provider, store).write_report(state)
 
@@ -286,7 +329,9 @@ async def test_write_report_keeps_the_text_chart_when_the_data_was_too_thin_to_d
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("responses", [[_draft()], [None]], ids=["synthesised", "ledger"])
+@pytest.mark.parametrize(
+    "responses", [[_draft()], [None, None, None]], ids=["synthesised", "ledger"]
+)
 async def test_write_report_degrades_when_the_visualization_artifact_is_not_a_receipt(
     store: ArtifactStore, responses: list[ReportDraft | None]
 ) -> None:
@@ -333,50 +378,81 @@ async def test_write_report_takes_the_last_visualization_when_a_plan_draws_twice
 
 
 @pytest.mark.asyncio
-async def test_write_report_raises_when_the_visualization_receipt_is_gone(
-    store: ArtifactStore,
+async def test_write_report_degrades_only_the_chart_when_the_receipt_cannot_be_read(
+    store: ArtifactStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The receipt is read, not previewed, so its loss is the same lost data as any
-    other artifact's: `TaskFailure`, not a chartless report."""
+    """The receipt is read whole while the briefing reads previews, so its read can fail
+    alone. It costs the chart, not the answer — skipping the synthesis the rest of the
+    artifacts still support would throw away a paid-for run."""
     state = _finished_run(store)
-    store.path_for(state.artifacts["chart"]).unlink()
-    provider = FakeProvider(responses=[_draft()])
 
-    with pytest.raises(TaskFailure, match="Artifact not found"):
-        await Aggregator(provider, store).write_report(state)
+    def unreadable(pointer: str) -> str:
+        raise TaskFailure(f"Artifact not found: {pointer!r}")
 
-    assert state.final_result is None
+    monkeypatch.setattr(store, "get_text", unreadable)
+    draft = _draft()
+    provider = FakeProvider(responses=[draft])
+
+    report = await Aggregator(provider, store).write_report(state)
+
+    assert state.final_result is report
+    assert (report.chart, report.chart_ascii) == (None, None)
+    assert report.executive_summary == draft.executive_summary  # the summary survives
+    assert len(provider.calls) == 1  # the synthesis was not skipped with it
+    assert state.failed
+    assert "Artifact not found" in (state.failure_reason or "")
 
 
 @pytest.mark.asyncio
-async def test_write_report_propagates_a_provider_failure(store: ArtifactStore) -> None:
-    """A transport failure is not a refusal: the ledger fallback would hide an outage."""
+async def test_write_report_returns_the_ledger_report_when_the_provider_fails(
+    store: ArtifactStore,
+) -> None:
+    """An outage costs the synthesis, never the run's report: exit 5 with the artifacts
+    named beats exit 4 with an empty stdout."""
     state = _finished_run(store)
     provider = FakeProvider(responses=[ProviderError("401 authentication_error")])
 
-    with pytest.raises(ProviderError, match="authentication_error"):
-        await Aggregator(provider, store).write_report(state)
+    report = await Aggregator(provider, store).write_report(state)
 
-    assert state.final_result is None
+    assert state.final_result is report
+    assert "No synthesis was available" in report.executive_summary
+    assert report.chart == CHART  # the chart read succeeded before the provider call
+    assert state.failed
+    assert "authentication_error" in (state.failure_reason or "")
+    assert len(provider.calls) == 1  # an outage is not retried
 
 
 @pytest.mark.asyncio
-async def test_write_report_raises_when_an_artifact_the_ledger_claims_is_gone(
+async def test_write_report_keeps_a_failure_reason_the_engine_already_recorded(
     store: ArtifactStore,
 ) -> None:
-    """A ledger pointing at a payload it can no longer read has lost data, so the run ends
-    on `TaskFailure` (§8) rather than reporting over the hole — and before paying for the
-    provider call."""
+    """`app.py` records why a run stopped short; the synthesis failure joins it."""
+    state = _finished_run(store)
+    state.failure_reason = "Step cap exceeded"
+    provider = FakeProvider(responses=[ProviderError("503 overloaded_error")])
+
+    await Aggregator(provider, store).write_report(state)
+
+    assert "Step cap exceeded" in (state.failure_reason or "")
+    assert "overloaded_error" in (state.failure_reason or "")
+
+
+@pytest.mark.asyncio
+async def test_write_report_degrades_when_an_artifact_the_ledger_claims_is_gone(
+    store: ArtifactStore,
+) -> None:
+    """A ledger pointing at a payload it can no longer read has lost data (§8), so the
+    report degrades to the ledger and the run is marked failed — exit 5, with an answer."""
     state = _finished_run(store)
     store.path_for(state.artifacts["analyse"]).unlink()
     provider = FakeProvider(responses=[_draft()])
 
-    with pytest.raises(TaskFailure, match="Artifact not found") as exc_info:
-        await Aggregator(provider, store).write_report(state)
+    report = await Aggregator(provider, store).write_report(state)
 
-    assert exc_info.value.exit_code == ExitCode.TASK_FAILURE
-    assert provider.calls == []
-    assert state.final_result is None
+    assert state.final_result is report
+    assert provider.calls == []  # the briefing failed before the call was paid for
+    assert state.failed
+    assert "Artifact not found" in (state.failure_reason or "")
 
 
 @pytest.mark.asyncio
