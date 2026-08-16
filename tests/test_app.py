@@ -24,10 +24,11 @@ from typing import Any, cast
 import pytest
 from pydantic import BaseModel, SecretStr
 
-from conftest import FakeProvider, ScriptedAsker, wait_until
+from conftest import FakeProvider, ScriptedAsker, ScriptedChat, wait_until
 from orchestra import app as app_module
 from orchestra.agents.aggregator import Aggregator, FigureDraft, ReportDraft
 from orchestra.agents.engine import DEFAULT_STEP_CAP, ExecutionEngine
+from orchestra.agents.interrupt import InterruptHandler
 from orchestra.agents.planner import Planner, PlannerAction, PlannerDraft
 from orchestra.agents.toolsets import QUERY_CSV_TOOL
 from orchestra.agents.workers.analytics import AnalyticsWorker
@@ -283,6 +284,29 @@ async def test_build_orchestra_tells_the_planner_what_the_retrieval_agent_can_ob
         system = orchestra._planner._system
         assert "revenue" in system and "no share price" in system
         assert "no data sources at all" not in system
+    finally:
+        await orchestra.aclose()
+
+
+@pytest.mark.parametrize("interactive", [True, False])
+@pytest.mark.asyncio
+async def test_build_orchestra_wires_an_interrupter_only_when_someone_can_interrupt(
+    tmp_path: Path, interactive: bool
+) -> None:
+    """#12: without a chat the engine holds no interrupter at all, so a scripted run pays
+    nothing for a pause it can never be asked for. Read through the private attributes for
+    the reason the roster test gives."""
+    chat = ScriptedChat() if interactive else None
+
+    orchestra = build_orchestra(_config(tmp_path), chat=chat)
+    try:
+        interrupts = orchestra._engine._interrupts
+        if not interactive:
+            assert interrupts is None
+        else:
+            assert isinstance(interrupts, InterruptHandler)
+            # The same roster the planner got: a replan may not invent a source either.
+            assert "revenue" in interrupts._system
     finally:
         await orchestra.aclose()
 

@@ -16,8 +16,8 @@ the corruption §5 forbids. The mode is `cli/app.py`'s decision; no flag policy 
 
 import asyncio
 from collections import deque
-from collections.abc import AsyncIterator, Callable, Mapping
-from contextlib import asynccontextmanager, suppress
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping
+from contextlib import asynccontextmanager, contextmanager, suppress
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 
@@ -106,6 +106,54 @@ def _one_line(message: str) -> str:
     *row* to the region rather than a wrap inside a cell.
     """
     return " ".join(message.split())
+
+
+class LiveRegion:
+    """The handle a prompt uses to take the terminal from the dashboard for a moment (#12).
+
+    Held by `cli/app.py` and given to both the dashboard and the chat: the two cannot
+    reach into each other, and only one of them may own the terminal at a time. With no
+    region attached — `--quiet`, a pipe, or a run not yet drawing — `suspended()` is a
+    no-op, so the chat needs no branch of its own.
+    """
+
+    def __init__(self) -> None:
+        """Start detached. `attached` registers the `Live` for the run's duration."""
+        self._live: Live | None = None
+        self._depth = 0
+
+    @property
+    def is_suspended(self) -> bool:
+        """Is the region down? Read by the spinner, which must not redraw into a terminal
+        a prompt is using."""
+        return self._depth > 0
+
+    @contextmanager
+    def attached(self, live: Live) -> Iterator[None]:
+        """Register `live` for the block, and forget it after — a stopped `Live` must not
+        outlive the consumer that owns it."""
+        self._live = live
+        try:
+            yield
+        finally:
+            self._live = None
+
+    @contextmanager
+    def suspended(self) -> Iterator[None]:
+        """Put the region down for the block and back up after, even on an exception.
+
+        Nesting is counted rather than nested for real: a second `start` would repaint the
+        dashboard over the prompt that asked for the terminal.
+        """
+        self._depth += 1
+        try:
+            if self._live is not None and self._depth == 1:
+                self._live.stop()
+            yield
+        finally:
+            self._depth -= 1
+            if self._live is not None and self._depth == 0:
+                self._live.start(refresh=True)
 
 
 class RenderMode(StrEnum):
@@ -371,12 +419,17 @@ def result_renderable(
 
 
 @asynccontextmanager
-async def dashboard(broker: Broker[TaskEvent], *, mode: RenderMode) -> AsyncIterator[RunView]:
+async def dashboard(
+    broker: Broker[TaskEvent], *, mode: RenderMode, region: LiveRegion | None = None
+) -> AsyncIterator[RunView]:
     """Draw `broker`'s events for the duration of the block, yielding the view they fold
     into (empty under `NONE`).
 
     Shaped to satisfy `app.RunObserver`, so `cli/app.py` hands `run_once` a
     `functools.partial(dashboard, mode=...)`.
+
+    `region` is where the `Live` registers itself so an interrupt's prompt can put it down
+    (#12); `None` gets a private one, which is every caller that never interrupts.
 
     **Recorded decision (issue #11): the subscription's lifetime is the consumer's
     lifetime.** `broker.subscribe()` is entered *inside* the consuming task, so any way
@@ -400,7 +453,8 @@ async def dashboard(broker: Broker[TaskEvent], *, mode: RenderMode) -> AsyncIter
     # to draw pending rows — races the consumer's first scheduling and is often lost.
     subscribed = asyncio.Event()
     consumer = asyncio.create_task(
-        _consume(broker, view, mode, subscribed), name=DASHBOARD_TASK_NAME
+        _consume(broker, view, mode, subscribed, region or LiveRegion()),
+        name=DASHBOARD_TASK_NAME,
     )
     try:
         # Raced against the consumer, not awaited outright: a consumer that died before
@@ -444,6 +498,7 @@ async def _consume(
     view: RunView,
     mode: RenderMode,
     subscribed: asyncio.Event,
+    region: LiveRegion,
 ) -> None:
     """Subscribe, then draw every event until cancelled. Runs as its own task.
 
@@ -478,12 +533,12 @@ async def _consume(
 
         # One `Live`, on stderr (§5). `auto_refresh=False` keeps Rich's refresh thread out
         # of the event loop; refreshing per event is cheaper and prompter than its 4/s.
-        with Live(frame(), console=err_console, auto_refresh=False) as live:
+        with Live(frame(), console=err_console, auto_refresh=False) as live, region.attached(live):
 
             def redraw(_event: TaskEvent) -> None:
                 live.update(frame(), refresh=True)
 
-            spinner = asyncio.create_task(_spin(live, view), name=SPINNER_TASK_NAME)
+            spinner = asyncio.create_task(_spin(live, view, region), name=SPINNER_TASK_NAME)
             try:
                 await _pump(queue, view, redraw)
             finally:
@@ -501,11 +556,14 @@ async def _consume(
                 await asyncio.wait({spinner})
 
 
-async def _spin(live: Live, view: RunView) -> None:
+async def _spin(live: Live, view: RunView, region: LiveRegion) -> None:
     """Redraw while an agent is working, so the spinners advance between events.
 
     A task on our own loop rather than `Live(auto_refresh=True)`, which runs Rich's refresh
     thread beside the event loop.
+
+    Silent while the region is suspended: an interrupt's prompt owns the terminal then, and
+    a tick would write over what the user is typing (#12).
 
     A closed stderr is dropped rather than ending the ticker: `orchestra run ... | head -1`
     must cost the animation, never the result (§5). Anything else propagates to
@@ -513,7 +571,7 @@ async def _spin(live: Live, view: RunView) -> None:
     """
     while True:
         await asyncio.sleep(SPINNER_TICK_SECONDS)
-        if view.active and not view.resting:
+        if view.active and not view.resting and not region.is_suspended:
             with suppress(OSError):
                 live.refresh()
 

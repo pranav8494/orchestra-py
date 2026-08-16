@@ -36,6 +36,7 @@ from orchestra.cli.render import (
     EVENT_LOG_LINES,
     PLANNING_HEADLINE,
     SPINNER_TASK_NAME,
+    LiveRegion,
     RenderMode,
     RunView,
     active_panel,
@@ -771,7 +772,7 @@ async def test_spin_keeps_ticking_when_stderr_is_closed(monkeypatch: pytest.Monk
 
     view = _seeded_view()
     view.apply(_started("fetch"))
-    ticker = asyncio.create_task(render._spin(cast(Live, BrokenLive()), view))
+    ticker = asyncio.create_task(render._spin(cast(Live, BrokenLive()), view, LiveRegion()))
     await asyncio.sleep(0.02)
 
     assert refreshes > 1  # it kept going rather than stopping on the first failure
@@ -789,7 +790,7 @@ async def test_dashboard_reports_a_ticker_that_died_instead_of_losing_it(
     """§8: `Task.cancel()` clears the unretrieved-exception flag even on a task that has
     already raised, so cancelling the ticker without reading it first erases the failure."""
 
-    async def boom(_live: Live, _view: RunView) -> None:
+    async def boom(_live: Live, _view: RunView, _region: LiveRegion) -> None:
         raise RuntimeError("ticker bug")
 
     monkeypatch.setattr(render, "_spin", boom)
@@ -1166,3 +1167,35 @@ def test_event_line_labels_a_warning_for_the_plain_sink() -> None:
 
     assert line.startswith("warn")
     assert "fetch" in line and "fell back" in line
+
+
+@pytest.mark.asyncio
+async def test_spin_holds_still_while_the_region_is_suspended(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An interrupt's prompt owns the terminal during a pause (#12), so the ticker must not
+    write into it. Rich happens to drop a stopped region's refresh too — this pins the
+    intent, so nobody removes the guard on the grounds that it looks redundant."""
+    monkeypatch.setattr(render, "SPINNER_TICK_SECONDS", 0.001)
+    refreshes = 0
+
+    class CountingLive:
+        def refresh(self) -> None:
+            nonlocal refreshes
+            refreshes += 1
+
+    view = _seeded_view()
+    view.apply(_started("fetch"))
+    region = LiveRegion()
+    ticker = asyncio.create_task(render._spin(cast(Live, CountingLive()), view, region))
+
+    with region.suspended():
+        await asyncio.sleep(0.02)
+        assert refreshes == 0
+
+    await asyncio.sleep(0.02)
+    assert refreshes > 0  # and it picks straight back up
+
+    ticker.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await ticker

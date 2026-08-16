@@ -6,7 +6,8 @@ no test module reaching into another's internals (§3.1).
 """
 
 import asyncio
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -18,6 +19,7 @@ from orchestra.agents.planner import Planner
 from orchestra.agents.workers.base import Worker
 from orchestra.artifacts import ArtifactStore
 from orchestra.core.errors import TaskFailure
+from orchestra.core.interrupt import Chat
 from orchestra.core.question import Asker, Question
 from orchestra.core.state import SubtaskContext, TaskState
 from orchestra.providers.base import AssistantTurn, Provider, ProviderMessage, StructuredT
@@ -197,6 +199,51 @@ class ScriptedAsker:
         return self.answers.pop(0)
 
 
+@dataclass
+class ScriptedChat:
+    """A `Chat` that asks to interrupt N times and talks from a queue (§12).
+
+    `messages` is one pause's worth: the queue is emptied by the first session, and every
+    later `next_message` returns "" — the user resuming — so a second pause cannot silently
+    consume another pause's script.
+    """
+
+    messages: list[str] = field(default_factory=list)
+    # How many pauses to ask for. The engine consumes one per `requested`, as a terminal
+    # would consume one keypress.
+    requests: int = 1
+    # When set, the key is only "pressed" once this says so — the seam for choosing *when*
+    # in the run the interrupt lands, which the engine's own behaviour turns on.
+    armed: Callable[[], bool] | None = None
+    # Called as the pause opens, for observing what the run was doing at that moment.
+    on_session: Callable[[], None] | None = None
+    said: list[str] = field(default_factory=list)
+    sessions: int = 0
+    # As `FakeProvider`'s: holds the prompt open so a cancellation test has one in flight.
+    blocker: asyncio.Event | None = None
+
+    def requested(self) -> bool:
+        if self.requests <= 0 or (self.armed is not None and not self.armed()):
+            return False
+        self.requests -= 1
+        return True
+
+    @contextmanager
+    def session(self) -> Iterator[None]:
+        self.sessions += 1
+        if self.on_session is not None:
+            self.on_session()
+        yield
+
+    async def next_message(self) -> str:
+        if self.blocker is not None:
+            await self.blocker.wait()
+        return self.messages.pop(0) if self.messages else ""
+
+    def say(self, text: str) -> None:
+        self.said.append(text)
+
+
 class FakeTool:
     """A `BaseTool` that answers from a queue and records what it was called with."""
 
@@ -280,3 +327,4 @@ if TYPE_CHECKING:
     _TOOL_PROTOCOL_CHECK: BaseTool = FakeTool("x", [])
     _ASKER_PROTOCOL_CHECK: Asker = ScriptedAsker()
     _WORKER_PROTOCOL_CHECK: Worker = ScriptedWorker()
+    _CHAT_PROTOCOL_CHECK: Chat = ScriptedChat()

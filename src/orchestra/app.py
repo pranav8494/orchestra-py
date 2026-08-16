@@ -15,6 +15,7 @@ from pathlib import Path
 
 from orchestra.agents.aggregator import Aggregator
 from orchestra.agents.engine import ExecutionEngine
+from orchestra.agents.interrupt import InterruptHandler
 from orchestra.agents.planner import Planner
 from orchestra.agents.toolsets import analytics_tools, data_retrieval_tools, retrievable_data
 from orchestra.agents.workers.analytics import AnalyticsWorker
@@ -26,6 +27,7 @@ from orchestra.artifacts import ArtifactStore
 from orchestra.config import Config, load_config
 from orchestra.core.errors import TaskFailure
 from orchestra.core.events import Broker
+from orchestra.core.interrupt import Chat
 from orchestra.core.question import Asker
 from orchestra.core.state import AgentRole, TaskEvent, TaskState
 from orchestra.providers.base import Provider, create_provider
@@ -99,7 +101,9 @@ class Orchestra:
         await self._provider.aclose()
 
 
-def build_orchestra(config: Config, *, asker: Asker | None = None) -> Orchestra:
+def build_orchestra(
+    config: Config, *, asker: Asker | None = None, chat: Chat | None = None
+) -> Orchestra:
     """Construct the application from validated configuration.
 
     Substitute a service by calling `Orchestra` directly.
@@ -107,6 +111,8 @@ def build_orchestra(config: Config, *, asker: Asker | None = None) -> Orchestra:
     Args:
         asker: who answers the planner's clarifying questions (#10). `None` runs
             non-interactively: the planner is told nobody is there and plans anyway.
+        chat: who may interrupt the run mid-plan and talk to the orchestrator (#12).
+            `None` never pauses.
 
     Raises:
         ConfigError: the artifact directory is unusable (§9 — fail before work starts).
@@ -127,6 +133,9 @@ def build_orchestra(config: Config, *, asker: Asker | None = None) -> Orchestra:
     # Held, not inlined: the planner is told what these can obtain, so the roster it plans
     # against is the toolset the retrieval agent actually got (#10).
     retrieval_tools = data_retrieval_tools(config.data_dir, search_api_key=config.tavily_api_key)
+    # One roster for both orchestrator calls: what the planner may plan against is what a
+    # mid-run replan may plan against (#12).
+    roster = retrievable_data(retrieval_tools)
     # The same bounds for both: one budget per subtask, not per role, so `WORKER_MAX_TURNS`
     # means the same thing wherever the operator reads it. Passed by name rather than
     # unpacked from a dict, which mypy would not check against either constructor.
@@ -157,13 +166,16 @@ def build_orchestra(config: Config, *, asker: Asker | None = None) -> Orchestra:
         planner=Planner(
             provider,
             ask_tool=None if asker is None else AskUserTool(asker),
-            retrievable_data=retrievable_data(retrieval_tools),
+            retrievable_data=roster,
         ),
         engine=ExecutionEngine(
             workers=workers,
             broker=broker,
             max_concurrency=config.max_concurrency,
             subtask_attempts=config.subtask_attempts,
+            interrupts=None
+            if chat is None
+            else InterruptHandler(provider, chat=chat, broker=broker, retrievable_data=roster),
         ),
         # The workers' own store: the aggregator resolves the pointers they minted.
         aggregator=Aggregator(provider, store),
@@ -184,20 +196,24 @@ so an observer yielding something — `dashboard` yields its `RunView` — still
 
 
 async def run_once(
-    prompt: str, *, observer: RunObserver | None = None, asker: Asker | None = None
+    prompt: str,
+    *,
+    observer: RunObserver | None = None,
+    asker: Asker | None = None,
+    chat: Chat | None = None,
 ) -> TaskState:
     """Load configuration, run `prompt` once, and release the provider.
 
     What `cli/app.py` delegates to, so the command body stays parse, delegate, exit (§4).
     `observer` is entered around the run, so it is subscribed before the first event and
     torn down after the last; `None` runs headless. `asker` answers clarifying questions;
-    `None` never asks any.
+    `None` never asks any. `chat` may interrupt mid-plan; `None` never pauses.
 
     Raises:
         OrchestraError: configuration or planning failed. A run that started and then
             stopped short returns its ledger instead.
     """
-    orchestra = build_orchestra(load_config(), asker=asker)
+    orchestra = build_orchestra(load_config(), asker=asker, chat=chat)
     try:
         # An exit stack rather than an `if`, which would duplicate the `run_task` call
         # across both branches.

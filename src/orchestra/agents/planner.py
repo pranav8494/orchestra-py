@@ -16,7 +16,7 @@ replan (#12) re-entering `create_plan` cannot start a second round. What follows
 with `_plan_only`, which rejects `clarify` outright.
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -119,7 +119,7 @@ class Planner:
         """
         self._provider = provider
         self._ask_tool = ask_tool
-        self._system = _system_prompt(retrievable_data)
+        self._system = f"{PLANNER_SYSTEM_PROMPT}\n\n{data_roster(retrievable_data)}"
 
     async def create_plan(self, state: TaskState) -> Plan:
         """Plan `state.user_request`, set `state.plan`, append `plan_created`, return it.
@@ -200,19 +200,19 @@ class Planner:
         return plan
 
 
-def _system_prompt(retrievable_data: str) -> str:
-    """The planner's instructions with the run's data roster appended.
+def data_roster(retrievable_data: str) -> str:
+    """The run's data roster as a prompt block — what the team can obtain, or that it cannot.
 
-    Composed once, in `__init__`: the roster is fixed for the run, and §11 keeps runtime
-    formatting out of `prompts/`. The system turn, not a user one — this is what the team
-    can do, not something the user said.
+    Composed once, at construction: the roster is fixed for the run, and §11 keeps runtime
+    formatting out of `prompts/`. Part of the system turn, not a user one — this is what
+    the team can do, not something the user said.
+
+    Public because the mid-run interrupt replans against the same roster (#12); a second
+    copy would go on offering a dataset the day this one changed.
     """
-    listing = (
-        f"{PLANNER_AVAILABLE_DATA}\n\n{retrievable_data}"
-        if retrievable_data
-        else (PLANNER_NO_DATA_LISTED)
-    )
-    return f"{PLANNER_SYSTEM_PROMPT}\n\n{listing}"
+    if not retrievable_data:
+        return PLANNER_NO_DATA_LISTED
+    return f"{PLANNER_AVAILABLE_DATA}\n\n{retrievable_data}"
 
 
 def _messages(state: TaskState) -> list[ProviderMessage]:
@@ -263,19 +263,21 @@ def _to_outcome(draft: PlannerDraft) -> Plan | ClarificationRequest:
     return _to_plan(draft)
 
 
-def _check_inputs(draft: PlannerDraft) -> None:
+def _check_inputs(drafts: Sequence[SubtaskDraft], known: set[str]) -> None:
     """Reject data edges that are missing or unordered.
 
     `Plan` validates `depends_on` but not `inputs`, whose semantics are unsettled in
-    `core/` (#4) — so the rule is enforced here: an input names a subtask in this plan,
+    `core/` (#4) — so the rule is enforced here: an input names a subtask the plan knows,
     and consuming a step's output means depending on it. Without the second half the
     engine can start a consumer before its producer has written anything.
+
+    `known` is every id the plan will hold, so a replan's drafts may consume a step that
+    has already finished (#12).
 
     Raises:
         Rejected: an input names an unknown subtask, or one not depended on.
     """
-    known = {subtask.id for subtask in draft.subtasks}
-    for subtask in draft.subtasks:
+    for subtask in drafts:
         unknown = sorted(set(subtask.inputs) - known)
         if unknown:
             raise Rejected(f"subtask {subtask.id!r} takes inputs from unknown steps: {unknown}")
@@ -287,27 +289,55 @@ def _check_inputs(draft: PlannerDraft) -> None:
             )
 
 
+def subtasks_to_plan(drafts: Sequence[SubtaskDraft], *, kept: Sequence[Subtask] = ()) -> Plan:
+    """Convert model-written subtasks into a ledger `Plan`, leaving engine-owned fields default.
+
+    `kept` are subtasks the plan carries over as they are — the finished steps a mid-run
+    replan must not redo (#12). They lead the plan with their status and pointers intact,
+    and their ids are what the drafts may depend on beyond each other.
+
+    Public and shared by both planning paths: a replanned step has to be indistinguishable
+    from a planned one, which two converters would not stay (§1.5).
+
+    Raises:
+        ValidationError: the result is not a runnable DAG.
+        Rejected: there are no drafts, one reuses a kept id, or a data edge is unknown or
+            unordered.
+    """
+    if not drafts:
+        raise Rejected("a plan needs at least one subtask")
+    kept_ids = {subtask.id for subtask in kept}
+    reused = sorted({draft.id for draft in drafts} & kept_ids)
+    if reused:
+        raise Rejected(f"these ids already name steps in the plan: {reused}; choose new ones")
+    _check_inputs(drafts, kept_ids | {draft.id for draft in drafts})
+    return Plan(
+        subtasks=[
+            *kept,
+            *(
+                Subtask(
+                    id=subtask.id,
+                    role=subtask.role,
+                    instruction=subtask.instruction,
+                    inputs=list(subtask.inputs),
+                    depends_on=list(subtask.depends_on),
+                )
+                for subtask in drafts
+            ),
+        ]
+    )
+
+
 def _to_plan(draft: PlannerDraft) -> Plan:
-    """Convert model output into a ledger `Plan`, leaving engine-owned fields default.
+    """Convert a planner reply into a ledger `Plan`.
 
     Raises:
         ValidationError: the draft is not a runnable DAG.
-        Rejected: the draft has no subtasks, or its data edges are unknown or unordered.
+        Rejected: the draft has no subtasks, carries questions, or its data edges are
+            unknown or unordered.
     """
     if not draft.subtasks:
         raise Rejected("action 'plan' needs at least one subtask")
     if draft.questions:
         raise Rejected("questions belong to action 'clarify'; a plan carries none")
-    _check_inputs(draft)
-    return Plan(
-        subtasks=[
-            Subtask(
-                id=subtask.id,
-                role=subtask.role,
-                instruction=subtask.instruction,
-                inputs=list(subtask.inputs),
-                depends_on=list(subtask.depends_on),
-            )
-            for subtask in draft.subtasks
-        ]
-    )
+    return subtasks_to_plan(draft.subtasks)

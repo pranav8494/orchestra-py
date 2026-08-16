@@ -17,6 +17,12 @@ state — partial results beat no results (§8, #8).
 would run forever. Every attempt counts against it, so it bounds retries too. Exceeding
 it is a `TaskFailure`, never a retry (§10).
 
+**A pause waits for the step in flight** (#12). An interrupt stops the scheduler
+dispatching and is honoured once nothing is running, so the orchestrator reshapes a
+settled ledger rather than one being written to. What comes back may be a different plan,
+so the loop re-reads it; who the user talked to and what they said stay behind the
+`Interrupter` port.
+
 **Settling `inputs`.** `Subtask.inputs` names upstream subtask ids, and `state.artifacts`
 is keyed by producing subtask id — so the two readings the planner flagged as unsettled
 are the same set of strings here.
@@ -28,6 +34,7 @@ from collections.abc import Mapping
 from orchestra.agents.workers.base import Worker
 from orchestra.core.errors import OrchestraError, TaskFailure
 from orchestra.core.events import Broker
+from orchestra.core.interrupt import Interrupter
 from orchestra.core.state import (
     AgentRole,
     EventKind,
@@ -56,6 +63,7 @@ class ExecutionEngine:
         max_concurrency: int = DEFAULT_MAX_CONCURRENCY,
         step_cap: int = DEFAULT_STEP_CAP,
         subtask_attempts: int = DEFAULT_SUBTASK_ATTEMPTS,
+        interrupts: Interrupter | None = None,
     ) -> None:
         """Wire the engine.
 
@@ -64,6 +72,8 @@ class ExecutionEngine:
                 this mapping lacks fails the run.
             step_cap: how many dispatches the run may make in total.
             subtask_attempts: how many times one subtask may be dispatched before it fails.
+            interrupts: who may pause the run mid-plan (#12). `None` never pauses, which
+                is every non-interactive run.
 
         Raises:
             ValueError: a non-positive bound — a wiring bug, not a user-facing error.
@@ -79,15 +89,18 @@ class ExecutionEngine:
         self._max_concurrency = max_concurrency
         self._step_cap = step_cap
         self._subtask_attempts = subtask_attempts
+        self._interrupts = interrupts
 
     async def run(self, state: TaskState) -> None:
         """Execute `state.plan`, updating the ledger and emitting events as it goes.
 
         Subtask statuses, `artifacts`, `current_step` and `events` are written to `state`.
+        So is `plan`, when an interrupt replans what is left (#12).
 
         Raises:
-            TaskFailure: there is no plan, a role has no worker, or the step cap was
-                exceeded. All three end the run — a failed *subtask* does not.
+            TaskFailure: there is no plan, a role has no worker, the step cap was
+                exceeded, or an interrupt could not be handled. All four end the run — a
+                failed *subtask* does not.
             asyncio.CancelledError: in-flight subtasks are cancelled with it and the error
                 is re-raised, never swallowed (§10).
         """
@@ -121,11 +134,40 @@ class ExecutionEngine:
         attempts: dict[str, int] = {}
         # The last error each attempted subtask raised, for the reconciliation below.
         last_error: dict[str, str] = {}
+        interrupts = self._interrupts
+        paused = False
+        # A pause that failed. Held rather than raised, for the reason `capped` is: an
+        # exception leaving the `TaskGroup` body comes out as an `ExceptionGroup`, which
+        # `app.py` cannot recognise and the CLI would render as a bug (§8).
+        interrupt_error: OrchestraError | None = None
 
         async with asyncio.TaskGroup() as group:
             while True:
                 finished.clear()
-                if not capped:
+                # Not once `capped`: the run is already ending on a bound no conversation
+                # can lift, and a replan nothing would dispatch is worse than no pause.
+                if interrupts is not None and not capped:
+                    # Asked every lap, so a keypress during a long step is not lost; acted
+                    # on once the step holding it up has finished.
+                    paused = paused or interrupts.pending()
+                    if paused and not in_flight:
+                        paused = False
+                        try:
+                            restarted = await interrupts.handle(state)
+                        except OrchestraError as exc:
+                            # Not `Exception`: anything outside the taxonomy is a bug and
+                            # must reach the boundary as one (§8).
+                            interrupt_error = exc
+                            restarted = frozenset()
+                        if state.plan is not None:
+                            plan = state.plan  # a replan hands back a different one
+                        # A step the pause sent back starts its attempts afresh — only
+                        # those, so a pause that changed nothing changes nothing. The step
+                        # cap is untouched, so the run's total work stays bounded (§10).
+                        for subtask_id in restarted:
+                            attempts.pop(subtask_id, None)
+                            last_error.pop(subtask_id, None)
+                if not capped and not paused and interrupt_error is None:
                     for subtask in _ready(plan, in_flight):
                         if dispatched >= self._step_cap:
                             # Stop dispatching but let in-flight work finish: the cap ends
@@ -165,6 +207,18 @@ class ExecutionEngine:
                 )
 
         done = sum(1 for subtask in plan.subtasks if subtask.status is SubtaskStatus.DONE)
+
+        if interrupt_error is not None:
+            # A `TaskFailure`, not the original: `app.py` records this on the ledger so the
+            # report still names the artifacts on disk, where re-raising a `ProviderError`
+            # would exit 4 with nothing on stdout. Settled the same way for a failed
+            # synthesis in #9.
+            message = (
+                f"The run stopped while handling an interrupt: {interrupt_error}. "
+                f"{done} of {len(plan.subtasks)} subtasks finished before stopping."
+            )
+            await self._emit(state, EventKind.RUN_FINISHED, message=message)
+            raise TaskFailure(message) from interrupt_error
 
         if capped:
             # `app.py` records this message on `state.failure_reason` and the report names
