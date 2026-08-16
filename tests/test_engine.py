@@ -217,6 +217,45 @@ async def test_run_emits_every_transition_to_the_ledger_and_the_broker() -> None
     assert [event.subtask_id for event in published[1:3]] == ["fetch_revenue_history"] * 2
 
 
+@pytest.mark.asyncio
+async def test_run_publishes_the_plan_on_plan_created_and_on_no_other_event() -> None:
+    """A subscriber joins with no ledger of its own (#11), so the pending rows can only
+    reach it here. Every later event, and every ledger entry, stays plan-free."""
+    state = await _planned(LINEAR)
+    broker = _broker()
+
+    async with broker.subscribe() as queue:
+        await _engine(ScriptedWorker(), broker).run(state)
+        published = _drain(queue)
+
+    assert state.plan is not None
+    assert published[0].kind is EventKind.PLAN_CREATED
+    assert published[0].plan is not None
+    assert [subtask.id for subtask in published[0].plan.subtasks] == [
+        subtask.id for subtask in state.plan.subtasks
+    ]
+    assert all(event.plan is None for event in published[1:])
+    assert all(event.plan is None for event in state.events)
+
+
+@pytest.mark.asyncio
+async def test_run_publishes_a_plan_copy_the_engine_does_not_go_on_mutating() -> None:
+    """The event is history, not a live view. The engine writes `Subtask.status` in place
+    as it dispatches, so a shared reference would show a subscriber `done` rows it was
+    never told about — and never redraw them."""
+    state = await _planned(LINEAR)
+    broker = _broker()
+
+    async with broker.subscribe() as queue:
+        await _engine(ScriptedWorker(), broker).run(state)
+        plan_created = _drain(queue)[0]
+
+    assert set(_statuses(state).values()) == {SubtaskStatus.DONE}  # the engine moved them all
+    published_plan = plan_created.plan
+    assert published_plan is not None
+    assert [subtask.status for subtask in published_plan.subtasks] == [SubtaskStatus.PENDING] * 3
+
+
 # --------------------------------------------------------------------------
 # Concurrency: the plan is a DAG, and the fan-out has to be visible as one.
 # --------------------------------------------------------------------------

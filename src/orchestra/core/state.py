@@ -58,17 +58,6 @@ class EventKind(StrEnum):
     RUN_FINISHED = "run_finished"
 
 
-class TaskEvent(BaseModel):
-    """One entry in the event log. Frozen: history is not edited."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    kind: EventKind
-    message: str = ""
-    subtask_id: str | None = None
-    at: datetime = Field(default_factory=lambda: datetime.now(UTC))
-
-
 class Clarification(BaseModel):
     """An answered question. The pending, blocking request is `core/question.py`'s (#10)."""
 
@@ -135,6 +124,31 @@ class Plan(BaseModel):
             resolved.update(subtask.id for subtask in ready)
             remaining = [subtask for subtask in remaining if subtask.id not in resolved]
         return self
+
+
+# Defined after `Plan` because `plan` below refers to it. Ordering, not layering.
+class TaskEvent(BaseModel):
+    """One entry in the event log. Frozen: history is not edited.
+
+    `plan` is the exception to "pointers, not blobs": a dashboard has to draw the
+    *pending* rows, which no transition it has seen yet can tell it. The engine attaches
+    it to the one `plan_created` event it publishes, deep-copied — the engine mutates
+    `Subtask.status` in place afterwards, and a shared reference would let a subscriber
+    read live state through history. Every other event leaves it `None`, and `_emit`
+    never sets it, so the ledger stays free of plan copies.
+
+    The copy guards against the engine, not against other subscribers: `Plan` is mutable
+    and the broker fans one object out to everyone. Nothing writes to it today; worth
+    knowing before adding a second subscriber.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: EventKind
+    message: str = ""
+    subtask_id: str | None = None
+    plan: Plan | None = None
+    at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 class SubtaskContext(BaseModel):

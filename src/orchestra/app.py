@@ -8,6 +8,9 @@ Phase A wires the stub worker into every role. Phase B replaces those entries on
 time (#5-#7); nothing else in the application changes when it does.
 """
 
+from collections.abc import Callable
+from contextlib import AbstractAsyncContextManager, AsyncExitStack
+
 from orchestra.agents.aggregator import Aggregator
 from orchestra.agents.engine import ExecutionEngine
 from orchestra.agents.planner import Planner
@@ -116,7 +119,20 @@ def build_orchestra(config: Config) -> Orchestra:
     )
 
 
-async def run_once(prompt: str) -> TaskState:
+type RunObserver = Callable[[Broker[TaskEvent]], AbstractAsyncContextManager[object]]
+"""Something that watches a run: given the broker, it stays attached for the run's
+duration. `cli/render.py`'s dashboard is one (#11).
+
+A parameter rather than an import because the layer rule runs one way (§3.2): `cli/`
+may import `app.py`, so `app.py` may not name the renderer.
+
+`[object]`, not `[None]`: the type is covariant in what it yields, so `[None]` would
+reject every observer that yields something — `dashboard` hands back its `RunView`.
+`run_once` discards the value, so nothing here depends on what it was.
+"""
+
+
+async def run_once(prompt: str, *, observer: RunObserver | None = None) -> TaskState:
     """Load configuration, run `prompt` once, and release the provider.
 
     The entry point `cli/app.py` delegates to, so the command body stays a parse, a
@@ -124,6 +140,8 @@ async def run_once(prompt: str) -> TaskState:
 
     Args:
         prompt: the user's plain-language request.
+        observer: entered around the run, so it is subscribed before the first event is
+            published and torn down after the last. `None` runs headless.
 
     Returns:
         The run's ledger, carrying the report the command prints.
@@ -131,10 +149,17 @@ async def run_once(prompt: str) -> TaskState:
     Raises:
         OrchestraError: configuration or planning failed. A run that started and then
             stopped short returns its ledger instead.
+        asyncio.CancelledError: the run was cancelled; propagated after both the
+            observer and the provider are released (§10).
     """
     orchestra = build_orchestra(load_config())
     try:
-        return await orchestra.run_task(prompt)
+        # An exit stack rather than an `if`: the one that duplicated the `run_task` call
+        # across both branches is how the two copies drift.
+        async with AsyncExitStack() as stack:
+            if observer is not None:
+                await stack.enter_async_context(observer(orchestra.broker))
+            return await orchestra.run_task(prompt)
     finally:
         # Runs on cancellation too: Ctrl-C must not leak the provider's sockets.
         await orchestra.aclose()

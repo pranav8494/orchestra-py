@@ -12,6 +12,7 @@ boundary that turns a `ConfigError` into exit 3.
 import asyncio
 from collections.abc import Iterator
 from contextlib import contextmanager
+from functools import partial
 from typing import Annotated
 
 import typer
@@ -19,7 +20,8 @@ import typer
 from orchestra import __version__
 from orchestra.app import run_once
 from orchestra.cli.console import console, err_console
-from orchestra.cli.format import OutputFormat, format_result
+from orchestra.cli.format import OutputFormat
+from orchestra.cli.render import RenderMode, dashboard, result_renderable
 from orchestra.core.errors import ExitCode, OrchestraError
 
 app = typer.Typer(
@@ -88,21 +90,42 @@ def run(
     ] = OutputFormat.TEXT,
     quiet: Annotated[
         bool,
-        typer.Option("--quiet", "-q", help="Omit the per-step trace. The report still prints."),
+        typer.Option("--quiet", "-q", help="Suppress live progress. The report still prints."),
     ] = False,
     debug: Annotated[bool, typer.Option("--debug", help="Show the traceback on failure.")] = False,
 ) -> None:
     """Plan the request, run the subtasks, and report on what they produced."""
     with error_boundary(debug=debug):
         # Ctrl-C cancels the run inside `asyncio.run`, which unwinds the TaskGroup and
-        # re-raises KeyboardInterrupt here; the boundary maps it to 130 (§8).
-        state = asyncio.run(run_once(prompt))
+        # re-raises KeyboardInterrupt here; the boundary maps it to 130 (§8). The
+        # dashboard is torn down on that unwind, so the `Live` region is always exited.
+        observer = partial(dashboard, mode=_render_mode(quiet=quiet, output=output))
+        state = asyncio.run(run_once(prompt, observer=observer))
         if state.failure_reason is not None:
             # A diagnostic, so stderr (§5, §8) — and an error rather than progress, so
             # `--quiet` keeps it. Printed under `-o json` too: which stream says what must
             # not depend on the format. markup/highlight off for `error_boundary`'s
             # reason — the message can name a bracketed token Rich would eat as a tag.
             err_console.print(state.failure_reason, markup=False, highlight=False)
-        console.print(format_result(state, output=output, quiet=quiet))  # the result (§5)
+        # The result (§5). `is_terminal` is read here and passed down, so the framing
+        # decision stays in `render.py`.
+        console.print(
+            result_renderable(state, output=output, quiet=quiet, terminal=console.is_terminal)
+        )
         # A run that fell short still prints its report; only the code says it failed.
         raise typer.Exit(ExitCode.TASK_FAILURE if state.failed else ExitCode.SUCCESS)
+
+
+def _render_mode(*, quiet: bool, output: OutputFormat) -> RenderMode:
+    """Which dashboard the flags ask for. The one place that policy is decided.
+
+    `--quiet` suppresses progress entirely (§5). `--output json` never gets a `Live`
+    region — a run whose stdout is being parsed is one nobody is watching redraw — but
+    keeps the scrolling lines. Otherwise: live table on a terminal, plain lines in a
+    pipe, a CI log or a recording.
+    """
+    if quiet:
+        return RenderMode.NONE
+    if output is OutputFormat.JSON or not err_console.is_terminal:
+        return RenderMode.PLAIN
+    return RenderMode.LIVE
