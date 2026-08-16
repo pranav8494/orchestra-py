@@ -7,6 +7,7 @@ contract is the text, not Rich's rendering of it.
 """
 
 import json
+from functools import partial
 
 import pytest
 import typer
@@ -14,8 +15,10 @@ from typer.testing import CliRunner
 
 import orchestra.cli.app as cli_app
 from orchestra import __version__
+from orchestra.app import RunObserver
 from orchestra.cli.app import app, error_boundary
-from orchestra.cli.console import console
+from orchestra.cli.console import console, err_console
+from orchestra.cli.render import RenderMode
 from orchestra.config import load_config
 from orchestra.core.errors import ConfigError, ExitCode, ProviderError, TaskFailure
 from orchestra.core.state import (
@@ -130,16 +133,39 @@ def _finished_state(*statuses: SubtaskStatus, failure_reason: str | None = None)
     )
 
 
-def _stub_run_once(monkeypatch: pytest.MonkeyPatch, outcome: TaskState | BaseException) -> None:
-    """Replace the delegation target, leaving the command's own behaviour under test."""
+def _stub_run_once(
+    monkeypatch: pytest.MonkeyPatch, outcome: TaskState | BaseException
+) -> list[RunObserver | None]:
+    """Replace the delegation target, leaving the command's own behaviour under test.
 
-    async def fake_run_once(prompt: str) -> TaskState:
+    Returns the list the observer the command built is recorded in, so a test can assert
+    which dashboard the flags asked for without running one.
+    """
+    observers: list[RunObserver | None] = []
+
+    async def fake_run_once(prompt: str, *, observer: RunObserver | None = None) -> TaskState:
         assert prompt == PROMPT  # the command passes the argument through unchanged
+        observers.append(observer)
         if isinstance(outcome, BaseException):
             raise outcome
         return outcome
 
     monkeypatch.setattr(cli_app, "run_once", fake_run_once)
+    return observers
+
+
+def _requested_mode(observers: list[RunObserver | None]) -> RenderMode:
+    """The `RenderMode` baked into the observer the command handed `run_once`.
+
+    Read off the partial, so the assertion is on the data handed to the renderer rather
+    than on what Rich drew (§12).
+    """
+    assert len(observers) == 1
+    observer = observers[0]
+    assert isinstance(observer, partial)
+    mode = observer.keywords["mode"]
+    assert isinstance(mode, RenderMode)
+    return mode
 
 
 def test_run_succeeds_and_prints_the_summary_to_stdout(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -198,6 +224,91 @@ def test_run_quiet_omits_the_step_lines_and_keeps_the_report(
     assert "Steps:" not in result.stdout
     assert "done     step_0" not in result.stdout
     assert result.stderr == ""
+
+
+# --------------------------------------------------------------------------
+# Which dashboard the flags ask for (#11). The command builds the observer and
+# hands it to `run_once`; what it draws is `test_render.py`'s subject, so these
+# assert on the mode chosen, never on Rich's output (§12).
+# --------------------------------------------------------------------------
+
+
+def _force_terminal(monkeypatch: pytest.MonkeyPatch, *, value: bool) -> None:
+    """Pretend stderr is (or is not) a tty — `CliRunner` always reports a pipe, which
+    would leave the `LIVE` arm unreachable.
+
+    On the *instance*: patching `is_terminal` on the class flips stdout's tty-ness too,
+    since both consoles are `rich.console.Console`, and these tests would then pass
+    against a `_render_mode` reading the wrong stream.
+    """
+    monkeypatch.setattr(err_console, "_force_terminal", value, raising=False)
+
+
+def test_run_on_a_terminal_asks_for_the_live_dashboard(monkeypatch: pytest.MonkeyPatch) -> None:
+    observers = _stub_run_once(monkeypatch, _finished_state(SubtaskStatus.DONE))
+    _force_terminal(monkeypatch, value=True)
+
+    result = runner.invoke(app, ["run", PROMPT], prog_name=PROG)
+
+    assert result.exit_code == ExitCode.SUCCESS
+    assert _requested_mode(observers) is RenderMode.LIVE
+
+
+def test_run_piped_falls_back_to_plain_lines(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The non-TTY fallback: it has to work piped, in CI, and in a recording."""
+    observers = _stub_run_once(monkeypatch, _finished_state(SubtaskStatus.DONE))
+    _force_terminal(monkeypatch, value=False)
+
+    result = runner.invoke(app, ["run", PROMPT], prog_name=PROG)
+
+    assert result.exit_code == ExitCode.SUCCESS
+    assert _requested_mode(observers) is RenderMode.PLAIN
+
+
+def test_run_with_stdout_redirected_still_draws_live_on_a_tty_stderr(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`orchestra run x > report.txt`: stdout is a file, stderr is still the terminal.
+
+    Why the two streams are split (§5) — the mode follows stderr, the framing follows
+    stdout. Pins which console each decision reads.
+    """
+    observers = _stub_run_once(monkeypatch, _finished_state(SubtaskStatus.DONE))
+    _force_terminal(monkeypatch, value=True)  # stderr only; `console` stays a pipe
+
+    result = runner.invoke(app, ["run", PROMPT], prog_name=PROG)
+
+    assert result.exit_code == ExitCode.SUCCESS
+    assert _requested_mode(observers) is RenderMode.LIVE
+    # Unframed, because stdout is the redirected one — a panel's box would land in the file.
+    assert SUMMARY in result.stdout
+    assert "╭" not in result.stdout
+
+
+def test_run_quiet_asks_for_no_dashboard_at_all(monkeypatch: pytest.MonkeyPatch) -> None:
+    """§5: `--quiet` suppresses progress — including the `Live` region — never the result."""
+    observers = _stub_run_once(monkeypatch, _finished_state(SubtaskStatus.DONE))
+    _force_terminal(monkeypatch, value=True)
+
+    result = runner.invoke(app, ["run", PROMPT, "--quiet"], prog_name=PROG)
+
+    assert result.exit_code == ExitCode.SUCCESS
+    assert _requested_mode(observers) is RenderMode.NONE
+    assert SUMMARY in result.stdout  # the report survives the flag
+
+
+def test_run_json_never_starts_a_live_region_even_on_a_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A run whose stdout is being parsed is one nobody is watching redraw."""
+    observers = _stub_run_once(monkeypatch, _finished_state(SubtaskStatus.DONE))
+    _force_terminal(monkeypatch, value=True)
+
+    result = runner.invoke(app, ["run", PROMPT, "-o", "json"], prog_name=PROG)
+
+    assert result.exit_code == ExitCode.SUCCESS
+    assert _requested_mode(observers) is RenderMode.PLAIN
+    json.loads(result.stdout)  # still exactly one document, unframed
 
 
 def test_run_that_stopped_short_prints_the_report_and_the_reason_on_stderr(

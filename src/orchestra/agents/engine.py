@@ -96,10 +96,16 @@ class ExecutionEngine:
 
         # Published, not appended: the planner already recorded `plan_created` in the
         # ledger, but no broker existed when it did, and the dashboard needs the event.
+        # The plan rides along on this one event because a subscriber cannot draw the
+        # pending rows from transitions it has not seen yet. Deep-copied because the
+        # loop below mutates every `Subtask.status` in place, and a shared reference
+        # would let a subscriber read live state through an event handed to it as
+        # history. `_emit` deliberately has no `plan`, so ledger entries stay plan-free.
         await self._broker.publish_lifecycle(
             TaskEvent(
                 kind=EventKind.PLAN_CREATED,
                 message=f"Executing {len(plan.subtasks)} subtasks",
+                plan=plan.model_copy(deep=True),
             )
         )
 
