@@ -1,22 +1,19 @@
 """The first real worker: retrieval over the bundled offline data (#5).
 
-**The model chooses the tool, not the code.** Inspecting the instruction and picking
-`query_csv` or `search` here is a keyword matcher wearing an agent's name, and it cannot
-serve a step that needs both. Both schemas go to the model; the loop runs what it asks
-for and stops.
+**The model chooses the tool, not the code.** Picking `query_csv` or `search` from the
+instruction here is a keyword matcher wearing an agent's name, and it cannot serve a step
+needing both. Both schemas go to the model; the loop runs what it asks for.
 
-**The loop itself is `tool_loop.ToolLoop`** — the bounds, the retries and the transcript
-are the same for every worker that runs tools, so this module is only what makes the
-retrieval agent that agent: its two tool names, its artifact, and what "retrieved
-nothing" means.
+**The loop is `tool_loop.ToolLoop`**, so this module is only what makes the retrieval
+agent that agent: its two tool names, its artifact, and what "retrieved nothing" means.
 
-**One artifact.** `RetrievedDataset` holds the rows, the search provenance and the
-agent's summary under the one pointer `Worker.run` returns, as JSON so #6 reads it with
-`json.loads`. Rows stay CSV text — what the tool returned and what pandas wants.
+**One artifact.** `RetrievedDataset` holds rows, search provenance and summary under the
+one pointer `Worker.run` returns, as JSON so #6 reads it with `json.loads`. Rows stay CSV
+text — what the tool returned and what pandas wants.
 
-**Every successful query is kept.** `datasets` is a list: the tool advertises a `columns`
-filter, so asking for revenue and then costs is invited behaviour, and last-one-wins
-would store half the data under a summary describing all of it.
+**Every successful query is kept.** `datasets` is a list because the tool advertises a
+`columns` filter: last-one-wins would store half the data under a summary describing all
+of it.
 """
 
 import asyncio
@@ -42,9 +39,8 @@ from orchestra.tools.base import BaseTool, ToolCall, ToolResponse
 class RetrievalSource(BaseModel):
     """One search the agent ran and what came back — provenance for the soft claims.
 
-    Kept because a summary sentence like "margins are typical for the sector" is
-    otherwise unattributable, and the report's rule is that a claim traces to something
-    (§5 of the research doc).
+    Without it a summary sentence like "margins are typical for the sector" traces to
+    nothing, which the report's rules forbid.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -58,7 +54,7 @@ class RetrievedTable(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    query: str  # the call's arguments, rendered — provenance, symmetric with a source
+    query: str  # the call's arguments, rendered — provenance, like a source's
     csv: str
 
 
@@ -69,8 +65,8 @@ class RetrievedDataset(BaseModel):
 
     instruction: str
     summary: str
-    # Empty when the subtask was answered from background alone — a legitimate outcome
-    # for "find out what the sector's typical margin is", so not an error here.
+    # Empty when the subtask was answered from background alone — legitimate for "what is
+    # the sector's typical margin", so not an error here.
     datasets: list[RetrievedTable] = Field(default_factory=list)
     sources: list[RetrievalSource] = Field(default_factory=list)
 
@@ -88,22 +84,14 @@ class DataRetrievalWorker:
         max_turns: int = DEFAULT_MAX_TURNS,
         token_budget: int = DEFAULT_TOKEN_BUDGET,
     ) -> None:
-        """Take the wired services and the loop's bounds.
+        """Take the wired services and the loop's bounds. See `ToolLoop.__init__`.
 
         Args:
-            provider: the model provider to run the tool-use conversation with.
             store: the run's artifact store, where the retrieved dataset is written.
             tools: this agent's toolset, from `agents/toolsets.py`.
-            broker: the run's event stream, for warnings raised mid-step. The engine
-                publishes the step's *transitions*; only the loop can see a tool degrade
-                partway through one, so it reports that itself.
-            max_turns: how many model turns one subtask may take.
-            token_budget: input plus output tokens one subtask may spend.
 
         Raises:
-            ValueError: an empty toolset or a non-positive bound — a wiring bug, not a
-                user-facing error, so it fails at construction like the engine's. Checked
-                by the loop, which owns both bounds.
+            ValueError: an empty toolset or a non-positive bound, checked by the loop.
         """
         self._store = store
         self._loop = ToolLoop(
@@ -125,8 +113,8 @@ class DataRetrievalWorker:
         """
         result = await self._loop.run(context)
 
-        # Split by tool name rather than by response shape: the two kinds are the same
-        # thing to the loop and different artifacts here — rows to read, and provenance.
+        # Split by tool name, not response shape: the two are the same to the loop and
+        # different fields here — rows to read, and provenance.
         datasets = [
             _table(outcome.call, outcome.response)
             for outcome in result.kept
@@ -139,9 +127,8 @@ class DataRetrievalWorker:
         ]
 
         if not datasets and not sources:
-            # Every tool call failed, or none was made. Either way the step produced no
-            # data, and a summary with nothing behind it is exactly the invented answer
-            # the design forbids — better a failed subtask the report can name (§8).
+            # A summary with no data behind it is the invented answer the design forbids —
+            # better a failed subtask the report can name (§8).
             raise TaskFailure(
                 f"Retrieval for {context.subtask.id!r} finished without retrieving anything."
             )
@@ -152,8 +139,8 @@ class DataRetrievalWorker:
             datasets=datasets,
             sources=sources,
         )
-        # `to_thread` because the store is synchronous filesystem I/O, and blocking the
-        # event loop would serialise the engine's concurrent dispatch (§10).
+        # `to_thread` because the store is blocking I/O; blocking the loop would serialise
+        # the engine's concurrent dispatch (§10).
         return await asyncio.to_thread(
             self._store.put_text, f"{context.subtask.id}.json", dataset.model_dump_json(indent=2)
         )
@@ -162,9 +149,8 @@ class DataRetrievalWorker:
 def _source(call: ToolCall, response: ToolResponse) -> RetrievalSource:
     """Pair a search call with its result, defensively about the argument's shape.
 
-    `call.arguments` is model output, so `query` may be absent or not a string even
-    though the tool accepted the call — recording it is not worth a second validation
-    pass, and `str()` cannot fail here.
+    `call.arguments` is model output, so `query` may be absent or not a string even after
+    the tool accepted the call; recording it is not worth a second validation pass.
     """
     return RetrievalSource(query=str(call.arguments.get("query", "")), result=response.content)
 
@@ -172,8 +158,7 @@ def _source(call: ToolCall, response: ToolResponse) -> RetrievalSource:
 def _table(call: ToolCall, response: ToolResponse) -> RetrievedTable:
     """Pair a `query_csv` call with the rows it returned.
 
-    The arguments are rendered as sorted JSON rather than kept as a mapping: the artifact
-    is read by an agent and a person, and both want to see what was asked for without
-    the field becoming a second schema for #6 to know about.
+    Arguments render to sorted JSON rather than staying a mapping, so the field does not
+    become a second schema for #6 to know about.
     """
     return RetrievedTable(query=json.dumps(call.arguments, sort_keys=True), csv=response.content)

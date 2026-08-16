@@ -1,9 +1,4 @@
-"""Prompt registry: one module per agent, re-exported here (CONVENTIONS.md §3.3, §11).
-
-The single import surface is what keeps prompt text out of the agents. Worker prompts
-join this list with the agents that use them (#5-#7); when a shared preamble appears,
-it becomes a `base` module the role modules compose with, not a copied block (§2).
-"""
+"""Prompt registry: one module per agent, re-exported here (CONVENTIONS.md §3.3, §11)."""
 
 from orchestra.prompts.aggregator import SYSTEM_PROMPT as AGGREGATOR_SYSTEM_PROMPT
 from orchestra.prompts.analytics import SYSTEM_PROMPT as ANALYTICS_SYSTEM_PROMPT

@@ -1,12 +1,12 @@
-"""The Anthropic adapter — the only module in the codebase that imports `anthropic`.
+"""The Anthropic adapter — the only module that imports `anthropic`.
 
-Two things happen at this boundary and nowhere else: SDK failures become `ProviderError`
-(exit 4, §8), and the SDK's message shape becomes ours. Note the module is
-`orchestra.providers.anthropic`; `import anthropic` below is absolute and resolves to
-the vendor package, not to this file.
+Two things happen here and nowhere else: SDK failures become `ProviderError` (exit 4,
+§8), and the SDK's message shape becomes ours. `import anthropic` below is absolute and
+resolves to the vendor package, not to this module of the same name.
 """
 
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from typing import Any, Literal, assert_never, cast
 
 import anthropic
@@ -31,23 +31,15 @@ DEFAULT_MAX_TOKENS = 16_000
 class AnthropicProvider:
     """Talks to the Anthropic Messages API. Constructed by `create_provider` (§3.3).
 
-    Deliberately sends no `temperature`, `top_p` or `top_k`: the default model rejects
-    all three with a 400. No `thinking` block either, but for a different reason — this
-    model thinks by default and disabling it is what causes trouble here, not what
-    avoids it: with thinking off it can write a tool call into its visible text, where
-    the call silently never runs. The default is the safe setting, so it is left alone.
+    Sends no `temperature`, `top_p` or `top_k`: the default model 400s on all three. No
+    `thinking` block either — this model thinks by default, and turning it off lets it
+    write a tool call into visible text where the call silently never runs.
     """
 
     def __init__(
         self, *, api_key: SecretStr, model: str, max_tokens: int = DEFAULT_MAX_TOKENS
     ) -> None:
-        """Create the client.
-
-        Args:
-            api_key: the credential, unwrapped here and nowhere above (§9).
-            model: model identifier, from `Config.anthropic_model`.
-            max_tokens: combined thinking + output budget for one request.
-        """
+        """Create the client. `api_key` is unwrapped here and nowhere above (§9)."""
         self._client = anthropic.AsyncAnthropic(api_key=api_key.get_secret_value())
         self._model = model
         self._max_tokens = max_tokens
@@ -65,25 +57,20 @@ class AnthropicProvider:
         output_format: type[StructuredT],
     ) -> StructuredT | None:
         """Send one structured-output request. See `Provider.parse_structured`."""
-        try:
-            response = await self._client.messages.parse(
-                model=self._model,
-                max_tokens=self._max_tokens,
-                system=system,
-                messages=[_to_sdk_message(message) for message in messages],
-                output_format=output_format,
-            )
-        except anthropic.AnthropicError as exc:
-            # The SDK's own base class, so transport, status and retryable failures are
-            # all covered without a bare `except` (§8). Cancellation is a BaseException
-            # and passes straight through (§10).
-            raise ProviderError(f"Anthropic request to {self._model} failed: {exc}") from exc
-        except ValidationError:
-            # The SDK validates the text block against `output_format`, so a reply that
-            # is JSON but not *this* schema lands here. For the caller that is the same
-            # condition as a refusal — no usable structured output — so it gets the same
-            # answer rather than a second error path that means the same thing.
-            return None
+        with _as_provider_error(f"Anthropic request to {self._model}"):
+            try:
+                response = await self._client.messages.parse(
+                    model=self._model,
+                    max_tokens=self._max_tokens,
+                    system=system,
+                    messages=[_to_sdk_message(message) for message in messages],
+                    output_format=output_format,
+                )
+            except ValidationError:
+                # JSON, but not *this* schema. Same condition as a refusal for the caller —
+                # no usable structured output — so it gets the same answer, not a second
+                # error path meaning the same thing.
+                return None
         return response.parsed_output
 
     async def send(
@@ -94,16 +81,14 @@ class AnthropicProvider:
         tools: Sequence[ToolSpec] = (),
     ) -> AssistantTurn:
         """Send one conversational turn. See `Provider.send`."""
-        # `tools` is omitted rather than passed empty: the API rejects `tools=[]`, and
-        # this is also the shape of a final, tool-free turn. `max_tokens` is the same
-        # DEFAULT_MAX_TOKENS budget as `parse_structured` — thinking is on by default and
-        # shares that budget with the output (see the constant), and a tool-use turn is
-        # shorter than a plan, so a second constant would only be a second thing to tune.
+        # `tools` omitted rather than passed empty: the API rejects `tools=[]`, which is
+        # also the shape of a final, tool-free turn. One `max_tokens` for both calls — a
+        # tool-use turn is shorter than a plan, so a second constant is one more to tune.
         extra: dict[str, Any] = {}
         if tools:
             extra["tools"] = [_to_sdk_tool(tool) for tool in tools]
 
-        try:
+        with _as_provider_error(f"Anthropic request to {self._model}"):
             response = await self._client.messages.create(
                 model=self._model,
                 max_tokens=self._max_tokens,
@@ -111,33 +96,36 @@ class AnthropicProvider:
                 messages=[_to_sdk_message(message) for message in messages],
                 **extra,
             )
-        except anthropic.AnthropicError as exc:
-            # Same mapping as `parse_structured`: the SDK's base class, so no bare
-            # `except` (§8), and cancellation is a BaseException that passes through (§10).
-            raise ProviderError(f"Anthropic request to {self._model} failed: {exc}") from exc
         return _from_sdk_response(response)
 
     async def aclose(self) -> None:
         """Close the SDK client's connection pool. See `Provider.aclose`.
 
-        Closing is I/O, so it fails like any other call — and mapping it here keeps the
-        rule that no SDK exception type leaves this module (§6, §8).
+        Closing is I/O, so it fails like any other call and is mapped here — no SDK
+        exception type leaves this module (§6, §8).
         """
-        try:
+        with _as_provider_error("Closing the Anthropic client"):
             await self._client.close()
-        except anthropic.AnthropicError as exc:
-            raise ProviderError(f"Closing the Anthropic client failed: {exc}") from exc
+
+
+@contextmanager
+def _as_provider_error(action: str) -> Iterator[None]:
+    """Turn an SDK failure into the taxonomy's `ProviderError` (§8), as `<action> failed`.
+
+    `anthropic.AnthropicError` is the SDK's base class — transport, status and retryable
+    failures — so no bare `except` and no SDK type leaves this module (§6).
+    """
+    try:
+        yield
+    except anthropic.AnthropicError as exc:
+        raise ProviderError(f"{action} failed: {exc}") from exc
 
 
 def _to_sdk_message(message: ProviderMessage) -> MessageParam:
     """Translate one turn into the SDK's shape. Shared by both requests (§2.2), so a
-    transcript reads the same whichever call resends it.
-
-    No SDK type crosses back out: replies are decoded by `_from_sdk_response` (§6).
-    """
-    # Exhaustive rather than an else-branch: the SDK types `role` as a literal, and a
-    # fourth `MessageRole` member must fail under mypy here, not be silently relabelled
-    # `user` at runtime. `assert_never` is what makes that a compile-time guarantee.
+    transcript reads the same whichever call resends it."""
+    # `assert_never` rather than an else-branch: a new `MessageRole` member must fail
+    # under mypy here, not be silently relabelled `user` at runtime.
     role: Literal["user", "assistant"]
     match message.role:
         case MessageRole.USER:
@@ -150,15 +138,10 @@ def _to_sdk_message(message: ProviderMessage) -> MessageParam:
 
 
 def _to_sdk_content(message: ProviderMessage) -> str | list[Any]:
-    """The body of one turn: a plain string, or the block list a tool turn needs.
-
-    A plain string for a plain turn — it is what the API documents, what every existing
-    `parse_structured` transcript already sends, and one fewer thing to read in a test.
-    """
-    # A replayed assistant turn goes back byte-for-byte. Rebuilding it from `content` and
-    # `tool_calls` would drop the blocks this adapter never decodes — including the
-    # thinking the API requires alongside a tool call — so the vendor's own object is
-    # what we send (see `AssistantTurn.raw_content`).
+    """The body of one turn: a plain string, or the block list a tool turn needs."""
+    # A replayed assistant turn goes back byte-for-byte: rebuilding it would drop the
+    # blocks this adapter never decodes, including the thinking the API requires
+    # alongside a tool call (see `AssistantTurn.raw_content`).
     if message.raw_content is not None:
         return cast("list[Any]", message.raw_content)
 
@@ -176,8 +159,8 @@ def _to_sdk_content(message: ProviderMessage) -> str | list[Any]:
         )
         for result in message.tool_results
     ]
-    # Only when non-empty: the API rejects a text block carrying "". A model that asks
-    # for a tool without narrating it is the common case, not an edge one.
+    # Only when non-empty: the API rejects a text block carrying "", and a tool call
+    # with no narration is the common case.
     if message.content:
         blocks.append(TextBlockParam(type="text", text=message.content))
     blocks += [
@@ -185,8 +168,7 @@ def _to_sdk_content(message: ProviderMessage) -> str | list[Any]:
             type="tool_use",
             id=call.id,
             name=call.name,
-            # `dict(...)` because the SDK mutates nothing but types this as `Dict`, and
-            # our side is a read-only `Mapping` (§7).
+            # `dict(...)`: the SDK types this as `Dict`, our side is a `Mapping` (§7).
             input=dict(call.arguments),
         )
         for call in message.tool_calls
@@ -197,8 +179,8 @@ def _to_sdk_content(message: ProviderMessage) -> str | list[Any]:
 def _to_sdk_tool(tool: ToolSpec) -> ToolParam:
     """Translate what a tool publishes into what the API offers the model.
 
-    Field-by-field rather than by `asdict`: the names happen to line up today, and a
-    silent rename on either side should break here rather than at the API.
+    Field-by-field, not `asdict`: the names line up today, and a rename on either side
+    should break here rather than at the API.
     """
     return ToolParam(
         name=tool.name,
@@ -210,11 +192,9 @@ def _to_sdk_tool(tool: ToolSpec) -> ToolParam:
 def _from_sdk_response(response: Any) -> AssistantTurn:
     """Decode one reply into our types — the point past which the SDK does not exist (§6).
 
-    Only `text` and `tool_use` are decoded, because they are all the agent loop reasons
-    about. The rest of the turn is *kept*, not dropped: `raw_content` carries the reply
-    exactly as it arrived so the next request can replay it whole. This model thinks by
-    default, and the API requires a turn's thinking blocks to come back with its tool
-    calls — a turn rebuilt from the two fields below is missing them and is rejected.
+    Only `text` and `tool_use` are decoded; the rest of the turn is kept in
+    `raw_content`, not dropped, so the next request can replay it whole. The API
+    requires a turn's thinking blocks back with its tool calls.
     """
     texts: list[str] = []
     calls: list[ToolCall] = []
@@ -224,12 +204,11 @@ def _from_sdk_response(response: Any) -> AssistantTurn:
         elif block.type == "tool_use":
             calls.append(ToolCall(id=block.id, name=block.name, arguments=dict(block.input)))
     return AssistantTurn(
-        # Newline-joined: a reply can arrive as several text blocks, and concatenating
-        # them bare runs the last word of one into the first of the next.
+        # Newline-joined: a reply can arrive as several text blocks, and joining them
+        # bare runs the last word of one into the first of the next.
         text="\n".join(texts),
         tool_calls=tuple(calls),
-        # Summed, because the loop's budget (§10) pays for both halves and a caller that
-        # had to add them up would be re-deriving the same number in every agent.
+        # Summed here so every agent isn't re-deriving the loop's budget (§10).
         usage_tokens=response.usage.input_tokens + response.usage.output_tokens,
         stop_reason=response.stop_reason or "",
         raw_content=response.content,

@@ -1,13 +1,11 @@
 """The Analytics agent's prompt. Text only — no formatting, no logic (§11).
 
-The subtask, the request and the pointer names are user messages, never interpolated
-here: they are untrusted input, and text spliced into instructions is text that can
-rewrite them. The same rule the retrieval prompt states.
+The subtask, the request and the pointer names stay user messages: untrusted text
+spliced into instructions can rewrite them, as the retrieval prompt module also notes.
 
-The executor is not described here — it publishes its own description and schema, and
-the provider shows both every turn. What is here is the one thing the tool cannot know:
-the *shape* of the artifact the previous step wrote, which is this repo's contract and
-not the tool's (§2).
+The executor is not described here — it publishes its own description and schema every
+turn. What is here is the one thing the tool cannot know: the *shape* of the artifact
+the previous step wrote, which is this repo's contract, not the tool's (§2).
 """
 
 SYSTEM_PROMPT = """\
@@ -38,7 +36,7 @@ figure the subtask asks for, say plainly what is missing.
 stop as soon as you have the numbers. To stop, reply with your summary and no tool call \
 - that is the only way to end the step.
 
-When you are done, reply with two to four sentences naming the figures you computed and \
-what they show - the direction, the size, anything the next specialist should know. Do \
-not paste the output back; what your script printed is captured for you.\
+Your summary is two to four sentences naming the figures you computed and what they \
+show - the direction, the size, anything the next specialist should know. Do not paste \
+the output back; what your script printed is captured for you.\
 """

@@ -1,10 +1,8 @@
-"""Tests for the Phase A stub worker (CONVENTIONS.md §12).
+"""Tests for the Phase A stub worker.
 
-Its whole job is to make the engine's contract observable, so what is asserted is the
-contract: a pointer out, the payload in the store, and nothing but the slice used.
+Its job is to make the engine's contract observable, so that is what is asserted: a
+pointer out, the payload in the store, and nothing but the slice used.
 """
-
-from pathlib import Path
 
 import pytest
 
@@ -33,9 +31,8 @@ def _subtask(**overrides: object) -> Subtask:
 
 @pytest.mark.asyncio
 async def test_echo_worker_stores_the_instruction_and_returns_its_pointer(
-    tmp_path: Path,
+    store: ArtifactStore,
 ) -> None:
-    store = ArtifactStore(tmp_path)
     state = _state()
     subtask = _subtask()
 
@@ -45,17 +42,17 @@ async def test_echo_worker_stores_the_instruction_and_returns_its_pointer(
     stored = store.get_text(pointer)
     assert subtask.instruction in stored
     assert "role: analytics" in stored
-    # The inputs it was given, as pointers — the payloads are never copied into state.
+    # Inputs arrive as pointers; payloads are never copied into state.
     assert "input fetch: artifact:fetch.txt" in stored
 
 
 @pytest.mark.asyncio
 async def test_echo_worker_rejects_a_subtask_id_that_is_not_a_safe_artifact_name(
-    tmp_path: Path,
+    store: ArtifactStore,
 ) -> None:
     """Ids come from model output, so the name is a trust boundary the store enforces."""
     state = TaskState(user_request=REQUEST)
     subtask = _subtask(id="../escape", inputs=[], depends_on=[])
 
     with pytest.raises(TaskFailure, match="Unsafe artifact name"):
-        await EchoWorker(ArtifactStore(tmp_path)).run(state.state_slice(subtask))
+        await EchoWorker(store).run(state.state_slice(subtask))

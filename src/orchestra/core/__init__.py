@@ -1,5 +1,4 @@
 """Pure application core: state, events, permission, logging, errors.
 
-Imports nothing from the layers above it and no vendor SDK. Enforced by the
-sibling `.ruff.toml`. See CONVENTIONS.md §3.2.
+Imports nothing upward and no vendor SDK (§3.2), enforced by the sibling `.ruff.toml`.
 """

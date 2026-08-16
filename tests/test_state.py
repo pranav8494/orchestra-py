@@ -1,7 +1,7 @@
-"""Tests for the shared ledger and its slice (CONVENTIONS.md §6, §12).
+"""Tests for the shared ledger and its slice (§6).
 
-`Plan` validation is exercised as a trust boundary, not as pydantic coverage: every
-case here is one the planner (#3) can hand us from model output.
+`Plan` validation is exercised as a trust boundary, not as pydantic coverage: every case
+here is one the planner (#3) can hand us from model output.
 """
 
 import pytest
@@ -138,7 +138,7 @@ def test_task_state_failed_is_true_when_a_failure_reason_is_set() -> None:
 
 
 def test_subtask_rejects_unknown_status() -> None:
-    """`SubtaskStatus` is a closed set (§7) — a model inventing "in_progress" must not land."""
+    """§7: `SubtaskStatus` is a closed set; a model inventing "in_progress" must not land."""
     with pytest.raises(ValidationError):
         Subtask(id="fetch", role=AgentRole.DATA_RETRIEVAL, instruction="Pull", status="in_progress")
 
@@ -226,14 +226,14 @@ def test_state_slice_gives_the_worker_only_its_declared_inputs() -> None:
     assert context.inputs == {"revenue": "artifact:revenue.csv"}
     assert context.user_request == REQUEST
     assert context.subtask.id == "analyse"
-    # The slice is what gets serialised into the worker's prompt, so absence is the assertion.
+    # The slice is serialised into the worker's prompt, so absence is the assertion.
     serialised = context.model_dump_json()
     assert "headcount" not in serialised
     assert "subtask_started" not in serialised
 
 
 def test_state_slice_does_not_hand_the_worker_a_write_handle_on_the_ledger() -> None:
-    """Pydantic reuses nested instances, so without the copy a worker writing to its own
+    """Pydantic reuses nested instances, so without the copy a worker writing to its
     context reaches through into the plan the engine owns."""
     plan = Plan(subtasks=[_fetch()])
     state = TaskState(user_request=REQUEST, plan=plan)
@@ -253,7 +253,7 @@ def test_state_slice_result_is_frozen() -> None:
 
 
 def test_state_slice_carries_answered_clarifications() -> None:
-    """A worker needs what the user disambiguated, or it re-guesses what was already asked."""
+    """Without them a worker re-guesses what the user was already asked."""
     state = TaskState(
         user_request=REQUEST,
         clarifications=[Clarification(question="Which currency?", answer="USD")],

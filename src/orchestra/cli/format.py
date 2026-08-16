@@ -1,16 +1,14 @@
 """Turning a finished run into the string stdout gets, separate from rendering (§3.3).
 
-This module returns a string and knows nothing about Rich or terminals, so both shapes
-are testable without a console. `cli/app.py` picks the stream (§5); what each `--output`
-mode *says* is here.
+Returns a string and knows nothing about Rich, so both shapes are testable without a
+console. What each `--output` mode *says* is decided here; `cli/app.py` picks the stream.
 
 **The JSON document is a published contract, so it is not the ledger.** Dumping
-`TaskState` would make its event log and engine bookkeeping a promise to whoever pipes us
-into `jq`, and every ledger change a breaking one. The view models below restate only the
-contract's fields — §2.3's duplication across a layer boundary, where independence
-outranks DRY.
+`TaskState` would make its event log and bookkeeping a promise to whoever pipes us into
+`jq`. The view models below restate only the contract's fields — §2.3 duplication across
+a layer boundary, where independence outranks DRY.
 
-**Nothing here raises.** The run that most needs printing is the one that went wrong, so
+**Nothing here raises**: the run that most needs printing is the one that went wrong, so
 an absent plan or report is rendered as the fact it is.
 """
 
@@ -20,14 +18,12 @@ from pydantic import BaseModel, ConfigDict
 
 from orchestra.core.state import AgentRole, ArtifactPointer, SubtaskStatus, TaskState
 
-# The line stdout gets when there is nothing to report: a command that printed nothing at
-# all is indistinguishable from one that crashed.
+# Never print nothing: a silent command is indistinguishable from one that crashed.
 NO_REPORT = "No report was produced for this run."
 
 
 class OutputFormat(StrEnum):
-    """The `--output` modes. A closed set, so an enum (§7) — and Typer reads the choices
-    and the default straight off it."""
+    """The `--output` modes. A closed set, so an enum (§7); Typer reads the choices off it."""
 
     TEXT = "text"
     JSON = "json"
@@ -40,7 +36,7 @@ class RunStatus(StrEnum):
     FAILED = "failed"
 
 
-# Frozen, like the report they mirror: a document is built once, dumped, and discarded.
+# Frozen: a document is built once, dumped, and discarded.
 _VIEW_CONFIG = ConfigDict(extra="forbid", frozen=True)
 
 
@@ -88,17 +84,10 @@ class ResultDocument(BaseModel):
 
 
 def format_result(state: TaskState, *, output: OutputFormat, quiet: bool = False) -> str:
-    """Render a finished run for stdout.
+    """Render a finished run for stdout, without a trailing newline.
 
-    Args:
-        state: the run's ledger, after the aggregator has written its report.
-        output: which of the two documented shapes to produce.
-        quiet: drop the per-subtask trace from the text shape. Never the report: §5 lets
-            `--quiet` suppress progress, never the result, and the step lines are the
-            progress. Ignored for JSON, whose shape does not vary with a flag.
-
-    Returns:
-        The document, without a trailing newline.
+    `quiet` drops the step trace from the text shape — those lines are progress, which §5
+    lets `--quiet` suppress, unlike the report. JSON does not vary with a flag.
     """
     if output is OutputFormat.JSON:
         return _document(state).model_dump_json(indent=2)
@@ -106,7 +95,7 @@ def format_result(state: TaskState, *, output: OutputFormat, quiet: bool = False
 
 
 def _text(state: TaskState, *, quiet: bool) -> str:
-    """The human shape: the report, then the trace, blank line between blocks.
+    """The human shape: report, then trace, blank line between blocks.
 
     An empty block is omitted whole — "Key figures:" followed by silence reads as a bug.
     """
@@ -137,10 +126,9 @@ def _text(state: TaskState, *, quiet: bool) -> str:
 
 
 def _steps(state: TaskState) -> str:
-    """One line per subtask: status, id, and the artifact it produced.
+    """One line per subtask: status, id, artifact.
 
-    The run's progress record. Fixed column widths, not fitted to the ids, so the block
-    stays greppable and diffable between runs.
+    Fixed column widths, not fitted to the ids, so the block diffs cleanly between runs.
     """
     if state.plan is None:
         return ""

@@ -1,27 +1,22 @@
-"""Tests for the Analytics worker (CONVENTIONS.md §12).
+"""Tests for the Analytics worker.
 
-What is asserted is the contract the aggregator and #7 depend on: a pointer out, an
-`AnalysisResult` behind it, a step with no computation behind it failing rather than
-reporting, and cancellation propagated.
+Asserts the contract the aggregator and #7 depend on: a pointer out, an `AnalysisResult`
+behind it, a step with no computation failing rather than reporting, cancellation
+propagated.
 
-Two tests run the real `RunPythonTool` against a real store, because the acceptance
-criterion is arithmetic and not plumbing: one seeds the committed dataset as a
-`RetrievedDataset` and checks the quarter-over-quarter figure the script prints against
-the same rows, the other lets a script raise and watches the agent correct itself. The
-rest use `conftest.FakeTool` — a test that also started an interpreter could not say
-which half broke. Bounds, the turn cap, warnings and unknown tool names belong to the
-shared loop and are covered in `test_tool_loop.py`.
+Two tests run the real `RunPythonTool` because the acceptance criterion is arithmetic, not
+plumbing. The rest use `conftest.FakeTool`. Bounds, the turn cap, warnings and unknown tool
+names belong to the shared loop — see `test_tool_loop.py`.
 """
 
 import asyncio
 import csv
 import json
 from collections.abc import Sequence
-from pathlib import Path
 
 import pytest
 
-from conftest import FakeProvider, FakeTool
+from conftest import FakeProvider, FakeTool, tool_call
 from orchestra.agents.toolsets import FINANCIALS_CSV, analytics_tools
 from orchestra.agents.workers.analytics import AnalysisResult, AnalyticsWorker
 from orchestra.agents.workers.data_retrieval import RetrievedDataset, RetrievedTable
@@ -38,9 +33,9 @@ REQUEST = "Summarize the last 3 quarters' financial trends"
 UPSTREAM = "fetch_financials"
 UPSTREAM_POINTER = f"artifact:{UPSTREAM}.json"
 
-# What the model is expected to write, and the shape the prompt teaches: read every
-# entry of `datasets`, load each `csv` with pandas, print one labelled number. Growth
-# from `shift(1)` rather than `pct_change()`, which warns about its fill method.
+# The shape the prompt teaches: read every entry of `datasets`, load each `csv` with
+# pandas, print one labelled number. `shift(1)` rather than `pct_change()`, which warns
+# about its fill method.
 QOQ_SCRIPT = f"""\
 import io
 import json
@@ -55,10 +50,9 @@ latest = rows.iloc[-1]
 print(f"{{latest['quarter']}} revenue growth: {{latest['growth']:.2f}}% QoQ")
 """
 
-# The other half of a two-script step: the prompt invites the agent to split the work,
-# and this is what the second script looks like — load, clean, derive, print. Its length
-# is not padding, which is the whole point of the preview test below: JSON-escaped, one
-# script of this shape is longer than everything the aggregator is ever shown.
+# The second script of a two-script step. Its length is not padding: JSON-escaped, one
+# script of this shape outweighs everything the aggregator is shown — the point of the
+# preview-ordering test below.
 LEVELS_SCRIPT = f"""\
 import io
 import json
@@ -83,8 +77,7 @@ print(f"strongest year: {{by_year.idxmax()}} at {{by_year.max():.0f}}")
 
 
 def _context(*, inputs: dict[str, str] | None = None, **overrides: object) -> SubtaskContext:
-    """A worker's slice, built the way the engine builds it — through the ledger, so an
-    input it names is one some step really produced."""
+    """A worker's slice, built through the ledger like the engine does."""
     fields: dict[str, object] = {
         "id": "analyse_trends",
         "role": AgentRole.ANALYTICS,
@@ -102,8 +95,8 @@ def _worker(
     broker: Broker[TaskEvent] | None = None,
     **bounds: int,
 ) -> AnalyticsWorker:
-    """The worker under test. A broker is built when a test does not care about one —
-    warnings are published to nobody, which is what an unobserved run does anyway."""
+    """The worker under test; an unsubscribed `Broker` stands in when a test ignores
+    warnings, as an unobserved run would."""
     return AnalyticsWorker(
         provider=provider,
         store=store,
@@ -114,7 +107,8 @@ def _worker(
 
 
 def _call(code: str, call_id: str = "call-1", **arguments: object) -> ToolCall:
-    return ToolCall(id=call_id, name=RUN_PYTHON_TOOL, arguments={"code": code} | arguments)
+    """`conftest.tool_call` with this agent's one tool, and `code` — always present — first."""
+    return tool_call(RUN_PYTHON_TOOL, call_id, code=code, **arguments)
 
 
 def _stored(store: ArtifactStore, pointer: str) -> AnalysisResult:
@@ -133,8 +127,8 @@ def _seed_upstream(store: ArtifactStore, csv_text: str) -> str:
 
 
 @pytest.mark.asyncio
-async def test_worker_stores_the_analysis_and_returns_its_pointer(tmp_path: Path) -> None:
-    """The sample subtask, end to end: one script, one summary, one artifact (#6)."""
+async def test_worker_stores_the_analysis_and_returns_its_pointer(store: ArtifactStore) -> None:
+    """One script, one summary, one artifact (#6)."""
     provider = FakeProvider(
         turns=[
             AssistantTurn(
@@ -144,7 +138,6 @@ async def test_worker_stores_the_analysis_and_returns_its_pointer(tmp_path: Path
         ]
     )
     tool = FakeTool(RUN_PYTHON_TOOL, [ToolResponse(content="2025Q4 growth: 10.65%")])
-    store = ArtifactStore(tmp_path)
 
     pointer = await _worker(provider, store, [tool]).run(_context())
 
@@ -159,18 +152,16 @@ async def test_worker_stores_the_analysis_and_returns_its_pointer(tmp_path: Path
 
 @pytest.mark.asyncio
 async def test_worker_offers_only_the_executor_and_keeps_the_request_out_of_the_system_prompt(
-    tmp_path: Path,
+    store: ArtifactStore,
 ) -> None:
-    """One tool, by design: a retrieval tool here would let the agent bypass the plan's
-    dependency and analyse data no step was ordered to fetch. Untrusted text stays a user
-    turn (§11), and the upstream pointer is named there so the model can ask for it."""
+    """One tool by design: a retrieval tool here would let the agent bypass the plan's
+    dependency and analyse data no step was ordered to fetch (§11)."""
     provider = FakeProvider(
         turns=[
             AssistantTurn(text="", tool_calls=(_call("print(1)"),), usage_tokens=10),
             AssistantTurn(text="Done.", usage_tokens=10),
         ]
     )
-    store = ArtifactStore(tmp_path)
     _seed_upstream(store, "quarter,revenue\n2025Q4,7015000\n")
     tools = [FakeTool(RUN_PYTHON_TOOL, [ToolResponse(content="1")])]
 
@@ -185,21 +176,18 @@ async def test_worker_offers_only_the_executor_and_keeps_the_request_out_of_the_
 
 
 @pytest.mark.asyncio
-async def test_worker_computes_the_correct_quarter_over_quarter_growth(tmp_path: Path) -> None:
-    """The ticket's spot-check, through the real executor and the committed dataset.
-
-    Nothing is faked below the provider: the upstream artifact is a real
-    `RetrievedDataset`, the script is real pandas in a real subprocess, and the figure it
-    prints is checked against the same rows read here with the csv module. 2025Q4 revenue
-    7015000 over 2025Q3 6340000 is +10.65%, which is what a reader can verify by hand.
-    """
+async def test_worker_computes_the_correct_quarter_over_quarter_growth(
+    store: ArtifactStore,
+) -> None:
+    """The ticket's spot-check: nothing faked below the provider, and the printed figure is
+    checked against the same rows read here with the csv module. 2025Q4 revenue 7015000
+    over 2025Q3 6340000 is +10.65%, verifiable by hand."""
     financials = (default_data_dir() / FINANCIALS_CSV).read_text(encoding="utf-8")
     rows = list(csv.DictReader(financials.splitlines()))
     latest, previous = float(rows[-1]["revenue"]), float(rows[-2]["revenue"])
     expected = f"{rows[-1]['quarter']} revenue growth: {(latest / previous - 1) * 100:.2f}% QoQ"
-    assert expected == "2025Q4 revenue growth: 10.65% QoQ"  # checked by hand, not by pandas
+    assert expected == "2025Q4 revenue growth: 10.65% QoQ"  # by hand, not by pandas
 
-    store = ArtifactStore(tmp_path)
     pointer = _seed_upstream(store, financials)
     provider = FakeProvider(
         turns=[
@@ -219,13 +207,12 @@ async def test_worker_computes_the_correct_quarter_over_quarter_growth(tmp_path:
 
 
 @pytest.mark.asyncio
-async def test_worker_finishes_after_the_model_corrects_a_failing_script(tmp_path: Path) -> None:
-    """§6: a traceback is data the model reads and fixes, not an unwound loop.
-
-    The real executor, because the traceback is the thing being relied on — a fake error
-    string would assert the loop's plumbing and not that a broken script names its own
-    fault. The failed call is not kept, so only the corrected one reaches the artifact.
-    """
+async def test_worker_finishes_after_the_model_corrects_a_failing_script(
+    store: ArtifactStore,
+) -> None:
+    """§6: a traceback is data the model reads and fixes, not an unwound loop. The real
+    executor, because a fake error string would not show that a broken script names its
+    own fault."""
     provider = FakeProvider(
         turns=[
             AssistantTurn(text="", tool_calls=(_call("print(revenue)"),), usage_tokens=30),
@@ -235,7 +222,6 @@ async def test_worker_finishes_after_the_model_corrects_a_failing_script(tmp_pat
             AssistantTurn(text="Recovered after a NameError.", usage_tokens=30),
         ]
     )
-    store = ArtifactStore(tmp_path)
 
     pointer = await _worker(provider, store, analytics_tools(store)).run(_context())
 
@@ -248,8 +234,8 @@ async def test_worker_finishes_after_the_model_corrects_a_failing_script(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_worker_that_computed_nothing_fails_the_subtask(tmp_path: Path) -> None:
-    """A summary with no computation behind it is the invented answer the design forbids."""
+async def test_worker_that_computed_nothing_fails_the_subtask(store: ArtifactStore) -> None:
+    """A summary with no computation behind it is an invented answer."""
     provider = FakeProvider(
         turns=[
             AssistantTurn(text="", tool_calls=(_call("print(oops)"),), usage_tokens=20),
@@ -259,24 +245,17 @@ async def test_worker_that_computed_nothing_fails_the_subtask(tmp_path: Path) ->
     tool = FakeTool(RUN_PYTHON_TOOL, [ToolResponse(content="NameError: oops", is_error=True)])
 
     with pytest.raises(TaskFailure, match="without computing anything"):
-        await _worker(provider, ArtifactStore(tmp_path), [tool]).run(_context())
+        await _worker(provider, store, [tool]).run(_context())
 
 
 @pytest.mark.asyncio
 async def test_worker_puts_every_figure_ahead_of_every_script_in_the_preview(
-    tmp_path: Path,
+    store: ArtifactStore,
 ) -> None:
-    """Field order is the aggregator's budget: it is shown a preview, not the payload.
-
-    Two computations, because one passes by accident: interleaving the pairs protects the
-    first script's output and nothing else, and the prompt invites two scripts. One real
-    pandas script escapes to more than the whole preview, so any code ahead of a figure
-    is that figure elided — and the report is then written from a prompt that never saw
-    the number it is supposed to name.
-    """
+    """Field order is the aggregator's budget: it sees a preview, not the payload. Any code
+    ahead of a figure elides that figure, and the report is then written from a prompt that
+    never saw the number it names. Two computations, because one passes by accident."""
     figures = ["mean quarterly revenue: 6112500", "2025Q4 revenue growth: 10.65% QoQ"]
-    # One script, escaped, outweighs everything the aggregator is shown: put any code
-    # ahead of a figure and that figure is past the cut.
     assert len(json.dumps(LEVELS_SCRIPT)) > DEFAULT_PREVIEW_LIMIT
     provider = FakeProvider(
         turns=[
@@ -286,7 +265,6 @@ async def test_worker_puts_every_figure_ahead_of_every_script_in_the_preview(
         ]
     )
     tool = FakeTool(RUN_PYTHON_TOOL, [ToolResponse(content=figure) for figure in figures])
-    store = ArtifactStore(tmp_path)
 
     pointer = await _worker(provider, store, [tool]).run(_context())
 
@@ -294,14 +272,14 @@ async def test_worker_puts_every_figure_ahead_of_every_script_in_the_preview(
     assert "Growth accelerated into Q4." in preview
     for figure in figures:
         assert figure in preview
-    assert "elided" in preview  # the scripts are what fell off the end, not the numbers
+    assert "elided" in preview  # the scripts fell off the end, not the numbers
 
 
 @pytest.mark.asyncio
-async def test_worker_propagates_cancellation(tmp_path: Path) -> None:
+async def test_worker_propagates_cancellation(store: ArtifactStore) -> None:
     """§10: a cancelled run unwinds through the worker, never swallowed."""
     provider = FakeProvider(turns=[AssistantTurn(text="unreached")], blocker=asyncio.Event())
-    worker = _worker(provider, ArtifactStore(tmp_path), [FakeTool(RUN_PYTHON_TOOL, [])])
+    worker = _worker(provider, store, [FakeTool(RUN_PYTHON_TOOL, [])])
 
     task = asyncio.create_task(worker.run(_context()))
     await asyncio.sleep(0)  # let it reach the blocked provider call
@@ -311,11 +289,11 @@ async def test_worker_propagates_cancellation(tmp_path: Path) -> None:
         await task
 
 
-def test_worker_without_tools_is_a_wiring_bug(tmp_path: Path) -> None:
+def test_worker_without_tools_is_a_wiring_bug(store: ArtifactStore) -> None:
     with pytest.raises(ValueError, match="at least one tool"):
         AnalyticsWorker(
             provider=FakeProvider(),
-            store=ArtifactStore(tmp_path),
+            store=store,
             tools=(),
             broker=Broker(),
         )

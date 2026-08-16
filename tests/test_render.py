@@ -1,22 +1,16 @@
-"""Tests for the live dashboard (CONVENTIONS.md §5, §10, §12).
+"""Tests for the live dashboard (§5, §10).
 
-Almost nothing here asserts on Rich's drawn output. The subject is the data handed to
-the renderer: `RunView` is what the events fold into, `run_table`/`event_line`/
-`result_renderable` are pure functions of it, and what is left for Rich to do is a
-choice of glyphs no test should pin. The single exception is the panel-folding
-regression, where the defect *was* the rendering — a console setting and a panel's
-fixed width combining to crop the result — and its docstring says so.
+Almost nothing here asserts on Rich's drawn output. The subject is the data handed to the
+renderer: `RunView` is what the events fold into, and `run_table`/`event_line`/
+`result_renderable` are pure functions of it. The one exception is the panel-folding
+regression, where the defect *was* the rendering.
 
-The async tests are about the two things that go wrong in a subscriber and not in a
-function: the startup race (`plan_created` is the only event carrying the plan, so
-missing it means an empty table for the whole run) and teardown (§10 — an abandoned
-subscription costs the engine the lifecycle timeout on every later event, and an
-un-exited `Live` region corrupts the user's shell, §8).
+The async tests cover what goes wrong in a subscriber rather than a function: the startup
+race and teardown.
 """
 
 import asyncio
 import functools
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
@@ -58,9 +52,8 @@ PROMPT = "Summarize the last 3 quarters' financial trends"
 SUMMARY = "Revenue grew in each of the last three quarters."
 
 if TYPE_CHECKING:
-    # `dashboard` has to satisfy the seam `run_once(prompt, observer=...)` takes.
-    # Annotated with the alias itself, so narrowing `RunObserver` fails here rather than
-    # at the call site.
+    # `dashboard` has to satisfy the seam `run_once(prompt, observer=...)` takes. Annotated
+    # with the alias, so narrowing `RunObserver` fails here rather than at the call site.
     _OBSERVER_CHECK: RunObserver = functools.partial(dashboard, mode=RenderMode.LIVE)
 
 
@@ -112,7 +105,7 @@ def _finished_state() -> TaskState:
 
 
 def test_run_view_before_any_event_shows_the_planning_headline() -> None:
-    """An empty first frame reads as a hang; planning is the slowest part of a short run."""
+    """An empty first frame reads as a hang, and planning is the slowest part."""
     view = RunView()
 
     assert view.headline == PLANNING_HEADLINE
@@ -121,8 +114,8 @@ def test_run_view_before_any_event_shows_the_planning_headline() -> None:
 
 
 def test_run_view_plan_created_seeds_every_subtask_pending_with_its_role() -> None:
-    """The pending rows exist only on this event (`TaskEvent.plan`) — a subscriber cannot
-    learn a step from a transition it has not seen yet."""
+    """The pending rows exist only on this event: a subscriber cannot learn a step from a
+    transition it has not seen yet."""
     view = _seeded_view()
 
     assert view.headline == "Executing 3 subtasks"
@@ -167,7 +160,7 @@ def test_run_view_transitions_move_only_the_named_row() -> None:
 
 
 def test_run_view_run_finished_sets_the_flag_and_the_headline() -> None:
-    """The engine's own count is the verdict — recounting the rows would state a second one."""
+    """The engine's count is the verdict; recounting the rows would state a second one."""
     view = _seeded_view()
 
     view.apply(TaskEvent(kind=EventKind.RUN_FINISHED, message="2 of 3 subtasks completed"))
@@ -177,8 +170,7 @@ def test_run_view_run_finished_sets_the_flag_and_the_headline() -> None:
 
 
 def test_run_view_second_plan_replaces_the_rows_rather_than_merging() -> None:
-    """Replanning (#3) publishes a new plan; keeping the old rows would show steps that
-    are no longer going to run."""
+    """Replanning (#3) publishes a new plan; old rows would show steps that will not run."""
     view = _seeded_view()
     replan = Plan(subtasks=[Subtask(id="retry", role=AgentRole.ANALYTICS, instruction="Try again")])
 
@@ -188,9 +180,8 @@ def test_run_view_second_plan_replaces_the_rows_rather_than_merging() -> None:
 
 
 def test_run_view_event_for_an_unknown_subtask_is_ignored() -> None:
-    """Error path: a subscriber that attached after `plan_created` sees only ids it has no
-    row for. The renderer is not a validator — it must not raise, and must not invent a
-    row whose role and position nothing in the stream states."""
+    """A subscriber attached after `plan_created` sees only ids it has no row for. The
+    renderer is not a validator: it must not raise, and must not invent a row."""
     view = _seeded_view()
 
     view.apply(TaskEvent(kind=EventKind.SUBTASK_COMPLETED, subtask_id="ghost", message="x"))
@@ -206,8 +197,7 @@ def test_run_view_event_for_an_unknown_subtask_is_ignored() -> None:
 
 
 def test_run_table_carries_the_view_rows_as_cells() -> None:
-    """§12: assert on the data handed to the renderer. The columns and the cell text are
-    ours; the box drawing around them is Rich's and is not a contract."""
+    """The columns and cell text are ours; the box drawing around them is Rich's (§12)."""
     view = _seeded_view()
     view.apply(
         TaskEvent(
@@ -266,8 +256,7 @@ def test_event_line_names_the_transition_and_its_subtask(event: TaskEvent, expec
 
 
 def test_result_renderable_json_is_a_bare_string_even_on_a_terminal() -> None:
-    """§5: `--output json` emits one document and nothing else. A panel's box characters
-    would break the first `json.loads` that met them, terminal or not."""
+    """§5: a panel's box characters would break the first `json.loads` that met them."""
     rendered = result_renderable(
         _finished_state(), output=OutputFormat.JSON, quiet=False, terminal=True
     )
@@ -299,9 +288,8 @@ def test_result_renderable_text_on_a_terminal_is_a_panel_around_the_report() -> 
 def test_result_renderable_panel_folds_a_long_line_instead_of_cropping_it() -> None:
     """Regression: the panel silently deleted the end of a long step line.
 
-    The one place this file asserts on drawn output, deliberately — the defect was the
-    console's `soft_wrap=True` meeting a panel's fixed width, which nothing short of the
-    real console reproduces. The contract is §5's: the result reaches the reader whole.
+    The one place this file asserts on drawn output: the defect was `soft_wrap=True`
+    meeting a panel's fixed width, which nothing short of the real console reproduces.
     """
     long_id = "fetch_quarterly_financials_by_region"
     pointer = f"artifact:{long_id}.txt"
@@ -343,9 +331,9 @@ def test_result_renderable_quiet_drops_the_trace_and_keeps_the_report() -> None:
 def _pending_tasks() -> list[asyncio.Task[None]]:
     """The dashboard's own live tasks — a leaked consumer shows up here.
 
-    By name, not "every task but mine": an unrelated `httpx` client collected at the
-    wrong moment schedules its `aclose()` on whatever loop is running, which the broad
-    version counted as a leak.
+    By name, not "every task but mine": an unrelated `httpx` client collected at the wrong
+    moment schedules its `aclose()` on whatever loop is running, and the broad version
+    counted that as a leak.
     """
     return [
         task
@@ -359,7 +347,7 @@ async def test_dashboard_none_mode_never_subscribes_and_writes_nothing(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """`--quiet` and `--output json` must cost the run nothing: an attached queue is a
-    buffer and a delivery attempt per event, even if the subscriber discards them."""
+    delivery attempt per event even if the subscriber discards them."""
     broker: Broker[TaskEvent] = Broker()
 
     async with dashboard(broker, mode=RenderMode.NONE) as view:
@@ -375,8 +363,8 @@ async def test_dashboard_none_mode_never_subscribes_and_writes_nothing(
 
 @pytest.mark.asyncio
 async def test_dashboard_subscribes_before_yielding_so_no_event_is_missed() -> None:
-    """The startup race: `plan_created` is the only event carrying the plan, so a
-    dashboard that yields before its queue is attached draws an empty table all run."""
+    """`plan_created` is the only event carrying the plan, so a dashboard that yields
+    before its queue is attached draws an empty table all run."""
     broker: Broker[TaskEvent] = Broker()
 
     async with dashboard(broker, mode=RenderMode.PLAIN) as view:
@@ -404,8 +392,8 @@ async def test_dashboard_subscribes_before_yielding_so_no_event_is_missed() -> N
 async def test_dashboard_plain_mode_writes_the_events_to_stderr_and_nothing_to_stdout(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """§5/§12: progress is a diagnostic. Both streams are asserted, separately —
-    checking only stderr is how a progress line ends up in a piped result."""
+    """§5: progress is a diagnostic. Both streams are asserted separately — checking only
+    stderr is how a progress line ends up in a piped result."""
     broker: Broker[TaskEvent] = Broker()
 
     async with dashboard(broker, mode=RenderMode.PLAIN):
@@ -425,7 +413,7 @@ async def test_dashboard_plain_mode_writes_the_events_to_stderr_and_nothing_to_s
 async def test_dashboard_live_mode_folds_events_in_and_leaves_stdout_alone(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """The `Live` region is on `err_console` (§5). What Rich paints is not asserted — only
+    """The `Live` region is on `err_console` (§5). What Rich paints is not asserted, only
     that the model kept up and stdout stayed clean for the result."""
     broker: Broker[TaskEvent] = Broker()
 
@@ -442,9 +430,9 @@ async def test_dashboard_live_mode_folds_events_in_and_leaves_stdout_alone(
 
 @pytest.mark.asyncio
 async def test_dashboard_cancelled_body_unsubscribes_and_leaks_no_task() -> None:
-    """§10/§12: cancellation is the path that leaks. An abandoned subscription costs the
-    engine `lifecycle_timeout` on every later event — the decision recorded on #11 is
-    that the subscription's lifetime *is* the consumer's, which is what this pins."""
+    """§10: cancellation is the path that leaks, and an abandoned subscription costs the
+    engine `lifecycle_timeout` on every later event. #11 decided the subscription's
+    lifetime *is* the consumer's; this pins that."""
     broker: Broker[TaskEvent] = Broker()
     attached = asyncio.Event()
 
@@ -467,8 +455,8 @@ async def test_dashboard_cancelled_body_unsubscribes_and_leaks_no_task() -> None
 
 @pytest.mark.asyncio
 async def test_dashboard_body_failure_still_tears_the_consumer_down() -> None:
-    """The run raising is the common case (planning failed), and it must not leave a
-    subscriber attached or a `Live` region owning the terminal (§8)."""
+    """A raising run must not leave a subscriber attached or a `Live` region owning the
+    terminal (§8)."""
     broker: Broker[TaskEvent] = Broker()
 
     with pytest.raises(RuntimeError, match="planner failed"):
@@ -482,13 +470,11 @@ async def test_dashboard_body_failure_still_tears_the_consumer_down() -> None:
 @pytest.mark.parametrize("mode", [RenderMode.PLAIN, RenderMode.LIVE])
 @pytest.mark.asyncio
 async def test_dashboard_cancelled_during_teardown_still_propagates(mode: RenderMode) -> None:
-    """Regression: Ctrl-C arriving while teardown awaited the consumer was swallowed.
-
-    Cancelling the caller mid-`await` is delivered by cancelling the awaited future, so
-    the consumer reads `cancelled()` on both paths and no guard on it can tell them
-    apart. The run returned a `TaskState` for a cancelled run and exited 0, not 130.
-
-    Swept across scheduling passes: the window is a couple wide and moves with the mode.
+    """Regression: Ctrl-C arriving while teardown awaited the consumer was swallowed, and
+    the run exited 0 with a `TaskState` instead of 130. Cancelling the caller mid-`await`
+    is delivered by cancelling the awaited future, so the consumer reads `cancelled()` on
+    both paths. Swept across scheduling passes: the window is a couple wide and moves with
+    the mode.
     """
 
     async def run_to_completion() -> str:
@@ -515,12 +501,9 @@ async def test_dashboard_cancelled_during_teardown_still_propagates(mode: Render
 async def test_dashboard_sink_failure_costs_the_diagnostic_not_the_result(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Regression: a dying renderer replaced the run's result and its exit code.
-
-    `orchestra run ... | head -1` closes stderr, so the sink raises `BrokenPipeError`.
-    Teardown re-raised it and a successful run came back exit 1 with empty stdout.
-    Progress is a diagnostic; §5 does not let it cost the result.
-    """
+    """Regression: `orchestra run ... | head -1` closes stderr, the sink raises
+    `BrokenPipeError`, teardown re-raised it, and a successful run came back exit 1 with
+    empty stdout. Progress is a diagnostic; §5 does not let it cost the result."""
 
     def broken_sink(_event: TaskEvent) -> None:
         raise BrokenPipeError("stderr closed")
@@ -542,8 +525,7 @@ async def test_dashboard_sink_failure_costs_the_diagnostic_not_the_result(
 async def test_dashboard_sink_failure_does_not_mask_the_body_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The other half: when the run failed *and* the renderer died, the CLI must report
-    why the run failed, not what went wrong drawing it."""
+    """When the run failed *and* the renderer died, the CLI reports why the run failed."""
 
     def broken_sink(_event: TaskEvent) -> None:
         raise BrokenPipeError("stderr closed")
@@ -559,17 +541,16 @@ async def test_dashboard_sink_failure_does_not_mask_the_body_error(
 
 
 # --------------------------------------------------------------------------
-# The whole point, end to end: the renderer against the real engine's stream.
-# Every test above feeds hand-built events, so all of them would still pass if
-# the engine stopped attaching the plan to `plan_created` — and the table would
-# be empty for the whole run. This is the one that notices (#11's second AC).
+# End to end against the real engine's stream. Every test above feeds hand-built
+# events, so all of them would pass if the engine stopped attaching the plan to
+# `plan_created` — and the table would be empty all run. This is the one that
+# notices (#11's second AC).
 # --------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_dashboard_follows_a_real_engine_run_to_every_row_done(tmp_path: Path) -> None:
-    """No fake events: the engine publishes, the dashboard subscribes, and the view ends
-    up describing the run the engine actually performed."""
+async def test_dashboard_follows_a_real_engine_run_to_every_row_done(store: ArtifactStore) -> None:
+    """No fake events: the engine publishes and the view ends up describing the run."""
     plan = Plan(
         subtasks=[
             Subtask(
@@ -585,12 +566,12 @@ async def test_dashboard_follows_a_real_engine_run_to_every_row_done(tmp_path: P
     )
     state = TaskState(user_request=PROMPT, plan=plan)
     broker: Broker[TaskEvent] = Broker()
-    workers: dict[AgentRole, Worker] = dict.fromkeys(AgentRole, EchoWorker(ArtifactStore(tmp_path)))
+    workers: dict[AgentRole, Worker] = dict.fromkeys(AgentRole, EchoWorker(store))
 
     async with dashboard(broker, mode=RenderMode.PLAIN) as view:
         await ExecutionEngine(workers=workers, broker=broker).run(state)
 
-    # Plan order, seeded from the event's copy — including the step that had not started
+    # Plan order, seeded from the event's copy, including the step that had not started
     # when the table was first drawn.
     assert list(view.rows) == ["fetch", "analyse"]
     assert [row.status for row in view.rows.values()] == [SubtaskStatus.DONE] * 2
@@ -605,11 +586,8 @@ async def test_dashboard_follows_a_real_engine_run_to_every_row_done(tmp_path: P
 
 
 def test_run_view_warning_leaves_the_row_status_alone() -> None:
-    """A warning is a caveat on a step, not a transition of one.
-
-    Colouring the status or inventing a fourth one would say the run went worse than it
-    did — the subtask really is going to finish `done`.
-    """
+    """A warning is a caveat on a step, not a transition: colouring the status or inventing
+    a fourth one would say the run went worse than it did."""
     view = _seeded_view()
     view.apply(TaskEvent(kind=EventKind.SUBTASK_STARTED, subtask_id="fetch", message="Load it"))
 
@@ -630,12 +608,9 @@ def test_run_view_warning_leaves_the_row_status_alone() -> None:
 
 
 def test_run_view_warning_survives_the_completion_that_follows_it() -> None:
-    """Regression: the events arrive in the order that would erase the warning.
-
-    It is raised mid-step and the completion lands after it, so a warning folded into
-    `detail` would vanish the instant the step succeeded — exactly when the operator is
-    reading the row to decide whether to trust the answer.
-    """
+    """Regression: a warning is raised mid-step and the completion lands after it, so one
+    folded into `detail` vanished the instant the step succeeded — exactly when the
+    operator reads the row to decide whether to trust the answer."""
     view = _seeded_view()
     view.apply(TaskEvent(kind=EventKind.SUBTASK_WARNING, subtask_id="fetch", message="fell back"))
 
@@ -651,7 +626,7 @@ def test_run_view_warning_survives_the_completion_that_follows_it() -> None:
 
 
 def test_run_table_shows_the_warning_in_place_of_the_detail() -> None:
-    """The pointer is in the final report; that the answer is degraded is only shown here."""
+    """The pointer is in the final report; the degradation is only shown here."""
     view = _seeded_view()
     view.apply(TaskEvent(kind=EventKind.SUBTASK_WARNING, subtask_id="fetch", message="fell back"))
     view.apply(

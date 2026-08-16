@@ -1,17 +1,13 @@
 """The orchestrator: one request in, one validated `Plan` in `TaskState` out.
 
-**Why a draft model.** `PlanDraft`/`SubtaskDraft` are the schema the model fills in;
-`core.state.Plan` is what the engine runs. They differ deliberately: `Subtask.status`
-and `Subtask.output_pointer` are the engine's to write, so putting them in the schema
-would invite the model to declare a step already done. The draft is the trust boundary,
-`Plan` is the ledger entry, and the conversion between them is where the model's output
-is validated (§7).
+**Why a draft model.** The draft is the trust boundary, `Plan` the ledger entry, and the
+conversion between them is where model output is validated (§7). Engine-owned fields
+(`status`, `output_pointer`) stay out of the schema so the model cannot declare a step
+already done.
 
-**Why one retry.** Structured output guarantees the *shape* of the JSON, so the retry
-here is for what a JSON schema cannot say: that ids are unique, that `depends_on` names
-a step in this plan, and that the graph is acyclic. One reformat attempt with the
-rejection fed back, then the run fails. The general retry policy is #9's; this is not
-its first draft.
+**Why one retry.** Structured output guarantees JSON *shape*; the retry is for what a
+schema cannot say — unique ids, known `depends_on`, acyclic graph. One reformat attempt
+with the rejection fed back, then the run fails. General retry policy is #9's.
 """
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -64,31 +60,17 @@ class Planner:
     """Turns a request into a plan. One per run, built in `app.py` with its provider."""
 
     def __init__(self, provider: Provider) -> None:
-        """Store the provider. Nothing is read from config or the environment here (§6).
-
-        Args:
-            provider: the model provider to plan with.
-        """
+        """Store the provider. Nothing is read from config or the environment here (§6)."""
         self._provider = provider
 
     async def create_plan(self, state: TaskState) -> Plan:
-        """Plan `state.user_request`, record it in `state`, and return it.
-
-        Args:
-            state: the run's ledger. On success `state.plan` is set and a
-                `plan_created` event is appended to `state.events`.
-
-        Returns:
-            The validated plan, the same object as `state.plan`.
+        """Plan `state.user_request`, set `state.plan`, append `plan_created`, return it.
 
         Raises:
-            TaskFailure: the model returned an unusable plan twice. Exit 5, not 4: the
-                provider answered both times, so retrying it or checking credentials is
-                the wrong advice — this run has no plan to execute (§8, §10).
-            ProviderError: the provider itself failed; raised at the adapter and passed
-                through here untouched.
-            asyncio.CancelledError: the caller cancelled the run; propagated, never
-                swallowed (§10).
+            TaskFailure: an unusable plan twice. Exit 5, not 4 — the provider answered
+                both times, so "retry the provider" is the wrong advice (§8, §10).
+            ProviderError: the provider failed; passed through from the adapter.
+            asyncio.CancelledError: propagated, never swallowed (§10).
         """
         messages = [ProviderMessage(role=MessageRole.USER, content=state.user_request)]
 
@@ -102,9 +84,8 @@ class Planner:
             )
             plan, rejection = await self._draft_plan(messages)
         if plan is None:
-            # Deliberately not a loop: a model that has failed the same schema twice
-            # with the error in front of it is not going to succeed on the third try,
-            # and the user is waiting.
+            # Not a loop: a model that failed the same schema twice with the error in
+            # front of it will not succeed on the third try, and the user is waiting.
             raise TaskFailure(f"The planner returned an unusable plan twice. Last: {rejection}")
 
         state.plan = plan
@@ -120,9 +101,7 @@ class Planner:
         """Request one plan and validate it.
 
         Returns:
-            The plan and an empty string, or `None` and the reason to feed back. Both
-            "no structured output" and "failed our validation" are the same thing to
-            the caller — something to say to the model and try once more.
+            The plan and an empty string, or `None` and the reason to feed back.
         """
         draft = await self._provider.parse_structured(
             system=PLANNER_SYSTEM_PROMPT,
@@ -130,8 +109,8 @@ class Planner:
             output_format=PlanDraft,
         )
         if draft is None:
-            # Covers both a refusal and a reply that was JSON but not this schema — the
-            # adapter cannot tell them apart, so the feedback must fit either.
+            # A refusal and off-schema JSON are indistinguishable at the adapter, so the
+            # feedback has to fit either.
             return None, (
                 "No usable plan was returned. Reply with a plan matching the schema "
                 "exactly, and nothing else."
@@ -139,9 +118,7 @@ class Planner:
         try:
             return _to_plan(draft), ""
         except (ValidationError, _RejectedDraftError) as exc:
-            # `Plan` enforces unique ids, known dependencies and acyclicity — none of
-            # which a JSON schema can express, so this is the retry's whole reason to
-            # exist. The rejected draft goes back too: the model cannot see its own
+            # The rejected draft goes back with the reason: the model cannot see its own
             # previous message as data, and "fix this" needs a "this".
             return None, f"{exc}\n\nThe rejected plan was:\n{draft.model_dump_json(indent=2)}"
 
@@ -149,22 +126,18 @@ class Planner:
 class _RejectedDraftError(ValueError):
     """The draft is well-formed JSON but not a runnable plan.
 
-    Sibling of the `ValidationError` `Plan` raises, and handled identically: both are
-    "the model's plan cannot run, tell it why". Separate only because `Plan` does not
-    check `inputs` — see `_check_inputs`.
+    Handled identically to the `ValidationError` `Plan` raises; separate only because
+    `Plan` does not check `inputs` — see `_check_inputs`.
     """
 
 
 def _check_inputs(draft: PlanDraft) -> None:
     """Reject data edges that are missing or unordered.
 
-    `Plan` validates `depends_on` — ids, duplicates, cycles — but not `inputs`, and its
-    `inputs` semantics are not settled: `state_slice` reads them as artifact keys, while
-    `Subtask` documents them as upstream subtask ids. Settling that belongs to the engine
-    (#4), so the rule the planner's own prompt states is enforced here rather than in
-    `core/`: an input names a subtask in this plan, and consuming a step's output means
-    depending on it. Without the second half the engine may start a consumer before its
-    producer has written anything — the exact race `depends_on` exists to prevent.
+    `Plan` validates `depends_on` but not `inputs`, whose semantics are unsettled in
+    `core/` (#4) — so the rule is enforced here: an input names a subtask in this plan,
+    and consuming a step's output means depending on it. Without the second half the
+    engine can start a consumer before its producer has written anything.
 
     Raises:
         _RejectedDraftError: an input names an unknown subtask, or one not depended on.

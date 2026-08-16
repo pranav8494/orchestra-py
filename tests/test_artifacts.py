@@ -1,4 +1,4 @@
-"""Tests for the pointer-based artifact store (CONVENTIONS.md §12).
+"""Tests for the pointer-based artifact store.
 
 Every test writes under `tmp_path`; nothing here touches the real `~/.orchestra`.
 """
@@ -13,11 +13,6 @@ from orchestra.core.errors import ConfigError, ExitCode, TaskFailure
 from orchestra.core.state import ARTIFACT_PREFIX
 
 CSV = "quarter,revenue\nQ1,120\nQ2,131\n"
-
-
-@pytest.fixture
-def store(tmp_path: Path) -> ArtifactStore:
-    return ArtifactStore(tmp_path / "artifacts")
 
 
 def test_put_text_returns_pointer_that_reads_back(store: ArtifactStore) -> None:
@@ -59,7 +54,7 @@ def test_put_same_name_twice_does_not_clobber_the_first(store: ArtifactStore) ->
 
 def test_concurrent_puts_of_one_name_all_survive(store: ArtifactStore) -> None:
     """Regression: a check-then-write `exists()` loop hands two threads the same name and
-    loses a payload. The engine dispatches subtasks concurrently through `to_thread` (§10)."""
+    loses a payload. The engine dispatches subtasks through `to_thread` (§10)."""
     payloads = [f"payload-{index}" for index in range(16)]
 
     with ThreadPoolExecutor(max_workers=8) as pool:
@@ -96,8 +91,7 @@ def test_preview_of_oversized_text_elides_and_names_the_omitted_size(store: Arti
 
 
 def test_preview_of_text_exactly_at_the_limit_is_not_elided(store: ArtifactStore) -> None:
-    """The boundary of the elision rule, pinned from both sides: `limit` characters are
-    the whole payload, and one more is what buys the marker."""
+    """The elision boundary from both sides: `limit` fits whole, one more buys the marker."""
     pointer = store.put_text("exact.csv", "x" * 100)
 
     assert store.preview(pointer, limit=100) == "x" * 100
@@ -105,16 +99,15 @@ def test_preview_of_text_exactly_at_the_limit_is_not_elided(store: ArtifactStore
 
 
 def test_preview_of_an_empty_artifact_is_empty(store: ArtifactStore) -> None:
-    """A worker that wrote nothing shows the aggregator nothing — not a marker claiming
-    bytes were held back, and not `<binary, 0 bytes>`."""
+    """Not a marker claiming bytes were held back, and not `<binary, 0 bytes>`."""
     pointer = store.put_text("empty.csv", "")
 
     assert store.preview(pointer) == ""
 
 
 def test_preview_of_multibyte_text_is_still_read_as_text(store: ArtifactStore) -> None:
-    """Regression: the head read cuts mid-character, which a strict decode would call
-    binary. The bytes are counted, so the omitted size stays honest for non-ASCII too."""
+    """Regression: the head read cuts mid-character, which a strict decode calls binary.
+    Bytes are counted, so the omitted size stays honest for non-ASCII."""
     pointer = store.put_text("prices.csv", "€" * 500)  # 3 bytes each
 
     preview = store.preview(pointer, limit=100)
@@ -126,15 +119,13 @@ def test_preview_of_multibyte_text_is_still_read_as_text(store: ArtifactStore) -
 def test_preview_of_a_binary_payload_reports_its_size_instead_of_its_bytes(
     store: ArtifactStore,
 ) -> None:
-    """A chart is opened, not read: replacement characters would cost tokens and say
-    nothing."""
+    """A chart is opened, not read: replacement characters cost tokens and say nothing."""
     pointer = store.put_bytes("chart.png", b"\x89PNG\r\n\x1a\n\xff\xd8\xff")
 
     assert store.preview(pointer) == "<binary, 11 bytes>"
 
 
 def test_preview_of_unknown_pointer_raises_task_failure(store: ArtifactStore) -> None:
-    """One error path: the same `_resolve` every other read goes through."""
     with pytest.raises(TaskFailure, match="Artifact not found") as exc_info:
         store.preview(f"{ARTIFACT_PREFIX}never-written.csv")
 

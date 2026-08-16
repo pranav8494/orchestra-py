@@ -1,9 +1,8 @@
 """Tests for the Typer entrypoint and the single error boundary (§4, §5, §8).
 
-Exit code, stdout, and stderr are asserted separately throughout: asserting only
-stdout is how stream-contract regressions ship (§12). Assertions are on collapsed
-whitespace or substrings because Rich pads help output to the console width — the
-contract is the text, not Rich's rendering of it.
+Exit code, stdout, and stderr are asserted separately throughout: asserting only stdout is
+how stream-contract regressions ship (§12). Assertions collapse whitespace because Rich
+pads help output to the console width — the contract is the text, not the rendering.
 """
 
 import json
@@ -33,8 +32,8 @@ from orchestra.core.state import (
 
 runner = CliRunner()
 
-# Without this the runner reports the program as "root", which would make the
-# usage-line assertions test the harness rather than the CLI.
+# Without this the runner reports the program as "root", making the usage-line assertions
+# test the harness rather than the CLI.
 PROG = "orchestra"
 
 
@@ -55,10 +54,7 @@ def test_cli_help_returns_zero_and_prints_usage_to_stdout() -> None:
 
 def test_cli_help_without_valid_config_still_succeeds() -> None:
     """§4: `--help` must work in a fresh checkout, so no command may load config at import.
-
-    The `pytest.raises` is the precondition, not the subject: it proves this process
-    genuinely has no usable configuration before the CLI is invoked.
-    """
+    The `pytest.raises` is the precondition: this process has no usable config."""
     with pytest.raises(ConfigError):
         load_config()
 
@@ -121,7 +117,7 @@ def _finished_state(*statuses: SubtaskStatus, failure_reason: str | None = None)
         user_request=PROMPT,
         plan=plan,
         artifacts=artifacts,
-        # The aggregator always leaves one behind, including on the paths that fell short.
+        # The aggregator always leaves one behind, even on the paths that fell short.
         final_result=FinalReport(
             executive_summary=SUMMARY,
             key_figures=[
@@ -138,8 +134,8 @@ def _stub_run_once(
 ) -> list[RunObserver | None]:
     """Replace the delegation target, leaving the command's own behaviour under test.
 
-    Returns the list the observer the command built is recorded in, so a test can assert
-    which dashboard the flags asked for without running one.
+    Returns the list the command's observer is recorded in, so a test can assert which
+    dashboard the flags asked for without running one.
     """
     observers: list[RunObserver | None] = []
 
@@ -155,11 +151,8 @@ def _stub_run_once(
 
 
 def _requested_mode(observers: list[RunObserver | None]) -> RenderMode:
-    """The `RenderMode` baked into the observer the command handed `run_once`.
-
-    Read off the partial, so the assertion is on the data handed to the renderer rather
-    than on what Rich drew (§12).
-    """
+    """The `RenderMode` baked into the observer the command handed `run_once`, read off the
+    partial so the assertion is on the renderer's input, not on what Rich drew (§12)."""
     assert len(observers) == 1
     observer = observers[0]
     assert isinstance(observer, partial)
@@ -196,8 +189,8 @@ def test_run_with_a_failed_subtask_still_reports_and_exits_task_failure(
 def test_run_output_json_puts_one_document_on_stdout_and_nothing_else(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """§5: `--output json` emits one JSON document and nothing else. `json.loads` is the
-    assertion — it rejects a stray banner or a second document as trailing data."""
+    """§5: `json.loads` is the assertion — it rejects a stray banner or a second document
+    as trailing data."""
     _stub_run_once(monkeypatch, _finished_state(SubtaskStatus.DONE, SubtaskStatus.DONE))
 
     result = runner.invoke(app, ["run", PROMPT, "--output", "json"], prog_name=PROG)
@@ -234,12 +227,11 @@ def test_run_quiet_omits_the_step_lines_and_keeps_the_report(
 
 
 def _force_terminal(monkeypatch: pytest.MonkeyPatch, *, value: bool) -> None:
-    """Pretend stderr is (or is not) a tty — `CliRunner` always reports a pipe, which
-    would leave the `LIVE` arm unreachable.
+    """Pretend stderr is (or is not) a tty; `CliRunner` always reports a pipe, leaving the
+    `LIVE` arm unreachable.
 
-    On the *instance*: patching `is_terminal` on the class flips stdout's tty-ness too,
-    since both consoles are `rich.console.Console`, and these tests would then pass
-    against a `_render_mode` reading the wrong stream.
+    Patched on the *instance*: doing it on the class flips stdout's tty-ness too, and these
+    tests would then pass against a `_render_mode` reading the wrong stream.
     """
     monkeypatch.setattr(err_console, "_force_terminal", value, raising=False)
 
@@ -268,11 +260,8 @@ def test_run_piped_falls_back_to_plain_lines(monkeypatch: pytest.MonkeyPatch) ->
 def test_run_with_stdout_redirected_still_draws_live_on_a_tty_stderr(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`orchestra run x > report.txt`: stdout is a file, stderr is still the terminal.
-
-    Why the two streams are split (§5) — the mode follows stderr, the framing follows
-    stdout. Pins which console each decision reads.
-    """
+    """`orchestra run x > report.txt`: stdout is a file, stderr is still the terminal. Pins
+    which console each decision reads — mode follows stderr, framing follows stdout (§5)."""
     observers = _stub_run_once(monkeypatch, _finished_state(SubtaskStatus.DONE))
     _force_terminal(monkeypatch, value=True)  # stderr only; `console` stays a pipe
 
@@ -280,13 +269,13 @@ def test_run_with_stdout_redirected_still_draws_live_on_a_tty_stderr(
 
     assert result.exit_code == ExitCode.SUCCESS
     assert _requested_mode(observers) is RenderMode.LIVE
-    # Unframed, because stdout is the redirected one — a panel's box would land in the file.
+    # Unframed: stdout is redirected, so a panel's box would land in the file.
     assert SUMMARY in result.stdout
     assert "╭" not in result.stdout
 
 
 def test_run_quiet_asks_for_no_dashboard_at_all(monkeypatch: pytest.MonkeyPatch) -> None:
-    """§5: `--quiet` suppresses progress — including the `Live` region — never the result."""
+    """§5: `--quiet` suppresses progress, including the `Live` region, never the result."""
     observers = _stub_run_once(monkeypatch, _finished_state(SubtaskStatus.DONE))
     _force_terminal(monkeypatch, value=True)
 
@@ -314,8 +303,8 @@ def test_run_json_never_starts_a_live_region_even_on_a_terminal(
 def test_run_that_stopped_short_prints_the_report_and_the_reason_on_stderr(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The artifacts are on disk, so they are reported; why the run stopped is a
-    diagnostic, so it goes to stderr and the exit code says it failed (§5, §8)."""
+    """The artifacts are on disk, so they are reported; why the run stopped is a diagnostic
+    and goes to stderr (§5, §8)."""
     reason = "Step cap of 1 exceeded; the plan is too large to run."
     _stub_run_once(monkeypatch, _finished_state(SubtaskStatus.DONE, failure_reason=reason))
 
@@ -331,8 +320,8 @@ def test_run_that_stopped_short_prints_the_report_and_the_reason_on_stderr(
 def test_run_that_stopped_short_reports_the_reason_on_both_streams_in_json(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Which stream says what does not change with `-o`: the document carries the reason
-    for the script, stderr repeats it for the person watching the pipe."""
+    """Which stream says what does not change with `-o`: the document carries the reason,
+    stderr repeats it for the person watching the pipe."""
     reason = "No worker is registered for roles: [<AgentRole.VISUALIZATION: 'visualization'>]"
     _stub_run_once(monkeypatch, _finished_state(SubtaskStatus.DONE, failure_reason=reason))
 
@@ -340,13 +329,13 @@ def test_run_that_stopped_short_reports_the_reason_on_both_streams_in_json(
 
     assert result.exit_code == ExitCode.TASK_FAILURE
     assert json.loads(result.stdout)["failure_reason"] == reason
-    # Rich markup would read the bracketed role list as a style tag. Substring, not the
-    # whole line: stderr is for eyes and wraps at the console width.
+    # Rich markup would read the bracketed role list as a style tag. Substring, because
+    # stderr is for eyes and wraps at the console width.
     assert "[<AgentRole.VISUALIZATION:" in _squash(result.stderr)
 
 
 def test_run_rejects_an_unknown_output_format(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The enum is what makes this a usage error instead of a run that prints nonsense."""
+    """The enum makes this a usage error instead of a run that prints nonsense."""
     _stub_run_once(monkeypatch, _finished_state(SubtaskStatus.DONE))
 
     result = runner.invoke(app, ["run", PROMPT, "--output", "yaml"], prog_name=PROG)
@@ -410,7 +399,7 @@ def test_error_boundary_failure_maps_to_its_exit_code(
 def test_error_boundary_typer_exit_passes_through_unchanged(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """`typer.Exit` is control flow, not a failure — re-wrapping it would lose the code."""
+    """`typer.Exit` is control flow; re-wrapping it would lose the code."""
     with pytest.raises(typer.Exit) as exc_info, error_boundary():
         raise typer.Exit(ExitCode.TASK_FAILURE)
 
@@ -448,11 +437,8 @@ def test_error_boundary_preserves_bracketed_text_in_message(
     raised: type[Exception],
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Regression: Rich markup is on by default, so `[not_found_error]` was deleted.
-
-    §8 promises the message, the cause, and the fix. A provider error naming a
-    bracketed token silently lost it — on both boundary arms.
-    """
+    """Regression: Rich markup is on by default, so a provider error naming
+    `[not_found_error]` silently lost it — on both boundary arms (§8)."""
     with pytest.raises(typer.Exit), error_boundary():
         raise raised("model [claude-x] rejected: [not_found_error]")
 

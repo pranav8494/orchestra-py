@@ -1,9 +1,8 @@
-"""Tests for the one place that decides an agent's capability (CONVENTIONS.md §3.3).
+"""Tests for the one place that decides an agent's capability (§3.3).
 
-The constants `toolsets.py` re-exports are the names the Data Retrieval worker branches
-on when it decides which tool answered. They come from the tools' own modules, but
-nothing checks that a tool's `info()` actually advertises the name it declares — so that
-is checked here, in the order the worker will see them.
+The re-exported constants are the names the Data Retrieval worker branches on. Nothing
+else checks that a tool's `info()` advertises the name it declares, so that is checked
+here, in the order the worker sees them.
 """
 
 from pathlib import Path

@@ -1,12 +1,10 @@
 """The Data Retrieval agent's prompt. Text only — no formatting, no logic (§11).
 
-The subtask instruction and the user's request are user messages, never interpolated
-here: they are untrusted input, and text spliced into instructions is text that can
-rewrite them. The same rule the planner's prompt states.
+The subtask and the request stay user messages: untrusted text spliced into instructions
+can rewrite them, as the planner's prompt module also notes.
 
 Neither tool is described here: each publishes its own description and schema, and the
-provider shows both every turn. Restating them is copy-paste that reads fine long after
-the arguments have changed (§2).
+provider shows both every turn. Restating them drifts from the arguments (§2).
 """
 
 SYSTEM_PROMPT = """\
@@ -29,8 +27,8 @@ what is missing rather than filling the gap.
 and stop as soon as you have what the subtask asks for. To stop, reply with your summary \
 and no tool call - that is the only way to end the step.
 
-When you are done, reply with two to four sentences saying what you retrieved, over \
-what period, and anything the next specialist should know - a gap in the data, a value \
-that looks unusual, a caveat from a source. Do not paste the rows back; what your tools \
-returned is captured for you.\
+Your summary is two to four sentences saying what you retrieved, over what period, and \
+anything the next specialist should know - a gap in the data, a value that looks \
+unusual, a caveat from a source. Do not paste the rows back; what your tools returned is \
+captured for you.\
 """

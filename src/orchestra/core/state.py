@@ -1,13 +1,11 @@
 """The shared typed ledger every agent reads and writes (CONVENTIONS.md §6, §3.3).
 
-**Pointers, not blobs.** State is serialised into a prompt on every step, so an inlined
-payload is re-sent to the model on every later call. Payloads go to
-`orchestra.artifacts`; `ArtifactPointer` makes that a validated type rather than a
-convention. This module never resolves a pointer — no I/O in `core/` (§3.2) — so a
-pointer only means something against the store that minted it.
+Pointers, not blobs: state is serialised into a prompt on every step, so an inlined
+payload is re-sent on every later call. `ArtifactPointer` makes that a validated type;
+resolving one is `orchestra.artifacts`' job, since `core/` does no I/O (§3.2).
 
-**Only its slice.** `state_slice()` gives a worker its subtask and declared inputs, not
-the plan, the event log, or the other agents' artifacts.
+`state_slice()` gives a worker its subtask and declared inputs — not the plan, the
+event log, or the other agents' artifacts.
 """
 
 from datetime import UTC, datetime
@@ -20,9 +18,8 @@ from orchestra.core.errors import TaskFailure
 
 ARTIFACT_PREFIX = "artifact:"
 
-# Allow-list, not deny-list: names arrive from model output and become filenames, so
-# separators, colons, leading dots and control characters are absent by construction.
-# This is what makes `ArtifactStore` unable to escape its root.
+# Allow-list, not deny-list: names come from model output and become filenames. No
+# separator, colon, leading dot or control character, so the store cannot escape its root.
 ARTIFACT_NAME_PATTERN = r"[\w\- ][\w.\- ]*"
 
 ArtifactPointer = Annotated[
@@ -49,14 +46,12 @@ class SubtaskStatus(StrEnum):
 
 class EventKind(StrEnum):
     """Lifecycle events, defined here so `core/events.py` publishes these rather than a
-    second overlapping set (§1.5). Lossy progress events are not durable ledger entries."""
+    second overlapping set (§1.5). Lossy progress events are not ledger entries."""
 
     PLAN_CREATED = "plan_created"
     SUBTASK_STARTED = "subtask_started"
-    # The step is still going to succeed, but not the way it was meant to — a backend
-    # fell back, an output degraded. Not a status: the subtask really does complete, and
-    # a fourth `SubtaskStatus` would make every consumer treat "worked, with a caveat"
-    # as a fourth outcome rather than as a note attached to a normal one.
+    # Succeeded, but degraded — a backend fell back. An event, not a fourth
+    # `SubtaskStatus`, so consumers read it as a note on a normal outcome.
     SUBTASK_WARNING = "subtask_warning"
     SUBTASK_COMPLETED = "subtask_completed"
     SUBTASK_FAILED = "subtask_failed"
@@ -79,8 +74,8 @@ class Subtask(BaseModel):
     so an entry in `inputs` names an upstream subtask.
     """
 
-    # extra="forbid": these come from model output, so an unexpected field means the
-    # schema drifted. validate_assignment: the engine writes `status` in place.
+    # forbid: model output, so an unexpected field means the schema drifted.
+    # validate_assignment: the engine writes `status` in place.
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
     id: str = Field(min_length=1)
@@ -95,9 +90,9 @@ class Subtask(BaseModel):
 class Plan(BaseModel):
     """The decomposition: a DAG of subtasks, not a list.
 
-    Validated on construction and assignment, because a cycle the model invented would
-    otherwise deadlock the engine. In-place `subtasks` mutation is not re-validated, so
-    replanning (#3) rebuilds rather than edits.
+    Validated on construction and assignment — a cycle the model invented would deadlock
+    the engine. In-place `subtasks` mutation is not re-validated, so replanning (#3)
+    rebuilds rather than edits.
     """
 
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
@@ -117,8 +112,8 @@ class Plan(BaseModel):
             if unknown:
                 raise ValueError(f"subtask {subtask.id!r} depends on unknown subtasks: {unknown}")
 
-        # Kahn's algorithm. If a pass frees nothing and work remains, every survivor is
-        # waiting on another survivor.
+        # Kahn's algorithm: a pass that frees nothing leaves only survivors waiting on
+        # each other.
         resolved: set[str] = set()
         remaining = list(self.subtasks)
         while remaining:
@@ -131,20 +126,17 @@ class Plan(BaseModel):
         return self
 
 
-# Defined after `Plan` because `plan` below refers to it. Ordering, not layering.
 class TaskEvent(BaseModel):
     """One entry in the event log. Frozen: history is not edited.
 
-    `plan` is the exception to "pointers, not blobs": a dashboard has to draw the
-    *pending* rows, which no transition it has seen yet can tell it. The engine attaches
-    it to the one `plan_created` event it publishes, deep-copied — the engine mutates
-    `Subtask.status` in place afterwards, and a shared reference would let a subscriber
-    read live state through history. Every other event leaves it `None`, and `_emit`
-    never sets it, so the ledger stays free of plan copies.
+    `plan` is the exception to "pointers, not blobs" — a dashboard has to draw the
+    *pending* rows, which no transition it has seen can tell it. The engine attaches it
+    to the one `plan_created` event, deep-copied, because it mutates `Subtask.status` in
+    place afterwards and a shared reference would leak live state into history.
 
-    The copy guards against the engine, not against other subscribers: `Plan` is mutable
-    and the broker fans one object out to everyone. Nothing writes to it today; worth
-    knowing before adding a second subscriber.
+    The copy guards against the engine only: the broker still fans one mutable `Plan`
+    out to every subscriber. Nothing writes to it today — worth knowing before a second
+    subscriber lands.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -159,8 +151,8 @@ class TaskEvent(BaseModel):
 class SubtaskContext(BaseModel):
     """Everything a worker gets, and nothing else. Built by `TaskState.state_slice()`."""
 
-    # Frozen, over a deep-copied subtask: pydantic reuses nested instances, so otherwise
-    # a worker writing `context.subtask.status` mutates the ledger the engine owns.
+    # Frozen, over a deep-copied subtask: pydantic reuses nested instances, so a worker
+    # writing `context.subtask.status` would otherwise mutate the engine's ledger.
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     user_request: str
@@ -172,8 +164,8 @@ class SubtaskContext(BaseModel):
 class KeyFigure(BaseModel):
     """One number the report states, and the artifact it was read from.
 
-    `source` is a pointer, not free text: an unsourced figure is a claim nobody can
-    check, and the type is what lets the aggregator drop one this run never produced.
+    `source` is a pointer, not free text: it lets the aggregator drop a figure this run
+    never produced.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -186,8 +178,7 @@ class KeyFigure(BaseModel):
 class FinalReport(BaseModel):
     """The run's answer: what happened, the numbers behind it, and the chart to open.
 
-    Frozen, like `TaskEvent` — written once, at the end. A pointer for the chart, never
-    the chart.
+    Frozen — written once, at the end. A pointer for the chart, never the chart.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -204,25 +195,20 @@ class TaskState(BaseModel):
 
     user_request: str
     plan: Plan | None = None
-    # Display counter for "Step X of N". The plan is a DAG, so under concurrent dispatch
-    # there is no single step the run is "at".
+    # Display counter for "Step X of N" only: the plan is a DAG, so under concurrent
+    # dispatch there is no single step the run is "at".
     current_step: int = Field(default=0, ge=0)
     artifacts: dict[str, ArtifactPointer] = Field(default_factory=dict)  # producer id -> pointer
     events: list[TaskEvent] = Field(default_factory=list)
     clarifications: list[Clarification] = Field(default_factory=list)
     final_result: FinalReport | None = None
-    # Why the run stopped short, when it did. `app.py` records the engine's run-ending
-    # failures here rather than letting them abort the command, so the report can still
-    # name the artifacts already on disk.
+    # Why the run stopped short. `app.py` records run-ending failures here rather than
+    # aborting, so the report can still name the artifacts already on disk.
     failure_reason: str | None = None
 
     @property
     def failed_subtasks(self) -> list[Subtask]:
-        """The subtasks the engine marked failed — empty when the run produced everything.
-
-        The ledger answers "did this run succeed?", so the CLI can map a result to an
-        exit code without reimplementing the question (§4).
-        """
+        """The subtasks the engine marked failed."""
         if self.plan is None:
             return []
         return [subtask for subtask in self.plan.subtasks if subtask.status is SubtaskStatus.FAILED]
@@ -231,27 +217,20 @@ class TaskState(BaseModel):
     def failed(self) -> bool:
         """Did this run fall short — as a whole, or in one of its steps?
 
-        The single question the CLI asks, so the command body maps a result to an exit
-        code without holding a domain conditional of its own (§4).
+        The ledger answers it so the CLI maps a result to an exit code without a domain
+        conditional of its own (§4).
         """
         return bool(self.failure_reason or self.failed_subtasks)
 
     def state_slice(self, subtask: Subtask) -> SubtaskContext:
-        """Narrow the ledger to what one worker needs (§6).
+        """Narrow the ledger to what one worker needs — pointers, never payloads (§6).
 
         Takes the subtask rather than an id so replanning can slice before committing a
         reshaped plan to state.
 
-        Args:
-            subtask: the subtask about to be dispatched.
-
-        Returns:
-            A frozen context carrying pointers, never payloads.
-
         Raises:
             TaskFailure: an input names an artifact nothing produced, so the plan's
-                dependency order is wrong. Better than handing a worker an empty input
-                and letting it invent the data.
+                dependency order is wrong. Better than letting a worker invent the data.
         """
         missing = sorted(set(subtask.inputs) - self.artifacts.keys())
         if missing:

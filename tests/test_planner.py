@@ -1,8 +1,8 @@
-"""Tests for the orchestrator (CONVENTIONS.md §12).
+"""Tests for the orchestrator.
 
 Everything runs against `FakeProvider`. The assertions are about what the planner does
 with model output — the conversation it sends, the validation it applies, what it writes
-to the ledger — never about the model's judgement, which is not ours to test.
+to the ledger — never about the model's judgement.
 """
 
 import asyncio
@@ -16,15 +16,15 @@ from orchestra.core.state import AgentRole, EventKind, SubtaskStatus, TaskState
 from orchestra.prompts import PLANNER_SYSTEM_PROMPT
 from scenarios import LINEAR
 
-# The linear scenario is this file's good-plan fixture too — one definition, so the two
-# suites cannot disagree about what a valid plan looks like (§2).
+# Reusing the linear scenario as the good-plan fixture keeps the two suites from
+# disagreeing about what a valid plan looks like (§2).
 REQUEST = LINEAR.prompt
 _financial_plan = LINEAR.draft
 
 
 def _broken_plan() -> PlanDraft:
-    """Shaped correctly, unrunnable: `depends_on` names a step that is not in the plan.
-    Structured output cannot rule this out, which is why the reformat retry exists."""
+    """Shaped correctly, unrunnable: `depends_on` names a step outside the plan. Structured
+    output cannot rule this out, which is why the reformat retry exists."""
     return PlanDraft(
         subtasks=[
             SubtaskDraft(
@@ -39,8 +39,8 @@ def _broken_plan() -> PlanDraft:
 
 @pytest.mark.asyncio
 async def test_create_plan_preserves_roles_and_dependency_ordering_from_the_draft() -> None:
-    """Conversion loses no role and no edge. The plan asserted on is the fixture's, not a
-    model's — a live model's is `test_planner_scenarios_live.py`'s question."""
+    """Conversion loses no role and no edge; what a live model produces is
+    `test_planner_scenarios_live.py`'s question."""
     provider = FakeProvider(responses=[_financial_plan()])
     state = TaskState(user_request=REQUEST)
 
@@ -52,8 +52,7 @@ async def test_create_plan_preserves_roles_and_dependency_ordering_from_the_draf
         AgentRole.ANALYTICS,
         AgentRole.VISUALIZATION,
     ]
-    # Ordering is the contract the engine parallelises against: retrieval starts
-    # immediately, and nothing plots before the numbers exist.
+    # Ordering is what the engine parallelises against.
     by_id = {subtask.id: subtask for subtask in plan.subtasks}
     assert by_id["fetch_quarterly_financials"].depends_on == []
     assert by_id["analyse_trends"].depends_on == ["fetch_quarterly_financials"]
@@ -113,9 +112,9 @@ async def test_create_plan_retries_once_when_the_plan_fails_validation() -> None
 
 @pytest.mark.asyncio
 async def test_create_plan_rejects_an_input_the_step_does_not_depend_on() -> None:
-    """A data edge with no ordering edge is a race, not a plan: the engine may start the
-    consumer before the producer has written anything. `Plan` checks `depends_on` only,
-    so this is the planner's own check — and it must reach the retry, not the ledger."""
+    """A data edge with no ordering edge is a race: the engine may start the consumer
+    before the producer wrote anything. `Plan` checks `depends_on` only, so the planner
+    owns this one."""
     unordered = PlanDraft(
         subtasks=[
             SubtaskDraft(
@@ -178,8 +177,7 @@ async def test_create_plan_raises_after_a_second_failure_without_retrying_again(
     provider = FakeProvider(responses=[_broken_plan(), _broken_plan()])
     state = TaskState(user_request=REQUEST)
 
-    # Exit 5, not 4: the provider answered both times. Nothing is wrong with it or the
-    # credentials — this run simply has no plan to execute.
+    # Exit 5, not 4: the provider answered both times; this run just has no plan.
     with pytest.raises(TaskFailure) as exc_info:
         await Planner(provider).create_plan(state)
 
@@ -197,8 +195,8 @@ async def test_create_plan_propagates_a_provider_failure() -> None:
     with pytest.raises(ProviderError, match="authentication_error"):
         await Planner(provider).create_plan(TaskState(user_request=REQUEST))
 
-    # A transport failure is not invalid output; retrying it here would double every
-    # outage. Retry policy for that is #9's.
+    # A transport failure is not invalid output; retrying here would double every
+    # outage. That retry policy is #9's.
     assert len(provider.calls) == 1
 
 
@@ -213,15 +211,13 @@ async def test_create_plan_is_cancellable() -> None:
     assert len(provider.calls) == 1  # in flight, blocked inside the provider
     task.cancel()
 
-    # Bounded: a planner that swallowed the cancellation would sit on the blocker
-    # forever, and a suite that hangs tells you nothing.
+    # Bounded: a planner that swallowed the cancellation would hang on the blocker.
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(task, timeout=1)
     assert state.plan is None
 
 
 def test_planner_prompt_names_every_agent_role() -> None:
-    """The prompt lists the roles as literal text; this is what stops it drifting from
-    `AgentRole` when a fourth worker lands."""
+    """The prompt lists roles as literal text; this stops it drifting from `AgentRole`."""
     for role in AgentRole:
         assert role.value in PLANNER_SYSTEM_PROMPT

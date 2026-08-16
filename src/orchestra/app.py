@@ -1,12 +1,10 @@
 """Composition root: the one place every service is constructed and wired (§3.1).
 
-Nothing below this module builds a provider, a store, a broker or a worker — they are
-handed one. That is what lets a test run the whole application against `FakeProvider`
-without patching anything, and what keeps `cli/` free of business logic (§4).
+Nothing below builds a provider, store, broker or worker — they are handed one, which
+is what lets a test run the whole application against `FakeProvider` without patching.
 
-Phase B replaces the stub role by role (#5-#7). Data Retrieval and Analytics are real;
-Visualization still echoes. Nothing else in the application changed when either one
-landed, which is the property the mapping in `build_orchestra` exists to have.
+Phase B replaces the stub role by role (#5-#7); Visualization still echoes. Landing a
+real worker changes nothing outside `build_orchestra`'s mapping, which is its point.
 """
 
 from collections.abc import Callable
@@ -40,15 +38,7 @@ class Orchestra:
         provider: Provider,
         broker: Broker[TaskEvent],
     ) -> None:
-        """Take the wired services.
-
-        Args:
-            planner: turns the request into a plan.
-            engine: executes it.
-            aggregator: synthesises the artifacts into the run's final report.
-            provider: held only so the run can release it; agents get it injected.
-            broker: the run's event stream, exposed for the renderer to subscribe to (#11).
-        """
+        """Take the wired services. `provider` is held only so the run can release it."""
         self._planner = planner
         self._engine = engine
         self._aggregator = aggregator
@@ -63,28 +53,20 @@ class Orchestra:
     async def run_task(self, prompt: str) -> TaskState:
         """Plan `prompt`, execute the plan, and write the run's report.
 
-        Args:
-            prompt: the user's plain-language request.
-
-        Returns:
-            The ledger, with `final_result` set, whether the run completed, partly
-            failed, or stopped short. The caller reads `failed` for the exit code (§8)
-            and `failure_reason` for why.
+        Returns the ledger whether the run completed, partly failed, or stopped short;
+        the caller reads `failed` for the exit code (§8).
 
         Raises:
-            TaskFailure: planning failed — no plan, so nothing to report on. An
-                execution failure does *not* reach here.
+            TaskFailure: planning failed — an execution failure does *not* reach here.
             ProviderError: the provider failed while planning or synthesising.
-            asyncio.CancelledError: the run was cancelled; propagated (§10).
         """
         state = TaskState(user_request=prompt)
         await self._planner.create_plan(state)
         try:
             await self._engine.run(state)
         except TaskFailure as exc:
-            # The step cap, or a role with no worker. Recorded rather than raised, so the
-            # report still names the artifacts on disk instead of exiting 5 in silence.
-            # `CancelledError` is not an `Exception`, so a cancelled run unwinds untouched.
+            # Recorded, not raised, so the report still names the artifacts on disk
+            # instead of exiting 5 in silence.
             state.failure_reason = str(exc)
         await self._aggregator.write_report(state)
         return state
@@ -97,35 +79,46 @@ class Orchestra:
 def build_orchestra(config: Config) -> Orchestra:
     """Construct the application from validated configuration.
 
-    Args:
-        config: the run's settings, already loaded and validated.
-
-    Returns:
-        A wired `Orchestra`. Substitute a service by calling the constructor directly.
+    Substitute a service by calling `Orchestra` directly.
 
     Raises:
         ConfigError: the artifact directory is unusable (§9 — fail before work starts).
     """
-    provider = create_provider(api_key=config.anthropic_api_key, model=config.anthropic_model)
+    provider = create_provider(
+        api_key=config.anthropic_api_key,
+        model=config.anthropic_model,
+        max_tokens=config.anthropic_max_tokens,
+    )
     store = ArtifactStore(config.artifact_dir)
     broker: Broker[TaskEvent] = Broker()
-    # The mapping is the seam Phase B swaps role by role, which is why it is a mapping
-    # and not a conditional in the engine: a real worker lands as one reassignment.
-    # `dict.fromkeys` first so a role added later still runs, as a stub, rather than
+    # A mapping, not a conditional in the engine: a real worker lands as one
+    # reassignment. `fromkeys` first so a role added later runs as a stub rather than
     # failing `_check_roles` before the run starts.
     workers: dict[AgentRole, Worker] = dict.fromkeys(AgentRole, EchoWorker(store))
+    # The same bounds for both: one budget per subtask, not per role, so `WORKER_MAX_TURNS`
+    # means the same thing wherever the operator reads it. Passed by name rather than
+    # unpacked from a dict, which mypy would not check against either constructor.
     workers[AgentRole.DATA_RETRIEVAL] = DataRetrievalWorker(
         provider=provider,
         store=store,
         broker=broker,
         tools=data_retrieval_tools(config.data_dir, search_api_key=config.tavily_api_key),
+        max_turns=config.worker_max_turns,
+        token_budget=config.worker_token_budget,
     )
     workers[AgentRole.ANALYTICS] = AnalyticsWorker(
-        provider=provider, store=store, broker=broker, tools=analytics_tools(store)
+        provider=provider,
+        store=store,
+        broker=broker,
+        tools=analytics_tools(store),
+        max_turns=config.worker_max_turns,
+        token_budget=config.worker_token_budget,
     )
     return Orchestra(
         planner=Planner(provider),
-        engine=ExecutionEngine(workers=workers, broker=broker),
+        engine=ExecutionEngine(
+            workers=workers, broker=broker, max_concurrency=config.max_concurrency
+        ),
         # The workers' own store: the aggregator resolves the pointers they minted.
         aggregator=Aggregator(provider, store),
         provider=provider,
@@ -134,42 +127,30 @@ def build_orchestra(config: Config) -> Orchestra:
 
 
 type RunObserver = Callable[[Broker[TaskEvent]], AbstractAsyncContextManager[object]]
-"""Something that watches a run: given the broker, it stays attached for the run's
-duration. `cli/render.py`'s dashboard is one (#11).
+"""Watches a run: given the broker, stays attached for its duration (`cli/render.py`'s
+dashboard is one, #11).
 
 A parameter rather than an import because the layer rule runs one way (§3.2): `cli/`
-may import `app.py`, so `app.py` may not name the renderer.
-
-`[object]`, not `[None]`: the type is covariant in what it yields, so `[None]` would
-reject every observer that yields something — `dashboard` hands back its `RunView`.
-`run_once` discards the value, so nothing here depends on what it was.
+may import `app.py`, so `app.py` may not name the renderer. `[object]`, not `[None]`,
+so an observer yielding something — `dashboard` yields its `RunView` — still fits.
 """
 
 
 async def run_once(prompt: str, *, observer: RunObserver | None = None) -> TaskState:
     """Load configuration, run `prompt` once, and release the provider.
 
-    The entry point `cli/app.py` delegates to, so the command body stays a parse, a
-    delegation and an exit code (§4).
-
-    Args:
-        prompt: the user's plain-language request.
-        observer: entered around the run, so it is subscribed before the first event is
-            published and torn down after the last. `None` runs headless.
-
-    Returns:
-        The run's ledger, carrying the report the command prints.
+    What `cli/app.py` delegates to, so the command body stays parse, delegate, exit (§4).
+    `observer` is entered around the run, so it is subscribed before the first event and
+    torn down after the last; `None` runs headless.
 
     Raises:
         OrchestraError: configuration or planning failed. A run that started and then
             stopped short returns its ledger instead.
-        asyncio.CancelledError: the run was cancelled; propagated after both the
-            observer and the provider are released (§10).
     """
     orchestra = build_orchestra(load_config())
     try:
-        # An exit stack rather than an `if`: the one that duplicated the `run_task` call
-        # across both branches is how the two copies drift.
+        # An exit stack rather than an `if`, which would duplicate the `run_task` call
+        # across both branches.
         async with AsyncExitStack() as stack:
             if observer is not None:
                 await stack.enter_async_context(observer(orchestra.broker))
