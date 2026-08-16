@@ -1,11 +1,11 @@
-"""Tests for the shared tool-use loop the worker agents run (CONVENTIONS.md §12).
+"""Tests for the shared tool-use loop the worker agents run.
 
-What is asserted is what a worker built on `ToolLoop` may assume: a summary and the
-calls worth keeping, tool failures fed back to the model rather than raised, both bounds
-enforced with the caller's label in the message, and cancellation propagated.
+Asserts what a worker built on `ToolLoop` may assume: a summary and the calls worth
+keeping, tool failures fed back to the model rather than raised, both bounds enforced with
+the caller's label, and cancellation propagated.
 
-The retrieval-shaped assertions stay in `test_data_retrieval.py` — this file never names
-a real tool, because a loop that only worked for `query_csv` would still pass there.
+This file never names a real tool — a loop that only worked for `query_csv` would still
+pass `test_data_retrieval.py`.
 """
 
 import asyncio
@@ -13,13 +13,13 @@ from collections.abc import Sequence
 
 import pytest
 
-from conftest import FakeProvider, FakeTool
+from conftest import FakeProvider, FakeTool, tool_call
 from orchestra.agents.workers.tool_loop import LoopResult, ToolLoop
 from orchestra.core.errors import TaskFailure
 from orchestra.core.events import Broker
 from orchestra.core.state import AgentRole, EventKind, Subtask, SubtaskContext, TaskEvent, TaskState
 from orchestra.providers.base import AssistantTurn
-from orchestra.tools.base import BaseTool, ToolCall, ToolResponse
+from orchestra.tools.base import BaseTool, ToolResponse
 
 REQUEST = "Summarize the last 3 quarters' financial trends"
 SYSTEM = "You are a test agent."
@@ -50,18 +50,14 @@ def _loop(
     )
 
 
-def _call(name: str, call_id: str = "call-1", **arguments: object) -> ToolCall:
-    return ToolCall(id=call_id, name=name, arguments=arguments)
-
-
 @pytest.mark.asyncio
 async def test_loop_returns_the_models_summary_and_every_kept_call() -> None:
-    """The happy path: the closing text, and the calls in the order they were made."""
+    """The closing text, and the calls in the order they were made."""
     provider = FakeProvider(
         turns=[
             AssistantTurn(
                 text="",
-                tool_calls=(_call(LOOKUP, "c1", q="a"), _call(OTHER, "c2", q="b")),
+                tool_calls=(tool_call(LOOKUP, "c1", q="a"), tool_call(OTHER, "c2", q="b")),
                 usage_tokens=100,
             ),
             AssistantTurn(text="Both answered.", usage_tokens=20),
@@ -80,7 +76,7 @@ async def test_loop_returns_the_models_summary_and_every_kept_call() -> None:
         (LOOKUP, "first"),
         (OTHER, "second"),
     ]
-    # The system prompt it was constructed with, and every tool, on every turn (§11).
+    # The constructed system prompt, and every tool, on every turn (§11).
     assert provider.send_calls[0].system == SYSTEM
     assert {spec.name for spec in provider.send_calls[0].tools} == {LOOKUP, OTHER}
     assert REQUEST in provider.send_calls[0].messages[0].content
@@ -91,8 +87,8 @@ async def test_loop_feeds_a_tool_error_back_to_the_model_and_does_not_keep_it() 
     """§6: an error is data the model reads and corrects, and never a kept result."""
     provider = FakeProvider(
         turns=[
-            AssistantTurn(text="", tool_calls=(_call(LOOKUP, "c1"),), usage_tokens=10),
-            AssistantTurn(text="", tool_calls=(_call(LOOKUP, "c2"),), usage_tokens=10),
+            AssistantTurn(text="", tool_calls=(tool_call(LOOKUP, "c1"),), usage_tokens=10),
+            AssistantTurn(text="", tool_calls=(tool_call(LOOKUP, "c2"),), usage_tokens=10),
             AssistantTurn(text="Recovered.", usage_tokens=10),
         ]
     )
@@ -112,14 +108,11 @@ async def test_loop_feeds_a_tool_error_back_to_the_model_and_does_not_keep_it() 
 
 @pytest.mark.asyncio
 async def test_loop_does_not_keep_a_result_that_matched_nothing() -> None:
-    """`is_empty` ran correctly and found nothing — the model sees it, the caller does not.
-
-    Kept apart from `is_error` on purpose: a worker deciding whether its step produced
-    anything must not be able to count "nothing matched" as a result (`ToolResponse`).
-    """
+    """`is_empty` is kept apart from `is_error` so a worker deciding whether its step
+    produced anything cannot count "nothing matched" as a result."""
     provider = FakeProvider(
         turns=[
-            AssistantTurn(text="", tool_calls=(_call(LOOKUP, "c1"),), usage_tokens=10),
+            AssistantTurn(text="", tool_calls=(tool_call(LOOKUP, "c1"),), usage_tokens=10),
             AssistantTurn(text="Nothing there.", usage_tokens=10),
         ]
     )
@@ -139,8 +132,8 @@ async def test_loop_answers_an_unknown_tool_name_without_ending_the_step() -> No
     """A hallucinated tool is the model's mistake to correct — it gets told the real ones."""
     provider = FakeProvider(
         turns=[
-            AssistantTurn(text="", tool_calls=(_call("run_sql", "c1"),), usage_tokens=10),
-            AssistantTurn(text="", tool_calls=(_call(LOOKUP, "c2"),), usage_tokens=10),
+            AssistantTurn(text="", tool_calls=(tool_call("run_sql", "c1"),), usage_tokens=10),
+            AssistantTurn(text="", tool_calls=(tool_call(LOOKUP, "c2"),), usage_tokens=10),
             AssistantTurn(text="Used the right tool.", usage_tokens=10),
         ]
     )
@@ -159,7 +152,7 @@ async def test_loop_still_calling_tools_at_the_turn_cap_fails_with_its_label() -
     """§10: the loop is bounded, and the label says which agent hit the bound."""
     provider = FakeProvider(
         turns=[
-            AssistantTurn(text="", tool_calls=(_call(LOOKUP, "c1"),), usage_tokens=10)
+            AssistantTurn(text="", tool_calls=(tool_call(LOOKUP, "c1"),), usage_tokens=10)
             for _ in range(2)
         ]
     )
@@ -174,7 +167,7 @@ async def test_loop_over_its_token_budget_fails_with_its_label() -> None:
     """The second bound: turns alone will not catch a model making expensive calls."""
     provider = FakeProvider(
         turns=[
-            AssistantTurn(text="", tool_calls=(_call(LOOKUP, "c1"),), usage_tokens=5_000),
+            AssistantTurn(text="", tool_calls=(tool_call(LOOKUP, "c1"),), usage_tokens=5_000),
             AssistantTurn(text="never reached", usage_tokens=10),
         ]
     )
@@ -202,10 +195,14 @@ async def test_loop_bound_failure_counts_what_it_had_kept_per_tool() -> None:
         turns=[
             AssistantTurn(
                 text="",
-                tool_calls=(_call(LOOKUP, "c1"), _call(LOOKUP, "c2"), _call(OTHER, "c3")),
+                tool_calls=(
+                    tool_call(LOOKUP, "c1"),
+                    tool_call(LOOKUP, "c2"),
+                    tool_call(OTHER, "c3"),
+                ),
                 usage_tokens=10,
             ),
-            AssistantTurn(text="", tool_calls=(_call(LOOKUP, "c4"),), usage_tokens=10),
+            AssistantTurn(text="", tool_calls=(tool_call(LOOKUP, "c4"),), usage_tokens=10),
         ]
     )
     tools = [
@@ -219,9 +216,9 @@ async def test_loop_bound_failure_counts_what_it_had_kept_per_tool() -> None:
 
 @pytest.mark.asyncio
 async def test_loop_bound_failure_with_nothing_kept_says_so() -> None:
-    """The other half of the same message: an empty hand is itself the diagnosis."""
+    """The other half of the same message: an empty hand is itself a diagnosis."""
     provider = FakeProvider(
-        turns=[AssistantTurn(text="", tool_calls=(_call(LOOKUP, "c1"),), usage_tokens=10)]
+        turns=[AssistantTurn(text="", tool_calls=(tool_call(LOOKUP, "c1"),), usage_tokens=10)]
     )
     tool = FakeTool(LOOKUP, [ToolResponse(content="broken", is_error=True)])
 
@@ -231,14 +228,11 @@ async def test_loop_bound_failure_with_nothing_kept_says_so() -> None:
 
 @pytest.mark.asyncio
 async def test_loop_publishes_a_degraded_tool_as_a_lifecycle_event() -> None:
-    """A tool that fell back is news for the operator, not a reason to fail the step.
-
-    Only the loop can see it: the engine publishes the step's transitions, and this
-    happens partway through one.
-    """
+    """A tool that fell back is news for the operator, not a reason to fail the step, and
+    only the loop can see it — the engine publishes transitions, not mid-step events."""
     provider = FakeProvider(
         turns=[
-            AssistantTurn(text="", tool_calls=(_call(LOOKUP, "c1"),), usage_tokens=10),
+            AssistantTurn(text="", tool_calls=(tool_call(LOOKUP, "c1"),), usage_tokens=10),
             AssistantTurn(text="Answered anyway.", usage_tokens=10),
         ]
     )
@@ -275,6 +269,6 @@ def test_loop_without_tools_is_a_wiring_bug() -> None:
 
 @pytest.mark.parametrize("bound", ["max_turns", "token_budget"])
 def test_loop_with_a_non_positive_bound_is_a_wiring_bug(bound: str) -> None:
-    """Both bounds are checked at construction, like the engine's — a wiring bug (§10)."""
+    """Both bounds are checked at construction, like the engine's (§10)."""
     with pytest.raises(ValueError, match=f"{bound} must be at least 1, got 0"):
         _loop(FakeProvider(), [FakeTool(LOOKUP, [])], None, **{bound: 0})

@@ -1,12 +1,10 @@
-"""The Typer application: parse, delegate, map to an exit code (CONVENTIONS.md §4).
+"""The Typer application: parse, delegate, map to an exit code (§4).
 
-Also the single place a failure is turned into a message and a status (§8) —
-`error_boundary` maps an `OrchestraError` to its own exit code, `KeyboardInterrupt`
-to 130, and anything else to 1. Nothing below `cli/` formats an error for a human.
+The one place a failure becomes a message and a status (§8): `error_boundary` maps an
+`OrchestraError` to its own exit code, `KeyboardInterrupt` to 130, anything else to 1.
 
-`load_config()` is deliberately not called here or at import — `--help` must work in a
-checkout with no `.env`, so configuration is loaded inside the command, under the
-boundary that turns a `ConfigError` into exit 3.
+Config is loaded inside the command, not at import — `--help` must work in a checkout
+with no `.env`, and a `ConfigError` has to land under the boundary that makes it exit 3.
 """
 
 import asyncio
@@ -38,21 +36,16 @@ app = typer.Typer(
 def error_boundary(*, debug: bool = False) -> Iterator[None]:
     """Render a failure once, here, and exit with its code (§8).
 
-    Every command body wraps its delegation in this. `typer.Exit`/`typer.Abort` are
-    control flow rather than failures, so they pass through untouched.
-
-    Args:
-        debug: also print the traceback. §8 forbids showing one otherwise; the
-            `--debug` flag that sets it lands with the first command that can fail.
+    `typer.Exit`/`typer.Abort` are control flow, not failures, so they pass through.
+    `debug` also prints the traceback, which §8 forbids otherwise.
     """
     try:
         yield
     except (typer.Exit, typer.Abort):
         raise
     except OrchestraError as exc:
-        # Already user-facing — errors carry the message, they never format themselves.
         # markup=False: an error naming a bracketed token ("[not_found_error]") would
-        # otherwise be parsed as a style tag and silently deleted from the message.
+        # otherwise be parsed as a style tag and deleted from the message.
         err_console.print(str(exc), markup=False, highlight=False)
         if debug:
             err_console.print_exception()
@@ -61,15 +54,14 @@ def error_boundary(*, debug: bool = False) -> Iterator[None]:
         err_console.print("Interrupted.")
         raise typer.Exit(ExitCode.INTERRUPTED) from exc
     except Exception as exc:
-        # Outside the taxonomy, so it is a bug, not a condition the user can fix.
+        # Outside the taxonomy, so a bug rather than something the user can fix.
         err_console.print(f"Unexpected error: {exc}", markup=False, highlight=False)
         if debug:
             err_console.print_exception()
         raise typer.Exit(ExitCode.UNHANDLED) from exc
 
 
-# invoke_without_command: the callback owns --version, so it has to run when no
-# subcommand follows. `no_args_is_help` still wins for a bare `orchestra`.
+# invoke_without_command: the callback owns --version, so it must run with no subcommand.
 @app.callback(invoke_without_command=True)
 def main(
     version: Annotated[bool, typer.Option("--version", help="Show the version and exit.")] = False,
@@ -96,19 +88,15 @@ def run(
 ) -> None:
     """Plan the request, run the subtasks, and report on what they produced."""
     with error_boundary(debug=debug):
-        # Ctrl-C cancels the run inside `asyncio.run`, which unwinds the TaskGroup and
-        # re-raises KeyboardInterrupt here; the boundary maps it to 130 (§8). The
-        # dashboard is torn down on that unwind, so the `Live` region is always exited.
+        # Ctrl-C unwinds the TaskGroup inside `asyncio.run` and re-raises here, so the
+        # dashboard is always torn down and the boundary maps it to 130 (§8).
         observer = partial(dashboard, mode=_render_mode(quiet=quiet, output=output))
         state = asyncio.run(run_once(prompt, observer=observer))
         if state.failure_reason is not None:
-            # A diagnostic, so stderr (§5, §8) — and an error rather than progress, so
-            # `--quiet` keeps it. Printed under `-o json` too: which stream says what must
-            # not depend on the format. markup/highlight off for `error_boundary`'s
-            # reason — the message can name a bracketed token Rich would eat as a tag.
+            # Diagnostic, so stderr even under `-o json` and `--quiet` (§5, §8): which
+            # stream says what must not depend on the format or the noise level.
             err_console.print(state.failure_reason, markup=False, highlight=False)
-        # The result (§5). `is_terminal` is read here and passed down, so the framing
-        # decision stays in `render.py`.
+        # `is_terminal` is read here and passed down so framing stays in `render.py`.
         console.print(
             result_renderable(state, output=output, quiet=quiet, terminal=console.is_terminal)
         )
@@ -119,10 +107,8 @@ def run(
 def _render_mode(*, quiet: bool, output: OutputFormat) -> RenderMode:
     """Which dashboard the flags ask for. The one place that policy is decided.
 
-    `--quiet` suppresses progress entirely (§5). `--output json` never gets a `Live`
-    region — a run whose stdout is being parsed is one nobody is watching redraw — but
-    keeps the scrolling lines. Otherwise: live table on a terminal, plain lines in a
-    pipe, a CI log or a recording.
+    `--quiet` suppresses progress entirely (§5). `--output json` keeps the scrolling
+    lines but never a `Live` region — nobody watches a run whose stdout is being parsed.
     """
     if quiet:
         return RenderMode.NONE

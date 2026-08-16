@@ -1,8 +1,7 @@
 """The three scenarios that prove the planner is dynamic (#17).
 
 A three-role pipeline can look dynamic while always emitting the same DAG. Each scenario
-pairs a prompt with the shape it must produce, from the research doc's "Proving the
-Planner Is Dynamic" table:
+pairs a prompt with the shape it must produce:
 
 | Scenario      | Required shape                                               |
 |---------------|--------------------------------------------------------------|
@@ -12,10 +11,6 @@ Planner Is Dynamic" table:
 
 Shapes are stated in roles and edges, never ids, so the same assertion holds for a canned
 draft and for whatever a live model names its steps.
-
-`test_planner_scenarios.py` asserts offline that a shape survives draft -> `Plan`
-conversion; `test_planner_scenarios_live.py` asserts a real model decomposes this way
-(§12 keeps it off by default).
 """
 
 import itertools
@@ -28,16 +23,16 @@ from orchestra.core.state import AgentRole, Plan, Subtask
 
 @dataclass(frozen=True, slots=True)
 class PlanShape:
-    """What a plan must look like, in roles and edges — an internal value object (§7).
+    """What a plan must look like, in roles and edges.
 
     Attributes:
         steps: how many subtasks the plan must have.
         role_counts: subtasks per role. Every `AgentRole` must appear; an absent role is
             stated as `0`, which is the assertion role_omission turns on.
-        precedes: `(earlier, later)` pairs. Every subtask of `later` must transitively
-            depend on every subtask of `earlier`.
-        concurrent: a role whose subtasks must be pairwise independent, so the engine may
-            run them at once. `None` where the role has one subtask.
+        precedes: `(earlier, later)` pairs; every `later` subtask must transitively depend
+            on every `earlier` one.
+        concurrent: a role whose subtasks must be pairwise independent. `None` where the
+            role has one subtask.
     """
 
     steps: int
@@ -46,14 +41,8 @@ class PlanShape:
     concurrent: AgentRole | None = None
 
     def __post_init__(self) -> None:
-        """Check the scenario definition, not a plan.
-
-        Role counts that disagree with the step count would accept plans they should
-        reject.
-
-        Raises:
-            ValueError: the shape is not internally consistent.
-        """
+        """Reject an inconsistent scenario definition: counts that disagree with the step
+        count would accept plans they should reject."""
         if set(self.role_counts) != set(AgentRole):
             raise ValueError("every role needs a count, including the roles that must be absent")
         if sum(self.role_counts.values()) != self.steps:
@@ -101,8 +90,8 @@ def linear_draft() -> PlanDraft:
 
 
 def fan_out_draft() -> PlanDraft:
-    """Two independent retrievals, then a comparison, then a chart. The missing edge
-    between the retrievals is what lets the engine run them at once."""
+    """Two retrievals, a comparison, then a chart. The missing edge between the retrievals
+    is what lets the engine run them at once."""
     return PlanDraft(
         subtasks=[
             SubtaskDraft(
@@ -214,16 +203,7 @@ def scenario_id(scenario: Scenario) -> str:
 
 
 def assert_plan_shape(plan: Plan, shape: PlanShape) -> None:
-    """Assert `plan` matches `shape`, naming the offending plan when it does not.
-
-    Args:
-        plan: the plan the planner produced.
-        shape: the shape the scenario's prompt must produce.
-
-    Raises:
-        AssertionError: the plan has the wrong step count, the wrong roles, a missing
-            ordering edge, or a dependency between subtasks that must run concurrently.
-    """
+    """Assert `plan` matches `shape`, rendering the offending plan when it does not."""
     rendered = _render(plan)
 
     assert len(plan.subtasks) == shape.steps, (
@@ -259,7 +239,7 @@ def _with_role(plan: Plan, role: AgentRole) -> list[Subtask]:
 def _ancestors(plan: Plan) -> dict[str, set[str]]:
     """Every subtask id each subtask transitively depends on.
 
-    `Plan` validates acyclicity on construction, so this walk needs no cycle guard.
+    `Plan` validates acyclicity on construction, so the walk needs no cycle guard.
     """
     by_id = {subtask.id: subtask for subtask in plan.subtasks}
     resolved: dict[str, set[str]] = {}

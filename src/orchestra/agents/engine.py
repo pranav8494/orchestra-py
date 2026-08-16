@@ -1,25 +1,22 @@
 """The supervisor loop: walk the plan's DAG, dispatch each subtask, record what it made.
 
-**Completion-driven, not wave-by-wave.** The obvious loop runs one `TaskGroup` per
-level of the graph, which makes every step in a level wait for the slowest one. Here a
-single `TaskGroup` spans the run and the scheduler re-scans on every completion, so a
-subtask starts the moment its dependencies are done. `asyncio.Semaphore` bounds how many
-run at once (§10); `in_flight` — not `status` — is what keeps the scan from dispatching
-the same subtask twice, because a subtask is only `RUNNING` once it holds the semaphore
-and the dashboard should not show a queue of them as running.
+**Completion-driven, not wave-by-wave.** A `TaskGroup` per graph level makes every step
+wait for its level's slowest; here one `TaskGroup` spans the run and the scheduler
+re-scans on every completion. `asyncio.Semaphore` bounds concurrency (§10); `in_flight` —
+not `status` — is what stops a double dispatch, because a subtask is only `RUNNING` once
+it holds the semaphore and a queued one should not show as running.
 
-**A failed subtask ends a step, not the run.** It is marked `failed`, its dependents are
-never ready, and everything independent of it still completes. The run's verdict is the
-caller's to draw from state — partial results beat no results (§8, and the report in #8).
+**A failed subtask ends a step, not the run.** Its dependents never become ready, and
+everything independent of it still completes. The verdict is the caller's to draw from
+state — partial results beat no results (§8, #8).
 
-**One thing does end the run**: the global step cap. It is the crude backstop against a
-plan that would otherwise run forever; #9 replaces it with per-subtask attempt caps and
-a token budget. Exceeding it is a `TaskFailure`, never a retry (§10).
+**One thing does end the run**: the global step cap, the crude backstop against a plan
+that would run forever. #9 replaces it with per-subtask attempt caps and a token budget.
+Exceeding it is a `TaskFailure`, never a retry (§10).
 
-**Settling `inputs`.** `Subtask.inputs` names upstream subtask ids, and an artifact is
-registered in `TaskState.artifacts` under the id of the subtask that produced it. So the
-two readings the planner flagged as unsettled — artifact keys, or subtask ids — are the
-same set of strings by construction here.
+**Settling `inputs`.** `Subtask.inputs` names upstream subtask ids, and `state.artifacts`
+is keyed by producing subtask id — so the two readings the planner flagged as unsettled
+are the same set of strings here.
 """
 
 import asyncio
@@ -39,8 +36,8 @@ from orchestra.core.state import (
 )
 
 DEFAULT_MAX_CONCURRENCY = 4
-# The research doc's global step budget. Crude on purpose: it counts dispatches, so with
-# no retries yet it only trips on an oversized plan (#9 makes it a real budget).
+# Counts dispatches, so with no retries yet it only trips on an oversized plan; #9 makes
+# it a real budget.
 DEFAULT_STEP_CAP = 15
 
 
@@ -58,10 +55,8 @@ class ExecutionEngine:
         """Wire the engine.
 
         Args:
-            workers: the worker for each role, from `agents/toolsets.py`'s successor in
-                `app.py`. A role the plan uses and this mapping lacks fails the run.
-            broker: where every state transition is published.
-            max_concurrency: how many subtasks may run at once.
+            workers: the worker for each role, wired in `app.py`. A role the plan uses and
+                this mapping lacks fails the run.
             step_cap: how many dispatches the run may make in total.
 
         Raises:
@@ -79,28 +74,24 @@ class ExecutionEngine:
     async def run(self, state: TaskState) -> None:
         """Execute `state.plan`, updating the ledger and emitting events as it goes.
 
-        Args:
-            state: the run's ledger. Subtask statuses, `artifacts`, `current_step` and
-                `events` are all written here; nothing is returned.
+        Subtask statuses, `artifacts`, `current_step` and `events` are written to `state`.
 
         Raises:
             TaskFailure: there is no plan, a role has no worker, or the step cap was
                 exceeded. All three end the run — a failed *subtask* does not.
-            asyncio.CancelledError: the run was cancelled. In-flight subtasks are
-                cancelled with it and the error is re-raised, never swallowed (§10).
+            asyncio.CancelledError: in-flight subtasks are cancelled with it and the error
+                is re-raised, never swallowed (§10).
         """
         plan = state.plan
         if plan is None:
             raise TaskFailure("There is no plan to execute. Plan the request first.")
         self._check_roles(plan)
 
-        # Published, not appended: the planner already recorded `plan_created` in the
-        # ledger, but no broker existed when it did, and the dashboard needs the event.
-        # The plan rides along on this one event because a subscriber cannot draw the
-        # pending rows from transitions it has not seen yet. Deep-copied because the
-        # loop below mutates every `Subtask.status` in place, and a shared reference
-        # would let a subscriber read live state through an event handed to it as
-        # history. `_emit` deliberately has no `plan`, so ledger entries stay plan-free.
+        # Published, not appended: the planner already recorded `plan_created`, but no
+        # broker existed then. The plan rides on this one event because a subscriber
+        # cannot draw pending rows from transitions it has not seen. Deep-copied because
+        # the loop below mutates `Subtask.status` in place and a shared reference would
+        # let a subscriber read live state through an event handed to it as history.
         await self._broker.publish_lifecycle(
             TaskEvent(
                 kind=EventKind.PLAN_CREATED,
@@ -112,8 +103,8 @@ class ExecutionEngine:
         semaphore = asyncio.Semaphore(self._max_concurrency)
         in_flight: set[str] = set()
         # Set by every finishing dispatch, so the scheduler wakes on completions rather
-        # than polling. Cleared *before* the scan, so a completion that lands between
-        # the scan and the wait is not missed.
+        # than polling. Cleared *before* the scan, so a completion landing between the
+        # scan and the wait is not missed.
         finished = asyncio.Event()
         dispatched = 0
         capped = False
@@ -124,11 +115,9 @@ class ExecutionEngine:
                 if not capped:
                     for subtask in _ready(plan, in_flight):
                         if dispatched >= self._step_cap:
-                            # Stop dispatching, but let what is already running finish:
-                            # the cap exists to end a runaway plan with partial results,
-                            # and in-flight work is bounded by the semaphore anyway.
-                            # Raised after the group closes — a `TaskGroup` re-raises a
-                            # failure from its own body inside an `ExceptionGroup`.
+                            # Stop dispatching but let in-flight work finish: the cap ends
+                            # a runaway plan with partial results. Raised after the group
+                            # closes — raising inside its body gives an `ExceptionGroup`.
                             capped = True
                             break
                         dispatched += 1
@@ -144,15 +133,14 @@ class ExecutionEngine:
         done = sum(1 for subtask in plan.subtasks if subtask.status is SubtaskStatus.DONE)
 
         if capped:
-            # Says what finished rather than promising "partial results". Raising no
-            # longer loses it: `app.py` records the message on `state.failure_reason`
-            # and the report names the artifacts on disk (#8).
+            # `app.py` records this message on `state.failure_reason` and the report names
+            # the artifacts on disk (#8), so raising does not lose it.
             message = (
                 f"Step cap of {self._step_cap} exceeded; the plan is too large to run. "
                 f"{done} of {len(plan.subtasks)} subtasks finished before stopping."
             )
             # Emitted before raising: a subscriber that never sees `run_finished` spins
-            # forever, and "the run stopped" is exactly what it needs to hear.
+            # forever (§6).
             await self._emit(state, EventKind.RUN_FINISHED, message=message)
             raise TaskFailure(message)
 
@@ -183,8 +171,8 @@ class ExecutionEngine:
                 )
                 pointer = await self._workers[subtask.role].run(state.state_slice(subtask))
                 # Assigned to the model field first: `validate_assignment` checks the
-                # pointer's shape, so a worker returning a malformed string fails here
-                # rather than poisoning `artifacts`, which is not re-validated in place.
+                # pointer's shape, so a malformed one fails here rather than poisoning
+                # `artifacts`, which is not re-validated in place.
                 subtask.output_pointer = pointer
                 state.artifacts[subtask.id] = pointer
                 subtask.status = SubtaskStatus.DONE
@@ -219,11 +207,7 @@ class ExecutionEngine:
         await self._broker.publish_lifecycle(event)
 
     def _check_roles(self, plan: Plan) -> None:
-        """Fail before any work starts if a role in the plan has no worker (§9).
-
-        Raises:
-            TaskFailure: the plan needs a role this engine cannot dispatch.
-        """
+        """Raise `TaskFailure` before any work starts if a role has no worker (§9)."""
         missing = sorted({subtask.role for subtask in plan.subtasks} - self._workers.keys())
         if missing:
             raise TaskFailure(f"No worker is registered for roles: {missing}")
@@ -232,8 +216,8 @@ class ExecutionEngine:
 def _ready(plan: Plan, in_flight: set[str]) -> list[Subtask]:
     """The subtasks that can start now: pending, not dispatched, dependencies done.
 
-    A dependency that failed is never `done`, so its dependents are never ready and the
-    scheduler drains to a stop instead of deadlocking on them.
+    A failed dependency is never `done`, so the scheduler drains to a stop rather than
+    deadlocking on its dependents.
     """
     done = {subtask.id for subtask in plan.subtasks if subtask.status is SubtaskStatus.DONE}
     return [

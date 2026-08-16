@@ -1,19 +1,17 @@
-"""Tests for the synthesis pass (CONVENTIONS.md §12).
+"""Tests for the synthesis pass.
 
 Everything runs against `FakeProvider` and a `tmp_path` store. The assertions are about
-what the aggregator does around the model — what it puts in the prompt, what it refuses
-to keep from the answer, and what it writes when there is no answer at all — never about
-the quality of the synthesis, which is not ours to test.
+what the aggregator does around the model — what it puts in the prompt, what it refuses to
+keep from the answer, what it writes when there is no answer — never the synthesis quality.
 """
 
 import asyncio
 import threading
 import time
-from pathlib import Path
 
 import pytest
 
-from conftest import FakeProvider
+from conftest import FakeProvider, _wait_until
 from orchestra.agents.aggregator import (
     MAX_PREVIEW_READS,
     Aggregator,
@@ -39,11 +37,6 @@ from orchestra.prompts import AGGREGATOR_SYSTEM_PROMPT
 
 REQUEST = "Summarize the last 3 quarters' financial trends and create a chart"
 REVENUE_CSV = "quarter,revenue\nQ1,120\nQ2,131\nQ3,145\n"
-
-
-@pytest.fixture
-def store(tmp_path: Path) -> ArtifactStore:
-    return ArtifactStore(tmp_path / "artifacts")
 
 
 def _plan() -> Plan:
@@ -101,16 +94,6 @@ def _draft(*figures: FigureDraft) -> ReportDraft:
     )
 
 
-async def _wait_for_call(provider: FakeProvider) -> None:
-    """Let the aggregator reach the provider — the preview reads run in threads first.
-
-    Polled rather than awaited on an event (ASYNC110): the condition is set by a thread
-    the test has no handle on. Every caller bounds the wait with `asyncio.wait_for`.
-    """
-    while not provider.calls:  # noqa: ASYNC110
-        await asyncio.sleep(0.001)
-
-
 @pytest.mark.asyncio
 async def test_write_report_keeps_backed_figures_and_takes_the_chart_from_the_ledger(
     store: ArtifactStore,
@@ -134,8 +117,7 @@ async def test_write_report_keeps_backed_figures_and_takes_the_chart_from_the_le
         state.artifacts["fetch"],
         state.artifacts["analyse"],
     ]
-    # Derived from the visualization subtask, not from anything the model said — the
-    # draft schema has no chart field to say it with.
+    # From the visualization subtask: the draft schema has no chart field.
     assert report.chart == state.artifacts["chart"]
 
 
@@ -143,7 +125,7 @@ async def test_write_report_keeps_backed_figures_and_takes_the_chart_from_the_le
 async def test_write_report_shows_the_model_a_preview_not_the_payload(
     store: ArtifactStore,
 ) -> None:
-    """The whole point of pointers (§6): a large artifact must not reach the prompt."""
+    """The point of pointers (§6): a large artifact must not reach the prompt."""
     state = TaskState(user_request=REQUEST, plan=_plan())
     _finish(state, store, "fetch", "revenue.csv", "x" * 5_000 + "TAIL_OF_THE_FILE")
     provider = FakeProvider(responses=[_draft()])
@@ -287,12 +269,9 @@ async def test_write_report_propagates_a_provider_failure(store: ArtifactStore) 
 async def test_write_report_raises_when_an_artifact_the_ledger_claims_is_gone(
     store: ArtifactStore,
 ) -> None:
-    """The store's one error path, reached through the previews.
-
-    A ledger pointing at a payload it can no longer read has lost data, so the run ends
-    on `TaskFailure` (§8) rather than reporting over the hole — and before paying for
-    the provider call.
-    """
+    """A ledger pointing at a payload it can no longer read has lost data, so the run ends
+    on `TaskFailure` (§8) rather than reporting over the hole — and before paying for the
+    provider call."""
     state = _finished_run(store)
     store.path_for(state.artifacts["analyse"]).unlink()
     provider = FakeProvider(responses=[_draft()])
@@ -310,7 +289,7 @@ async def test_write_report_bounds_how_many_previews_it_reads_at_once(
     store: ArtifactStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """§10: never unbounded fan-out. The reads share the process-wide thread pool, so the
-    bound belongs here rather than to however many subtasks the plan contained."""
+    bound belongs here, not to the subtask count."""
     plan = Plan(
         subtasks=[
             Subtask(id=f"step_{index}", role=AgentRole.ANALYTICS, instruction="Do the thing")
@@ -353,11 +332,11 @@ async def test_write_report_is_cancellable(store: ArtifactStore) -> None:
     provider = FakeProvider(responses=[_draft()], blocker=asyncio.Event())
 
     task = asyncio.create_task(Aggregator(provider, store).write_report(state))
-    await asyncio.wait_for(_wait_for_call(provider), timeout=1)  # in flight, blocked
+    # In flight and blocked: the preview reads run in threads before the request.
+    await _wait_until(lambda: bool(provider.calls), what="the aggregator to reach the provider")
     task.cancel()
 
-    # Bounded: an aggregator that swallowed the cancellation would sit on the blocker
-    # forever, and a suite that hangs tells you nothing.
+    # Bounded: an aggregator that swallowed the cancellation would hang on the blocker.
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(task, timeout=1)
     assert state.final_result is None
@@ -368,7 +347,7 @@ async def test_write_report_closes_the_skeleton_over_real_engine_and_stub_worker
     store: ArtifactStore,
 ) -> None:
     """The last link of the walking skeleton (#8): plan -> engine -> stub artifacts ->
-    report, with only the model faked. Nothing here reaches into the store by hand."""
+    report, with only the model faked."""
     state = TaskState(user_request=REQUEST, plan=_plan())
     workers: dict[AgentRole, Worker] = dict.fromkeys(AgentRole, EchoWorker(store))
     broker: Broker[TaskEvent] = Broker()
@@ -384,12 +363,10 @@ async def test_write_report_closes_the_skeleton_over_real_engine_and_stub_worker
     assert not state.failed
     assert [figure.source for figure in report.key_figures] == ["artifact:analyse.txt"]
     assert report.chart == "artifact:chart.txt"
-    # The stub's payload is what the model was shown — proof the previews resolve against
-    # what the engine actually wrote, not against a fixture.
+    # Proof the previews resolve against what the engine wrote, not against a fixture.
     assert "Plot the quarterly revenue trend." in provider.calls[0].messages[0].content
 
 
 def test_aggregator_prompt_names_the_artifact_pointer_prefix() -> None:
-    """The prompt tells the model to copy an `artifact:` pointer; this is what stops that
-    instruction drifting from `ARTIFACT_PREFIX` if the prefix ever changes."""
+    """Stops the prompt's `artifact:` instruction drifting from `ARTIFACT_PREFIX`."""
     assert ARTIFACT_PREFIX in AGGREGATOR_SYSTEM_PROMPT

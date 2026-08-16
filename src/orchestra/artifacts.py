@@ -1,13 +1,10 @@
 """Pointer-based artifact store: payloads on disk, `artifact:<name>` strings in state.
 
-**Why here and not in `core/`.** §1.3 keeps `core/` free of I/O so the ledger stays
-portable behind another front end, and this store is the part that changes when it does
-— a local directory today, object storage once the run leaves one process. `config.py`
-is the precedent: impure infrastructure at the top level, injected from `app.py`.
+Top level, not `core/`, because §1.3 keeps `core/` free of I/O — a local directory
+today, object storage once the run leaves one process. `config.py` is the precedent.
 
-Payloads are `bytes`, `str`, or an existing file; serialising a DataFrame belongs to the
-agent that owns one. Synchronous, so the async engine calls it through `asyncio.to_thread`
-(§10) — which is why every method has to be safe to run in parallel with itself.
+Payloads are `bytes`, `str`, or an existing file. Synchronous, called through
+`asyncio.to_thread` (§10), so every method must be safe to run in parallel with itself.
 """
 
 import codecs
@@ -20,12 +17,10 @@ from pathlib import Path
 from orchestra.core.errors import ConfigError, TaskFailure
 from orchestra.core.state import ARTIFACT_NAME_PATTERN, ARTIFACT_PREFIX
 
-# Characters of an artifact a preview may carry into a prompt — roughly 200 tokens, so a
-# whole plan's previews still leave the model room to answer.
+# ~200 tokens, so a whole plan's previews still leave the model room to answer.
 DEFAULT_PREVIEW_LIMIT = 800
 
-# UTF-8 is at most 4 bytes per character, so this many bytes always yields `limit`
-# characters when the file has them, whatever the payload size.
+# UTF-8's worst case, so reading `limit * this` bytes always yields `limit` characters.
 _BYTES_PER_CHARACTER = 4
 
 
@@ -37,9 +32,6 @@ class ArtifactStore:
 
     def __init__(self, root: Path) -> None:
         """Create the store, making `root` if it does not exist.
-
-        Args:
-            root: absolute directory to write into, from `Config.artifact_dir`.
 
         Raises:
             ConfigError: `root` is unusable — at construction, so `app.py` surfaces a bad
@@ -90,22 +82,12 @@ class ArtifactStore:
     def preview(self, pointer: str, *, limit: int = DEFAULT_PREVIEW_LIMIT) -> str:
         """A compact, prompt-safe rendering of the payload behind `pointer`.
 
-        The aggregator (#8) is shown previews, never payloads — a report over five
-        artifacts would otherwise put five whole files into one prompt. Only the head of
-        the file is read, so a large artifact costs what a small one does.
+        The aggregator (#8) sees previews, never payloads. Only the head is read, so a
+        large artifact costs what a small one does. Binary is described rather than
+        decoded — `errors="replace"` would spend tokens on a screenful of U+FFFD.
 
-        Undecodable payloads are described, not decoded: `errors="replace"` turns a PNG
-        into a screenful of U+FFFD that costs tokens and says nothing, where the size and
-        the fact that it is binary are the whole informative content.
-
-        Args:
-            pointer: the artifact to preview.
-            limit: how many characters of text to keep before eliding.
-
-        Returns:
-            The whole payload when it is short text, the first `limit` characters plus an
-            elision marker naming the omitted bytes when it is longer, or
-            `<binary, N bytes>` when it is not UTF-8 text.
+        Returns the whole payload when it is short text, the first `limit` characters
+        plus an elision marker otherwise, or `<binary, N bytes>`.
 
         Raises:
             TaskFailure: the pointer is malformed or names nothing.
@@ -116,9 +98,8 @@ class ArtifactStore:
             with path.open("rb") as handle:
                 head = handle.read(limit * _BYTES_PER_CHARACTER)
 
-        # Incremental, so a multi-byte character straddling the end of the read is held
-        # back instead of reported as a decode error — otherwise a long UTF-8 document
-        # would be called binary whenever the cut landed mid-character.
+        # Incremental, so a character straddling the end of the read is held back rather
+        # than reported as a decode error and mislabelled binary.
         decoder = codecs.getincrementaldecoder("utf-8")()
         try:
             text = decoder.decode(head, len(head) == size)
@@ -128,8 +109,8 @@ class ArtifactStore:
         if len(head) == size and len(text) <= limit:
             return text
         kept = text[:limit]
-        # In bytes against the file's own size: a character count needs the whole file
-        # decoded, which is the read this method exists to avoid.
+        # In bytes: a character count would need the whole file decoded, which is the
+        # read this method exists to avoid.
         omitted = size - len(kept.encode("utf-8"))
         return f"{kept}\n... [elided, {omitted} more bytes]"
 
@@ -146,9 +127,8 @@ class ArtifactStore:
 
         Raises:
             TaskFailure: malformed pointer or missing file — the run has lost data it
-                claims to hold, so it ends (exit 5) rather than yielding an empty payload.
-                Tools convert this to `ToolResponse(is_error=True)` at their own boundary
-                (§6); the store does not know it is being called by one.
+                claims to hold, so it ends (exit 5). Tools convert this to
+                `ToolResponse(is_error=True)` at their own boundary (§6).
         """
         if not pointer.startswith(ARTIFACT_PREFIX):
             raise TaskFailure(f"Not an artifact pointer: {pointer!r}")
@@ -160,9 +140,8 @@ class ArtifactStore:
     def _reserve(self, name: str) -> Path:
         """Atomically claim the first unused of `name`, `name-1`, `name-2`, …
 
-        `touch(exist_ok=False)` is `O_CREAT|O_EXCL`, so the check and the claim are one
-        syscall. An `exists()` test would let two threads — the engine dispatches
-        subtasks concurrently — pick the same name and lose a payload.
+        `touch(exist_ok=False)` is `O_CREAT|O_EXCL`, so check and claim are one syscall.
+        An `exists()` test would let two concurrent subtasks pick the same name.
         """
         safe = _safe_name(name)
         stem, suffix = Path(safe).stem, Path(safe).suffix
@@ -182,12 +161,9 @@ class ArtifactStore:
 def _safe_name(name: str) -> str:
     """Check a name against the allow-list in `core/state.py`.
 
-    Names come from model output, so this is a trust boundary. The pattern admits no
-    separator, colon, leading dot or control character, so `root / name` cannot leave
-    `root` — containment is a property of the name, not a second check that could drift.
-
-    Raises:
-        TaskFailure: not a valid artifact name.
+    A trust boundary: names come from model output. The pattern admits no separator,
+    colon, leading dot or control character, so containment in `root` is a property of
+    the name rather than a second check that could drift.
     """
     if not re.fullmatch(ARTIFACT_NAME_PATTERN, name):
         raise TaskFailure(f"Unsafe artifact name: {name!r}")
