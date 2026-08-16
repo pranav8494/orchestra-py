@@ -5,10 +5,9 @@ uv run pytest -m live -k aggregation    # needs ANTHROPIC_API_KEY; costs one who
 ```
 
 `test_app.py::test_run_once_reports_a_computed_figure_and_its_chart_in_both_output_shapes`
-is the fake-provider twin; this proves the same contract against the real model, where the
-figures are whatever it chose to state. Config is read at import, before
-`conftest._isolated_env` cuts the environment off, and via `load_config()` rather than
-`os.environ` (§6).
+is the fake-provider twin; here the figures are whatever the real model chose to state.
+Config is read at import, before `conftest._isolated_env` cuts the environment off, and via
+`load_config()` rather than `os.environ` (§6).
 """
 
 import json
@@ -35,18 +34,16 @@ pytestmark = [
     pytest.mark.skipif(CONFIG is None, reason="the live report run needs ANTHROPIC_API_KEY"),
 ]
 
-# A model writes "$1.2M" for 1,153,000, so a substring assertion would be flaky. Both sides
-# are read as numbers instead, and compared at the precision the figure was written to.
-# The leading guard drops a digit that follows a letter, so the "3" of "2024Q3" is a label
-# rather than a number a figure may claim to have computed.
+# A model writes "$1.2M" for 1,153,000, so a substring assertion would be flaky: both sides
+# are read as numbers and compared at the precision the figure was written to. The leading
+# guard drops a digit following a letter, so the "3" of "2024Q3" stays a label.
 _NUMBER = re.compile(
     r"(?<![A-Za-z\d])(\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)\s*(%|bn|[KMB])?", re.IGNORECASE
 )
 _SCALE = {"k": 1e3, "m": 1e6, "b": 1e9, "bn": 1e9}
 
-# A percentage stated in points against an artifact holding the fraction, or the reverse.
-# The only rescaling allowed: without it 23.4% would not meet 0.2343, and with anything
-# looser "$5.76B" would meet 5,760,000.
+# Points against a fraction, or the reverse — the only rescaling allowed. Without it 23.4%
+# would not meet 0.2343; with anything looser "$5.76B" would meet 5,760,000.
 _FACTORS = (1.0, 100.0, 0.01)
 
 
@@ -58,8 +55,7 @@ async def test_the_report_cites_this_run_s_own_numbers_and_chart(
     artifact this run minted, its number is in that artifact, the chart pointer opens a
     file on disk, and `--output json` carries all of it.
 
-    `run_once` releases the provider in its own `finally`, so there is no second provider
-    to `aclosing` here as in the planner scenarios.
+    `run_once` releases the provider in its own `finally`, so nothing to `aclosing` here.
     """
     _export_settings(monkeypatch, tmp_path)
 
@@ -93,25 +89,25 @@ async def test_the_report_cites_this_run_s_own_numbers_and_chart(
     assert document["report"]["chart_ascii"] == report.chart_ascii
 
     # This prompt asks for a chart, so a plan without one is a planner defect, not a
-    # variation to skip past — and the last step is the one the aggregator read.
+    # variation to skip past. The last visualization step is the one the aggregator read.
     assert state.plan is not None
     assert_plan_shape(state.plan, LINEAR.shape)
     step = with_role(state.plan, AgentRole.VISUALIZATION)[-1]
     assert step.status is SubtaskStatus.DONE, f"{step.id!r} ended {step.status}, so it drew nothing"
     assert report.chart is not None, "the visualization step ran but the report names no chart"
-    # `artifact_path`, not `store.path_for`: the pure composer, which reports the missing
-    # file as a failed assertion rather than raising before the assertion is reached.
+    # `artifact_path`, not `store.path_for`: the store raises on a missing file, so that
+    # assertion could only ever raise, never fail.
     assert "<html" in artifact_path(state.artifact_dir, report.chart).read_text()
     assert report.chart_ascii, "nothing for the terminal to print"
 
 
 def _export_settings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Put the import-time config back in the environment for `run_once`'s own
-    `load_config()`, which `_isolated_env` has just stripped.
+    """Put the import-time config back for `run_once`'s own `load_config()`, which
+    `_isolated_env` has just stripped.
 
-    `TAVILY_API_KEY` stays unset: retrieval then reads the bundled corpus, so the run costs
-    one provider's worth and no third-party call (§12). The run bounds are left at their
-    defaults too — a `.env` that lowered them to cap cost would otherwise make this flaky.
+    `TAVILY_API_KEY` stays unset so retrieval reads the bundled corpus — one provider's
+    worth, no third-party call (§12). Run bounds stay at their defaults: a `.env` that
+    lowered them to cap cost would make this flaky.
     """
     assert CONFIG is not None  # guaranteed by the skipif; narrows the type for mypy
     monkeypatch.setenv("ANTHROPIC_API_KEY", CONFIG.anthropic_api_key.get_secret_value())
@@ -125,7 +121,7 @@ def _export_settings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
 def _traces_to(value: str, payload: str) -> bool:
     """Does `payload` hold every number `value` states?
 
-    Every, not any: a figure pairing one real number with one invented one is exactly the
+    Every, not any: a figure pairing one real number with an invented one is the
     hallucination this asserts against.
     """
     stated = _numbers(value)
@@ -138,9 +134,8 @@ def _traces_to(value: str, payload: str) -> bool:
 def _numbers(text: str) -> list[tuple[float, float]]:
     """Every number in `text` with the tolerance its own precision allows.
 
-    "$1.2M" is 1,200,000 give or take 50,000, so it meets 1,153,000; "$1.15M" is the same
-    number to 5,000, so it does not meet 1,100,000. Writing a figure more precisely is
-    claiming more, and this holds it to the claim.
+    "$1.2M" is 1,200,000 give or take 50,000, so it meets 1,153,000; "$1.15M" holds to
+    5,000 and does not. Writing a figure more precisely claims more.
     """
     numbers = []
     for match in _NUMBER.finditer(text):

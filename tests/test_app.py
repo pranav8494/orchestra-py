@@ -70,8 +70,8 @@ CHART_STEP = next(
 )
 # One category of `_chart_draft`'s spec, so the assertion tracks the fixture.
 CHART_CATEGORY = "2025Q3"
-# What `_turns` asks for and `_ANALYSIS_CODE` then counts, so the fixture figure is the
-# number the run computes rather than one invented here.
+# What `_turns` asks for and `_ANALYSIS_CODE` counts, so the fixture figure is one the run
+# computes rather than one invented here.
 QUARTERS_ANALYSED = 3
 
 
@@ -495,8 +495,8 @@ async def test_run_once_reports_a_computed_figure_and_its_chart_in_both_output_s
     """#8's criterion end to end: the report cites a number the analytics subprocess really
     printed, sourced to the pointer that step minted, and both shapes carry it.
 
-    The number is checked against the analysis artifact rather than a literal, so the day
-    the step stops computing it this fails instead of passing on the fixture.
+    Checked against the analysis artifact rather than a literal, so this fails the day the
+    step stops computing it instead of passing on the fixture.
     """
     provider = FakeProvider(
         responses=_responses(figure_source=ANALYSIS_POINTER, chart=True), turns=_turns()
@@ -512,7 +512,6 @@ async def test_run_once_reports_a_computed_figure_and_its_chart_in_both_output_s
     # Survived the aggregator's backing filter, citing a pointer this run actually minted.
     (figure,) = report.key_figures
     assert figure.source == state.artifacts[ANALYSIS_STEP]
-    # And the value is in the artifact it cites, beside what the script called it.
     assert f"quarters analysed: {figure.value}" in store.get_text(figure.source)
     assert report.chart is not None
     # `artifact_path`, not `store.path_for`: the store raises on a missing file, so that
