@@ -235,15 +235,16 @@ def test_run_quiet_omits_the_step_lines_and_keeps_the_report(
 
 
 def _force_terminal(monkeypatch: pytest.MonkeyPatch, *, value: bool) -> None:
-    """Pretend stderr is (or is not) a tty.
+    """Pretend stderr is (or is not) a tty. `CliRunner` otherwise always reports a pipe,
+    which would leave the `LIVE` arm — the one the ticket is about — unreachable.
 
-    `is_terminal` is a property, so it is patched on the class and restored by
-    monkeypatch; `CliRunner` otherwise always reports a pipe, which would leave the
-    `LIVE` arm — the one the ticket is actually about — unreachable from a test.
+    Rich reads `_force_terminal` first in its `is_terminal` property, so setting it on
+    the *instance* is enough. Patching `is_terminal` on the class would be the obvious
+    move and is wrong: `console` and `err_console` are both `rich.console.Console`, so it
+    flips stdout's tty-ness too, and these tests would then pass just as well against a
+    `_render_mode` that consulted the wrong stream.
     """
-    monkeypatch.setattr(
-        type(err_console), "is_terminal", property(lambda _self: value), raising=True
-    )
+    monkeypatch.setattr(err_console, "_force_terminal", value, raising=False)
 
 
 def test_run_on_a_terminal_asks_for_the_live_dashboard(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -265,6 +266,27 @@ def test_run_piped_falls_back_to_plain_lines(monkeypatch: pytest.MonkeyPatch) ->
 
     assert result.exit_code == ExitCode.SUCCESS
     assert _requested_mode(observers) is RenderMode.PLAIN
+
+
+def test_run_with_stdout_redirected_still_draws_live_on_a_tty_stderr(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`orchestra run x > report.txt`: stdout is a file, stderr is still the terminal.
+
+    The whole reason progress and results are split across two streams (§5) — so the
+    mode has to follow stderr, and the report's framing has to follow stdout. Pins which
+    console each decision reads; without it both could consult the same one.
+    """
+    observers = _stub_run_once(monkeypatch, _finished_state(SubtaskStatus.DONE))
+    _force_terminal(monkeypatch, value=True)  # stderr only; `console` stays a pipe
+
+    result = runner.invoke(app, ["run", PROMPT], prog_name=PROG)
+
+    assert result.exit_code == ExitCode.SUCCESS
+    assert _requested_mode(observers) is RenderMode.LIVE
+    # Unframed, because stdout is the redirected one — a panel's box would land in the file.
+    assert SUMMARY in result.stdout
+    assert "╭" not in result.stdout
 
 
 def test_run_quiet_asks_for_no_dashboard_at_all(monkeypatch: pytest.MonkeyPatch) -> None:

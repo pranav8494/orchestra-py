@@ -138,6 +138,13 @@ class TaskEvent(BaseModel):
     live state through an event it was handed as history. Every other event leaves it
     `None`, and the ledger's own entries never carry one: `ExecutionEngine._emit`
     appends without it, so `TaskState.events` stays free of plan copies.
+
+    The copy protects subscribers from the *engine*, not from each other: `Plan` and
+    `Subtask` are mutable, and the broker fans one event object out to everyone, so a
+    subscriber that wrote to `event.plan` would be writing to every other subscriber's
+    copy. Nothing does — `cli/render.py` reads it into frozen rows — and with the
+    dashboard as the only subscriber it is unreachable today. Worth knowing before
+    adding a second one.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)

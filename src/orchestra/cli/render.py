@@ -25,7 +25,7 @@ decision — this module holds no policy about flags.
 
 import asyncio
 from collections.abc import AsyncIterator, Callable, Mapping
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 
@@ -188,7 +188,7 @@ def run_table(view: RunView) -> Table:
         table.add_row(
             Text(row.id),
             Text(row.role.value),
-            Text(row.status.value, style=_STATUS_STYLES[row.status]),
+            Text(row.status.value, style=_STATUS_STYLES.get(row.status, "")),
             Text(row.detail),
         )
     return table
@@ -301,27 +301,51 @@ async def dashboard(broker: Broker[TaskEvent], *, mode: RenderMode) -> AsyncIter
 
     # Set by the consumer once its queue is attached. Without it, `plan_created` — the
     # only event carrying the plan, and so the only way to draw the pending rows — races
-    # the task's first scheduling and is lost about as often as not. Nothing between
-    # `create_task` and `set()` can fail (subscribing appends to a list), so this wait
-    # cannot deadlock on a consumer that died before setting it.
+    # the task's first scheduling and is lost about as often as not.
     subscribed = asyncio.Event()
     consumer = asyncio.create_task(
         _consume(broker, view, mode, subscribed), name=DASHBOARD_TASK_NAME
     )
     try:
-        await subscribed.wait()
+        # Raced against the consumer rather than awaited outright: a consumer that died
+        # before subscribing would otherwise leave this waiting for an event nobody will
+        # ever set, hanging the run before it starts. Nothing on that path can raise
+        # today — subscribing appends to a list — but the cost of being wrong is a hang,
+        # and the guard is one call.
+        waiter = asyncio.ensure_future(subscribed.wait())
+        try:
+            await asyncio.wait({waiter, consumer}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            waiter.cancel()
         yield view
     finally:
         consumer.cancel()
-        try:
-            await consumer
-        except asyncio.CancelledError:
-            # Ours: the consumer has unwound, and whatever the body raised — including
-            # the `CancelledError` that brought us here — is still propagating. Anything
-            # else means the caller is being cancelled through this teardown, which must
-            # not be swallowed (§10).
-            if not consumer.cancelled():
-                raise
+        # `asyncio.wait`, never `await consumer`. Awaiting the task directly conflates
+        # two different cancellations and re-raises a third thing:
+        #
+        #   * Ours. `await consumer` raises the `CancelledError` we just asked for, and
+        #     telling it apart from a real one is not possible from the consumer's state:
+        #     when the caller is cancelled *while suspended here*, asyncio delivers that
+        #     by cancelling the future being awaited — the consumer — so the consumer ends
+        #     up `cancelled()` either way. A guard on `consumer.cancelled()` therefore
+        #     reads a genuine Ctrl-C as its own teardown and swallows it, and the run
+        #     exits 0 instead of 130 (§8, §10).
+        #   * The consumer's own failure. `await` re-raises it, so a broken *diagnostic*
+        #     stream — `BrokenPipeError` from `orchestra run ... | head -1` — would
+        #     replace the run's result on stdout and its exit code, or mask the error the
+        #     body was already raising. Progress must never cost the result (§5).
+        #
+        # `asyncio.wait` raises only if *we* are cancelled, which is exactly the one case
+        # that must propagate. The consumer's outcome is then read deliberately below.
+        await asyncio.wait({consumer})
+        if not consumer.cancelled() and (failure := consumer.exception()) is not None:
+            # Reported, not swallowed (§8) — but on a best-effort basis: the usual reason
+            # the renderer died is that this very stream is gone, and a second write
+            # would raise from the teardown all over again.
+            with suppress(OSError):
+                err_console.print(
+                    f"The dashboard stopped: {failure}", markup=False, highlight=False
+                )
 
 
 async def _consume(

@@ -16,8 +16,6 @@ un-exited `Live` region corrupts the user's shell, §8).
 
 import asyncio
 import functools
-from collections.abc import Callable
-from contextlib import AbstractAsyncContextManager
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -28,7 +26,9 @@ from rich.table import Table
 from orchestra.agents.engine import ExecutionEngine
 from orchestra.agents.workers.base import Worker
 from orchestra.agents.workers.stub import EchoWorker
+from orchestra.app import RunObserver
 from orchestra.artifacts import ArtifactStore
+from orchestra.cli import render
 from orchestra.cli.console import console
 from orchestra.cli.format import OutputFormat
 from orchestra.cli.render import (
@@ -58,13 +58,12 @@ PROMPT = "Summarize the last 3 quarters' financial trends"
 SUMMARY = "Revenue grew in each of the last three quarters."
 
 if TYPE_CHECKING:
-    # The shape `app.run_once(prompt, observer=...)` requires, checked by mypy rather
-    # than at runtime. Written against `AbstractAsyncContextManager[object]`, not
-    # `app.RunObserver`: that alias yields `None` today, and the type is covariant, so a
-    # dashboard yielding its view does not satisfy it until the alias is widened.
-    _OBSERVER_CHECK: Callable[[Broker[TaskEvent]], AbstractAsyncContextManager[object]] = (
-        functools.partial(dashboard, mode=RenderMode.LIVE)
-    )
+    # `dashboard` has to satisfy the observer seam `app.run_once(prompt, observer=...)`
+    # takes. Checked by mypy rather than at runtime, and annotated with the alias itself
+    # so narrowing `RunObserver` — back to `AbstractAsyncContextManager[None]`, say,
+    # which the covariant yield type would make reject every real dashboard — fails here
+    # rather than at the call site.
+    _OBSERVER_CHECK: RunObserver = functools.partial(dashboard, mode=RenderMode.LIVE)
 
 
 def _plan() -> Plan:
@@ -484,6 +483,89 @@ async def test_dashboard_body_failure_still_tears_the_consumer_down() -> None:
 
     assert broker.subscriber_count == 0
     assert _pending_tasks() == []
+
+
+@pytest.mark.parametrize("mode", [RenderMode.PLAIN, RenderMode.LIVE])
+@pytest.mark.asyncio
+async def test_dashboard_cancelled_during_teardown_still_propagates(mode: RenderMode) -> None:
+    """Regression: Ctrl-C arriving while teardown awaited the consumer was swallowed.
+
+    Teardown cancels the consumer and waits for it. If the caller is cancelled *while
+    suspended there*, asyncio delivers that by cancelling the future being awaited — the
+    consumer — so the consumer ends up `cancelled()` on both paths and no guard reading
+    its state can tell them apart. The run then returned a `TaskState` for a cancelled
+    run and the CLI exited 0 instead of 130 (§8, §10).
+
+    Swept across scheduling passes rather than pinned to one: the window is a couple of
+    passes wide and moves with the mode, so the assertion is that *no* pass swallows.
+    """
+
+    async def run_to_completion() -> str:
+        async with dashboard(Broker[TaskEvent](), mode=mode):
+            pass  # the body returns, so teardown is where the cancellation lands
+        return "returned normally"
+
+    cancelled_while_live = 0
+    for passes in range(40):
+        task = asyncio.ensure_future(run_to_completion())
+        for _ in range(passes):
+            await asyncio.sleep(0)
+        if task.done() or not task.cancel():
+            continue  # never got a genuine in-flight cancellation on this pass
+        cancelled_while_live += 1
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    # The sweep has to have actually hit the window, or the test asserts nothing.
+    assert cancelled_while_live > 0
+
+
+@pytest.mark.asyncio
+async def test_dashboard_sink_failure_costs_the_diagnostic_not_the_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: a dying renderer replaced the run's result and its exit code.
+
+    `orchestra run ... | head -1` closes stderr under the plain sink, so the write raises
+    `BrokenPipeError`. Teardown re-raised it, and a wholly successful run came back as
+    exit 1 with nothing on stdout. Progress is a diagnostic; §5 does not let it cost the
+    result.
+    """
+
+    def broken_sink(_event: TaskEvent) -> None:
+        raise BrokenPipeError("stderr closed")
+
+    monkeypatch.setattr(render, "_write_line", broken_sink)
+    broker: Broker[TaskEvent] = Broker()
+
+    async with dashboard(broker, mode=RenderMode.PLAIN):
+        await broker.publish_lifecycle(_plan_created())
+        await asyncio.sleep(0)  # let the consumer pick it up and die on the write
+        outcome = "the run still produced its result"
+
+    assert outcome == "the run still produced its result"
+    assert broker.subscriber_count == 0  # and it still detached
+    assert _pending_tasks() == []
+
+
+@pytest.mark.asyncio
+async def test_dashboard_sink_failure_does_not_mask_the_body_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other half: when the run failed *and* the renderer died, the CLI must report
+    why the run failed, not what went wrong drawing it."""
+
+    def broken_sink(_event: TaskEvent) -> None:
+        raise BrokenPipeError("stderr closed")
+
+    monkeypatch.setattr(render, "_write_line", broken_sink)
+    broker: Broker[TaskEvent] = Broker()
+
+    with pytest.raises(RuntimeError, match="planner failed"):
+        async with dashboard(broker, mode=RenderMode.PLAIN):
+            await broker.publish_lifecycle(_plan_created())
+            await asyncio.sleep(0)
+            raise RuntimeError("planner failed")
 
 
 # --------------------------------------------------------------------------
