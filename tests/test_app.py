@@ -7,24 +7,35 @@ them into a report, and the ledger comes back with pointers to every one of them
 
 Two model calls per run, in order: the plan, then the report. `_responses()` queues both,
 so a test that forgets one gets `FakeProvider`'s "no queued response" rather than a hang.
+
+`run_once` is tested through its own wiring: only the vendor adapter is substituted, at
+the provider port, so what the observer contract (#11) is asserted against is the real
+composition root and not a stand-in for it.
 """
 
+import asyncio
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
 from pydantic import BaseModel, SecretStr
 
 from conftest import FakeProvider
+from orchestra import app as app_module
 from orchestra.agents.aggregator import Aggregator, FigureDraft, ReportDraft
 from orchestra.agents.engine import DEFAULT_STEP_CAP, ExecutionEngine
 from orchestra.agents.planner import Planner
 from orchestra.agents.workers.base import Worker
 from orchestra.agents.workers.stub import EchoWorker
-from orchestra.app import Orchestra, build_orchestra
+from orchestra.app import Orchestra, build_orchestra, run_once
 from orchestra.artifacts import ArtifactStore
 from orchestra.config import Config
+from orchestra.core.errors import ProviderError
 from orchestra.core.events import Broker
 from orchestra.core.state import AgentRole, EventKind, SubtaskStatus, TaskEvent
+from orchestra.providers.base import Provider
 from scenarios import LINEAR
 
 SUMMARY = "Revenue grew in each of the last three quarters."
@@ -146,3 +157,134 @@ async def test_build_orchestra_wires_the_app_from_config_without_touching_the_ne
         assert orchestra.broker.subscriber_count == 0
     finally:
         await orchestra.aclose()
+
+
+# --------------------------------------------------------------------------
+# `run_once` and its observer: the seam the dashboard attaches to (#11).
+# --------------------------------------------------------------------------
+
+
+@dataclass
+class RecordingObserver:
+    """A `RunObserver` standing in for `cli/render.py`: subscribes on enter, keeps what
+    came through, and counts both edges so a test can assert the run happened between
+    them. Nothing here draws — §12 asserts on the data handed to the renderer."""
+
+    entered: int = 0
+    exited: int = 0
+    events: list[TaskEvent] = field(default_factory=list)
+
+    @asynccontextmanager
+    async def __call__(self, broker: Broker[TaskEvent]) -> AsyncIterator[None]:
+        """Stay subscribed for the run. See `orchestra.app.RunObserver`."""
+        async with broker.subscribe() as queue:
+            self.entered += 1
+            try:
+                yield
+            finally:
+                # Drained on the way out rather than by a reader task: the queue outlives
+                # the run either way, and what is being asserted is which events reached
+                # a subscriber attached this early — one attached late is simply missing
+                # the first. Also runs on cancellation, which is the point (§10).
+                self.events.extend(queue.get_nowait() for _ in range(queue.qsize()))
+                self.exited += 1
+
+
+def _offline_run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, provider: FakeProvider) -> None:
+    """Let `run_once` load its own config and wire its own services, with the vendor
+    adapter swapped at the provider port — the one seam, so no network (§12)."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setenv("ARTIFACT_DIR", str(tmp_path / "artifacts"))
+
+    def _create_provider(*, api_key: SecretStr, model: str) -> Provider:
+        return provider
+
+    monkeypatch.setattr(app_module, "create_provider", _create_provider)
+
+
+async def _wait_until(predicate: Callable[[], bool], *, what: str) -> None:
+    """Yield to the loop until `predicate` holds. Bounded, so a run that never gets
+    there fails the test instead of hanging it.
+
+    Deliberately a copy of `test_engine._wait_until` (§2.3): hoisting a two-caller
+    helper into `conftest.py` couples the two modules' timing conventions before there
+    is a third to show what varies.
+    """
+    for _ in range(1000):
+        if predicate():
+            return
+        await asyncio.sleep(0)
+    raise AssertionError(f"timed out waiting for {what}")
+
+
+@pytest.mark.asyncio
+async def test_run_once_keeps_the_observer_attached_from_the_first_event_to_the_last(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The dashboard has to be subscribed *before* the run publishes anything: the plan
+    rides on the first event, and an observer entered late never learns the pending rows."""
+    provider = FakeProvider(responses=_responses())
+    _offline_run(monkeypatch, tmp_path, provider)
+    observer = RecordingObserver()
+
+    state = await run_once(LINEAR.prompt, observer=observer)
+
+    assert (observer.entered, observer.exited) == (1, 1)
+    kinds = [event.kind for event in observer.events]
+    assert kinds[0] is EventKind.PLAN_CREATED  # nothing was published before it attached
+    assert observer.events[0].plan is not None
+    assert kinds[-1] is EventKind.RUN_FINISHED  # and it was still attached at the end
+    assert state.final_result is not None
+    assert provider.closed
+
+
+@pytest.mark.asyncio
+async def test_run_once_without_an_observer_runs_headless(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The default path `cli/app.py` takes today: no subscriber, same ledger."""
+    provider = FakeProvider(responses=_responses())
+    _offline_run(monkeypatch, tmp_path, provider)
+
+    state = await run_once(LINEAR.prompt)
+
+    assert state.final_result is not None
+    assert not state.failed
+    assert provider.closed
+
+
+@pytest.mark.asyncio
+async def test_run_once_exits_the_observer_when_the_run_raises(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A provider failure while planning: `Live` must not be left owning the terminal (§5)."""
+    provider = FakeProvider(responses=[ProviderError("The provider is unavailable.")])
+    _offline_run(monkeypatch, tmp_path, provider)
+    observer = RecordingObserver()
+
+    with pytest.raises(ProviderError):
+        await run_once(LINEAR.prompt, observer=observer)
+
+    assert (observer.entered, observer.exited) == (1, 1)
+    assert provider.closed
+
+
+@pytest.mark.asyncio
+async def test_run_once_cancellation_exits_the_observer_and_closes_the_provider(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Ctrl-C's path (§10): the observer is torn down, the provider released, and the
+    cancellation re-raised rather than swallowed into a ledger nobody asked for."""
+    provider = FakeProvider(responses=_responses(), blocker=asyncio.Event())  # never set
+    _offline_run(monkeypatch, tmp_path, provider)
+    observer = RecordingObserver()
+
+    run = asyncio.create_task(run_once(LINEAR.prompt, observer=observer))
+    await _wait_until(lambda: bool(provider.calls), what="the run to reach the provider")
+
+    run.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await run
+
+    assert (observer.entered, observer.exited) == (1, 1)
+    assert provider.closed
