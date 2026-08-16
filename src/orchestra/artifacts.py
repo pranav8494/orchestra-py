@@ -15,7 +15,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from orchestra.core.errors import ConfigError, TaskFailure
-from orchestra.core.state import ARTIFACT_NAME_PATTERN, ARTIFACT_PREFIX
+from orchestra.core.state import ARTIFACT_NAME_PATTERN, ARTIFACT_PREFIX, artifact_path
 
 # ~200 tokens, so a whole plan's previews still leave the model room to answer.
 DEFAULT_PREVIEW_LIMIT = 800
@@ -132,7 +132,10 @@ class ArtifactStore:
         """
         if not pointer.startswith(ARTIFACT_PREFIX):
             raise TaskFailure(f"Not an artifact pointer: {pointer!r}")
-        path = self._root / _safe_name(pointer.removeprefix(ARTIFACT_PREFIX))
+        # Reassembled from the checked name rather than composed from the caller's string:
+        # `_safe_name` is what keeps the result inside `root`, so no path may skip it.
+        checked = ARTIFACT_PREFIX + _safe_name(pointer.removeprefix(ARTIFACT_PREFIX))
+        path = artifact_path(self._root, checked)
         if not path.is_file():
             raise TaskFailure(f"Artifact not found: {pointer!r}")
         return path
