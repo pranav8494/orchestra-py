@@ -32,10 +32,6 @@ concatenate as the subtask needs.
 
 How to work:
 
-- Only what your script prints comes back. Print labelled numbers, compactly: \
-"2025Q4 revenue growth: +10.7% QoQ" is an answer, a dumped DataFrame is not.
-- A script that raises returns you its traceback. Read it and fix the code; do not run \
-the same script again unchanged.
 - Never state a figure your script did not compute. If the data cannot support the \
 figure the subtask asks for, say plainly what is missing.
 - You have only a few turns. Do the whole computation in as few scripts as you can, and \

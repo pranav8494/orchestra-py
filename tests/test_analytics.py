@@ -8,9 +8,9 @@ Two tests run the real `RunPythonTool` against a real store, because the accepta
 criterion is arithmetic and not plumbing: one seeds the committed dataset as a
 `RetrievedDataset` and checks the quarter-over-quarter figure the script prints against
 the same rows, the other lets a script raise and watches the agent correct itself. The
-rest use a fake tool — a test that also started an interpreter could not say which half
-broke. Bounds, the turn cap, warnings and unknown tool names belong to the shared loop
-and are covered in `test_tool_loop.py`.
+rest use `conftest.FakeTool` — a test that also started an interpreter could not say
+which half broke. Bounds, the turn cap, warnings and unknown tool names belong to the
+shared loop and are covered in `test_tool_loop.py`.
 """
 
 import asyncio
@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import FakeProvider
+from conftest import FakeProvider, FakeTool
 from orchestra.agents.toolsets import FINANCIALS_CSV, analytics_tools
 from orchestra.agents.workers.analytics import AnalysisResult, AnalyticsWorker
 from orchestra.agents.workers.data_retrieval import RetrievedDataset, RetrievedTable
@@ -31,7 +31,7 @@ from orchestra.core.errors import TaskFailure
 from orchestra.core.events import Broker
 from orchestra.core.state import AgentRole, Subtask, SubtaskContext, TaskEvent, TaskState
 from orchestra.providers.base import AssistantTurn
-from orchestra.tools.base import BaseTool, ToolCall, ToolResponse, ToolSpec
+from orchestra.tools.base import BaseTool, ToolCall, ToolResponse
 from orchestra.tools.python_exec import TOOL_NAME as RUN_PYTHON_TOOL
 
 REQUEST = "Summarize the last 3 quarters' financial trends"
@@ -55,30 +55,31 @@ latest = rows.iloc[-1]
 print(f"{{latest['quarter']}} revenue growth: {{latest['growth']:.2f}}% QoQ")
 """
 
+# The other half of a two-script step: the prompt invites the agent to split the work,
+# and this is what the second script looks like — load, clean, derive, print. Its length
+# is not padding, which is the whole point of the preview test below: JSON-escaped, one
+# script of this shape is longer than everything the aggregator is ever shown.
+LEVELS_SCRIPT = f"""\
+import io
+import json
 
-class FakeTool:
-    """A `BaseTool` that answers from a queue and records what it was called with."""
+import pandas as pd
 
-    def __init__(self, name: str, responses: list[ToolResponse]) -> None:
-        self._name = name
-        self._responses = responses
-        self.calls: list[ToolCall] = []
-
-    def info(self) -> ToolSpec:
-        return ToolSpec(
-            name=self._name,
-            description=f"fake {self._name}",
-            input_schema={"type": "object", "properties": {}},
-        )
-
-    async def run(self, call: ToolCall) -> ToolResponse:
-        self.calls.append(call)
-        if not self._responses:
-            raise AssertionError(f"FakeTool {self._name!r} has no queued response")
-        return self._responses.pop(0)
-
-
-_PROTOCOL_CHECK: BaseTool = FakeTool("x", [])
+data = json.load(open("./{UPSTREAM}.json"))
+frames = [pd.read_csv(io.StringIO(table["csv"])) for table in data["datasets"]]
+rows = pd.concat(frames, ignore_index=True)
+rows["quarter"] = rows["quarter"].astype(str).str.strip()
+rows = rows.drop_duplicates(subset="quarter").sort_values("quarter")
+revenue = pd.to_numeric(rows["revenue"], errors="coerce").dropna()
+costs = pd.to_numeric(rows["costs"], errors="coerce").dropna()
+margin = (revenue - costs) / revenue * 100
+growth = (revenue / revenue.shift(1) - 1) * 100
+by_year = revenue.groupby(rows["quarter"].str[:4]).sum()
+print(f"mean quarterly revenue: {{revenue.mean():.0f}}")
+print(f"mean quarterly margin: {{margin.mean():.1f}}%")
+print(f"mean quarterly growth: {{growth.mean():.2f}}%")
+print(f"strongest year: {{by_year.idxmax()}} at {{by_year.max():.0f}}")
+"""
 
 
 def _context(*, inputs: dict[str, str] | None = None, **overrides: object) -> SubtaskContext:
@@ -149,7 +150,8 @@ async def test_worker_stores_the_analysis_and_returns_its_pointer(tmp_path: Path
 
     assert pointer == "artifact:analyse_trends.json"
     analysis = _stored(store, pointer)
-    assert [item.stdout for item in analysis.computations] == ["2025Q4 growth: 10.65%"]
+    assert analysis.figures == ["2025Q4 growth: 10.65%"]
+    assert [item.stdout for item in analysis.computations] == analysis.figures
     assert analysis.computations[0].code == "print(1 + 1)"
     assert analysis.summary == "Revenue grew 10.6% quarter over quarter."
     assert analysis.instruction == "Compute quarter-over-quarter revenue growth"
@@ -261,31 +263,38 @@ async def test_worker_that_computed_nothing_fails_the_subtask(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
-async def test_worker_puts_the_figures_ahead_of_the_code_in_the_preview(tmp_path: Path) -> None:
+async def test_worker_puts_every_figure_ahead_of_every_script_in_the_preview(
+    tmp_path: Path,
+) -> None:
     """Field order is the aggregator's budget: it is shown a preview, not the payload.
 
-    A pandas script is longer than the elision limit on its own, so `code` before
-    `stdout` would push every computed number past the cut and the report would be
-    written from a prompt containing none of them.
+    Two computations, because one passes by accident: interleaving the pairs protects the
+    first script's output and nothing else, and the prompt invites two scripts. One real
+    pandas script escapes to more than the whole preview, so any code ahead of a figure
+    is that figure elided — and the report is then written from a prompt that never saw
+    the number it is supposed to name.
     """
-    figure = "2025Q4 revenue growth: 10.65% QoQ"
-    long_script = "\n".join(f"# step {index} of a long derivation" for index in range(60))
-    assert len(long_script) > DEFAULT_PREVIEW_LIMIT
+    figures = ["mean quarterly revenue: 6112500", "2025Q4 revenue growth: 10.65% QoQ"]
+    # One script, escaped, outweighs everything the aggregator is shown: put any code
+    # ahead of a figure and that figure is past the cut.
+    assert len(json.dumps(LEVELS_SCRIPT)) > DEFAULT_PREVIEW_LIMIT
     provider = FakeProvider(
         turns=[
-            AssistantTurn(text="", tool_calls=(_call(long_script),), usage_tokens=20),
+            AssistantTurn(text="", tool_calls=(_call(LEVELS_SCRIPT),), usage_tokens=20),
+            AssistantTurn(text="", tool_calls=(_call(QOQ_SCRIPT, "call-2"),), usage_tokens=20),
             AssistantTurn(text="Growth accelerated into Q4.", usage_tokens=20),
         ]
     )
-    tool = FakeTool(RUN_PYTHON_TOOL, [ToolResponse(content=figure)])
+    tool = FakeTool(RUN_PYTHON_TOOL, [ToolResponse(content=figure) for figure in figures])
     store = ArtifactStore(tmp_path)
 
     pointer = await _worker(provider, store, [tool]).run(_context())
 
     preview = store.preview(pointer)
     assert "Growth accelerated into Q4." in preview
-    assert figure in preview
-    assert "elided" in preview  # the code is what fell off the end, not the numbers
+    for figure in figures:
+        assert figure in preview
+    assert "elided" in preview  # the scripts are what fell off the end, not the numbers
 
 
 @pytest.mark.asyncio

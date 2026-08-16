@@ -1,11 +1,14 @@
-"""Shared test fixtures.
+"""Shared test fixtures and doubles.
 
 `FakeProvider` is the substitute that lets the whole suite run without touching the
 network — the payoff for keeping vendor SDKs behind the provider port. It answers from
 a queue and records what it was asked, so a test asserts on the conversation as well as
-on the result.
+on the result. `FakeTool` is the same idea at the other port: every worker's loop takes
+tools, and a test that also ran a real one could not say which half broke.
 
-See CONVENTIONS.md §12.
+Both live here rather than in the module that first needed them (§3.1): a double imported
+across test modules only resolves because `tests/` is not a package, and the copy that
+avoids that import is the duplication §2 is about.
 """
 
 import asyncio
@@ -18,7 +21,7 @@ import pytest
 from pydantic import BaseModel
 
 from orchestra.providers.base import AssistantTurn, Provider, ProviderMessage, StructuredT
-from orchestra.tools.base import ToolSpec
+from orchestra.tools.base import BaseTool, ToolCall, ToolResponse, ToolSpec
 
 # Every setting `Config` reads. Listed once so a new field cannot silently start
 # leaking the developer's shell into the suite.
@@ -133,7 +136,30 @@ class FakeProvider:
         self.closed = True
 
 
+class FakeTool:
+    """A `BaseTool` that answers from a queue and records what it was called with."""
+
+    def __init__(self, name: str, responses: list[ToolResponse]) -> None:
+        self._name = name
+        self._responses = responses
+        self.calls: list[ToolCall] = []
+
+    def info(self) -> ToolSpec:
+        return ToolSpec(
+            name=self._name,
+            description=f"fake {self._name}",
+            input_schema={"type": "object", "properties": {}},
+        )
+
+    async def run(self, call: ToolCall) -> ToolResponse:
+        self.calls.append(call)
+        if not self._responses:
+            raise AssertionError(f"FakeTool {self._name!r} has no queued response")
+        return self._responses.pop(0)
+
+
 if TYPE_CHECKING:
     # Conformance is checked by mypy, not by `isinstance`: `runtime_checkable` compares
     # attribute names only, so it would pass a fake whose signature had drifted.
     _PROTOCOL_CHECK: Provider = FakeProvider()
+    _TOOL_PROTOCOL_CHECK: BaseTool = FakeTool("x", [])

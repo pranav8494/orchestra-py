@@ -14,9 +14,9 @@ that agent: its executor, its artifact, and what "computed nothing" means.
 the single pointer `Worker.run` returns, as JSON so the aggregator and #7 read it with
 `json.loads` instead of learning a second format.
 
-**stdout leads.** The aggregator sees a *preview* of this file, not the file, so field
-order is a budget: what the run computed goes first, and the code that computed it goes
-last where the elision can take it without costing the report a figure.
+**Every figure leads.** The aggregator sees a *preview* of this file, not the file, so
+field order is a budget: every number the run computed goes first, and the scripts behind
+them go after, where the elision can take them without costing the report a figure.
 """
 
 import asyncio
@@ -56,10 +56,17 @@ class AnalysisResult(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     # Field order is load-bearing, not taste. The aggregator (#8) is shown
-    # `ArtifactStore.preview`, which elides past 800 characters, and a pandas script is
-    # longer than that on its own — with `code` first the computed numbers fall off the
-    # end and never reach the report's prompt. Summary, then figures, then the scripts.
+    # `ArtifactStore.preview`, which elides past 800 characters, and one real pandas
+    # script escapes to more than that on its own — so *every* output goes ahead of *any*
+    # script. Interleaving them is not enough: with the pairs first, the prompt permitting
+    # two scripts is enough for the first script's code to push the second one's figures
+    # past the cut. `figures` is what guarantees the numbers survive; `computations`
+    # repeats them beside the code that produced each one, which is provenance and can be
+    # elided. `instruction` sits last on purpose, unlike `RetrievedDataset`: the
+    # aggregator is handed the plan's instructions already, so re-reading this one costs
+    # the preview a figure and tells it nothing new.
     summary: str
+    figures: list[str] = Field(default_factory=list)
     computations: list[Computation] = Field(default_factory=list)
     instruction: str
 
@@ -131,6 +138,7 @@ class AnalyticsWorker:
 
         analysis = AnalysisResult(
             summary=result.summary,
+            figures=[item.stdout for item in computations],
             computations=computations,
             instruction=context.subtask.instruction,
         )

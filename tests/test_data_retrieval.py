@@ -4,8 +4,9 @@ What is asserted is the contract the engine and the next agent depend on: a poin
 a `RetrievedDataset` behind it, both bounds enforced, tool failures fed back to the
 model rather than raised, and cancellation propagated.
 
-The tools here are fakes. The real ones are exercised in `test_tools.py` — this file is
-about the loop, and a test that also parsed a CSV could not say which half broke.
+The tools here are `conftest.FakeTool`. The real ones are exercised in `test_tools.py` —
+this file is about the loop, and a test that also parsed a CSV could not say which half
+broke.
 """
 
 import asyncio
@@ -15,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import FakeProvider
+from conftest import FakeProvider, FakeTool
 from orchestra.agents.toolsets import QUERY_CSV_TOOL, SEARCH_TOOL
 from orchestra.agents.workers.data_retrieval import (
     DataRetrievalWorker,
@@ -26,35 +27,10 @@ from orchestra.core.errors import TaskFailure
 from orchestra.core.events import Broker
 from orchestra.core.state import AgentRole, EventKind, Subtask, SubtaskContext, TaskEvent, TaskState
 from orchestra.providers.base import AssistantTurn
-from orchestra.tools.base import BaseTool, ToolCall, ToolResponse, ToolSpec
+from orchestra.tools.base import BaseTool, ToolCall, ToolResponse
 
 REQUEST = "Summarize the last 3 quarters' financial trends"
 CSV = "quarter,revenue,costs,profit\n2025Q2,1200,700,500\n"
-
-
-class FakeTool:
-    """A `BaseTool` that answers from a queue and records what it was called with."""
-
-    def __init__(self, name: str, responses: list[ToolResponse]) -> None:
-        self._name = name
-        self._responses = responses
-        self.calls: list[ToolCall] = []
-
-    def info(self) -> ToolSpec:
-        return ToolSpec(
-            name=self._name,
-            description=f"fake {self._name}",
-            input_schema={"type": "object", "properties": {}},
-        )
-
-    async def run(self, call: ToolCall) -> ToolResponse:
-        self.calls.append(call)
-        if not self._responses:
-            raise AssertionError(f"FakeTool {self._name!r} has no queued response")
-        return self._responses.pop(0)
-
-
-_PROTOCOL_CHECK: BaseTool = FakeTool("x", [])
 
 
 def _context(**overrides: object) -> SubtaskContext:

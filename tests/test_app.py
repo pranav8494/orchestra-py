@@ -12,8 +12,8 @@ hang.
 The tests that build their own `Orchestra` still use `EchoWorker` throughout — this file
 is about the composition root, not about any one agent, and a stub keeps a wiring failure
 distinguishable from an agent failure. The two that go through `build_orchestra` get the
-real Data Retrieval agent (#5), so they also queue `_turns()`: the tool-use conversation
-that agent holds, on `FakeProvider`'s separate `turns` queue.
+real Data Retrieval (#5) and Analytics (#6) agents, so they also queue `_turns()`: the
+tool-use conversation those agents hold, on `FakeProvider`'s separate `turns` queue.
 
 `run_once` is tested through its own wiring: only the vendor adapter is substituted, at
 the provider port, so what the observer contract (#11) is asserted against is the real

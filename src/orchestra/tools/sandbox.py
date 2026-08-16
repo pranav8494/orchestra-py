@@ -29,9 +29,16 @@ def _no_network(*_args: object, **_kwargs: object) -> NoReturn:
     raise OSError("network access is disabled in this environment")
 
 
-# Both entry points, not just `socket.socket`: `create_connection` is what `http.client`
-# and every library above it call, and it holds its own reference to the class.
-socket.socket = _no_network  # type: ignore[misc,assignment]
+# The methods, never the class. `ssl` does `class SSLSocket(socket)`, so replacing
+# `socket.socket` with a function turns the next `import ssl` — or `http.client`, or
+# `urllib.request`, or anything importing them — into `TypeError: function() argument
+# 'code' must be code, not str`, which is not the `OSError` above and costs the model a
+# turn on a fault it did not cause. Connecting is the thing worth refusing; constructing
+# a socket object is not. `create_connection` is patched as well as the methods it calls,
+# because it resolves the name first: refusing it here means `http.client` and everything
+# above it fail before a DNS query leaves the machine, not after.
+socket.socket.connect = _no_network  # type: ignore[method-assign]
+socket.socket.connect_ex = _no_network  # type: ignore[method-assign]
 socket.create_connection = _no_network
 
 # `run_path`, not `exec(source)`: it compiles with the real filename, so the traceback

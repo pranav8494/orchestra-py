@@ -7,11 +7,17 @@ pandas would cost a second per test), the timeout test injects its own clock rat
 waiting the default 15 seconds out, and nothing here can reach the network: the guard
 under test is what stops it.
 
+The two tests that mock do so *at* the boundary rather than across it — `OSError` from
+the spawn and from a copy is what the machine does under fan-out, and there is no way to
+run a real one out of descriptors on purpose.
+
 The cancellation test has the child touch a marker file before it sleeps, so the cancel
-lands while `communicate()` is genuinely in flight rather than during staging.
+lands while the reads are genuinely in flight rather than during staging.
 """
 
 import asyncio
+import os
+import shutil
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -33,6 +39,12 @@ TIMEOUT = 5.0
 # The clock the timeout test holds the child to. Above interpreter start-up on a loaded
 # machine, far below the 15 s default — the point is to prove the kill, quickly.
 SHORT_TIMEOUT = 1.0
+
+# A script that writes far more than the tool will ever keep, as fast as the pipe takes
+# it, and then never stops. Both halves matter: the flood is what used to leave the read
+# transport paused, and the loop is what used to make the reap after the kill wait for a
+# pipe disconnect that could no longer happen.
+FLOOD_THEN_LOOP = "import sys\nchunk = 'x' * 100000\nwhile True:\n    sys.stdout.write(chunk)\n"
 
 
 def call(name: str, **arguments: object) -> ToolCall:
@@ -59,6 +71,23 @@ def wait_for(path: Path) -> bool:
     deadline = time.monotonic() + TIMEOUT
     while time.monotonic() < deadline:
         if path.exists():
+            return True
+        time.sleep(0.01)
+    return False
+
+
+def wait_until_gone(pid: int) -> bool:
+    """Poll until `pid` can no longer be signalled. Blocking — await it in a thread.
+
+    Signal 0 is the liveness question without the side effect. Polled rather than waited
+    on because a grandchild is not this process's child to reap: once the group dies it
+    is init's, and init's reap is what finally frees the pid.
+    """
+    deadline = time.monotonic() + TIMEOUT
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except OSError:
             return True
         time.sleep(0.01)
     return False
@@ -152,12 +181,146 @@ async def test_run_python_infinite_loop_is_killed_at_the_timeout(store: Artifact
 
 
 @pytest.mark.asyncio
-async def test_run_python_cannot_open_a_socket(tool: RunPythonTool) -> None:
+async def test_run_python_infinite_loop_that_floods_stdout_is_stopped(tool: RunPythonTool) -> None:
+    """The case the kill test above cannot reach: `while True: pass` prints nothing.
+
+    A script that writes faster than the parent reads leaves the stream over its limit
+    and the read transport paused, and the reap that followed the kill then waited on a
+    pipe disconnect nothing could deliver — the child died, the parent did not, and the
+    subtask, its `TaskGroup` and the run hung with it. On the *default* clock, so a
+    regression fails here in seconds instead of quietly returning at the timeout.
+    """
+    response = await asyncio.wait_for(
+        tool.run(call(TOOL_NAME, code=FLOOD_THEN_LOOP)), timeout=TIMEOUT
+    )
+
+    assert response.is_error
+    assert "printed more than" in response.content
+
+
+@pytest.mark.asyncio
+async def test_run_python_output_past_the_cap_is_never_buffered_whole(tool: RunPythonTool) -> None:
+    """Reading to EOF cost the parent the script's whole output, per concurrent subtask.
+
+    300 MB printed drove peak RSS up by nearly a gigabyte in a quarter of a second, and
+    the cap only trimmed what was already in memory. 20 MB here, which the read now stops
+    a few kilobytes into: the response costs the same whether the script printed 20 KB or
+    20 GB.
+    """
+    code = "import sys\nfor _ in range(200):\n    sys.stdout.write('x' * 100000)\n"
+
+    response = await asyncio.wait_for(tool.run(call(TOOL_NAME, code=code)), timeout=TIMEOUT)
+
+    assert response.is_error
+    assert "[elided," in response.content
+    assert len(response.content) < MAX_OUTPUT_CHARS * 2
+
+
+@pytest.mark.asyncio
+async def test_run_python_kills_a_background_process_the_script_left_running(
+    tool: RunPythonTool,
+) -> None:
+    """The group is killed on success too, not only on the timeout and the cancel.
+
+    A grandchild with its own stdio does not hold the pipes open, so the script returns
+    cleanly — and used to leave the grandchild writing into a working directory that is
+    deleted the moment `run` returns.
+    """
+    code = (
+        "import subprocess\nimport sys\n"
+        "child = subprocess.Popen(\n"
+        "    [sys.executable, '-c', 'import time; time.sleep(60)'],\n"
+        "    stdout=subprocess.DEVNULL,\n"
+        "    stderr=subprocess.DEVNULL,\n"
+        ")\nprint(child.pid)\n"
+    )
+
+    response = await asyncio.wait_for(tool.run(call(TOOL_NAME, code=code)), timeout=TIMEOUT)
+
+    assert not response.is_error
+    assert await asyncio.to_thread(wait_until_gone, int(response.content))
+
+
+@pytest.mark.asyncio
+async def test_run_python_cannot_connect_a_socket(tool: RunPythonTool) -> None:
     """The guard `sandbox.py` installs, proven from inside the child (§12: no network)."""
-    response = await tool.run(call(TOOL_NAME, code="import socket\nsocket.socket()\n"))
+    response = await tool.run(
+        call(TOOL_NAME, code="import socket\nsocket.socket().connect(('127.0.0.1', 9))\n")
+    )
 
     assert response.is_error
     assert "network access is disabled" in response.content
+
+
+@pytest.mark.asyncio
+async def test_run_python_can_import_urllib_and_still_cannot_reach_anything(
+    tool: RunPythonTool,
+) -> None:
+    """The guard patches the connect methods, not the `socket.socket` class.
+
+    `ssl` does `class SSLSocket(socket)`, so a class replaced by a function turned the
+    next `import urllib.request` into `TypeError: function() argument 'code' must be
+    code, not str` — a fault the model did not cause, cannot fix, and would spend its one
+    self-correction turn on. The address is the discard port on loopback: if the guard
+    ever fails, this test refuses a connection rather than making one.
+    """
+    code = (
+        "import urllib.request\n"
+        "try:\n"
+        "    urllib.request.urlopen('http://127.0.0.1:9/', timeout=1)\n"
+        "except OSError as exc:\n"
+        "    print(f'refused: {exc}')\n"
+    )
+
+    response = await tool.run(call(TOOL_NAME, code=code))
+
+    assert not response.is_error
+    assert "network access is disabled" in response.content
+
+
+@pytest.mark.asyncio
+async def test_run_python_child_has_no_search_path_to_shell_out_with(tool: RunPythonTool) -> None:
+    """`PATH=os.defpath` resolved `curl`, which is the network the description denies."""
+    code = "import os\nimport shutil\nprint(os.environ['PATH'] or 'empty', shutil.which('curl'))\n"
+
+    response = await tool.run(call(TOOL_NAME, code=code))
+
+    assert not response.is_error
+    assert response.content.strip() == "empty None"
+
+
+@pytest.mark.asyncio
+async def test_run_python_spawn_failure_is_returned_as_data(
+    tool: RunPythonTool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§6: EAGAIN or EMFILE under fan-out is the model's to retry, not the loop's to unwind."""
+
+    async def refuse(*_args: object, **_kwargs: object) -> asyncio.subprocess.Process:
+        raise OSError(24, "Too many open files")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", refuse)
+
+    response = await tool.run(call(TOOL_NAME, code="print(1)"))
+
+    assert response.is_error
+    assert "Too many open files" in response.content
+
+
+@pytest.mark.asyncio
+async def test_run_python_staging_failure_is_returned_as_data(
+    tool: RunPythonTool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same for the filesystem under the scratch directory: data, not an exception."""
+
+    def refuse(*_args: object, **_kwargs: object) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(shutil, "copyfile", refuse)
+
+    response = await tool.run(call(TOOL_NAME, code="print(1)"))
+
+    assert response.is_error
+    assert "No space left on device" in response.content
 
 
 @pytest.mark.asyncio
@@ -219,9 +382,9 @@ async def test_run_python_truncates_output_that_would_flood_the_prompt(tool: Run
 async def test_run_python_propagates_cancellation(tool: RunPythonTool, tmp_path: Path) -> None:
     """§10/§12: `CancelledError` is the only thing that may leave `run`.
 
-    The marker puts the cancel inside `communicate()` rather than in staging, so what is
-    under test is the handler that kills the process group and re-raises. A handler that
-    returned a `ToolResponse` instead fails here rather than hanging.
+    The marker puts the cancel inside the reads rather than in staging, so what is under
+    test is the cleanup that kills the process group and lets the error through. A
+    handler that returned a `ToolResponse` instead fails here rather than hanging.
     """
     marker = tmp_path / "child-started"
     code = (

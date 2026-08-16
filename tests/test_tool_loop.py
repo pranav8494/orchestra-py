@@ -13,17 +13,13 @@ from collections.abc import Sequence
 
 import pytest
 
-from conftest import FakeProvider
+from conftest import FakeProvider, FakeTool
 from orchestra.agents.workers.tool_loop import LoopResult, ToolLoop
 from orchestra.core.errors import TaskFailure
 from orchestra.core.events import Broker
 from orchestra.core.state import AgentRole, EventKind, Subtask, SubtaskContext, TaskEvent, TaskState
 from orchestra.providers.base import AssistantTurn
 from orchestra.tools.base import BaseTool, ToolCall, ToolResponse
-
-# Imported rather than copied: §2 applies to test helpers too, and this one already
-# exists in the suite that first needed it.
-from test_data_retrieval import FakeTool
 
 REQUEST = "Summarize the last 3 quarters' financial trends"
 SYSTEM = "You are a test agent."
