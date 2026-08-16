@@ -37,6 +37,11 @@ from orchestra.core.state import (
 from orchestra.prompts import AGGREGATOR_SYSTEM_PROMPT
 from orchestra.providers.base import MessageRole, Provider, ProviderMessage
 
+# How many artifacts may be previewed at once. Bounded here rather than left to the size
+# of the plan (§10): the reads run on the default thread pool, which every other
+# `to_thread` in the process shares, and the plan's size is the engine's business.
+MAX_PREVIEW_READS = 4
+
 # One completed subtask and the artifact it produced — paired at the filter so the rest
 # of the module never has to re-ask whether the pointer is there.
 _Completed = tuple[Subtask, ArtifactPointer]
@@ -169,14 +174,17 @@ class Aggregator:
         previews stay out of the system prompt — both are untrusted text.
         """
         # `to_thread` because the store is synchronous filesystem I/O (§10), gathered
-        # because the reads are independent. The fan-out is bounded by the plan, which
-        # the engine's step cap bounds in turn.
-        previews = await asyncio.gather(
-            *(
-                asyncio.to_thread(self._store.preview, pointer, limit=self._preview_limit)
-                for _, pointer in completed
-            )
-        )
+        # because the reads are independent, semaphore-bounded because §10 wants the
+        # bound stated rather than inherited from whatever the plan happened to contain.
+        reads = asyncio.Semaphore(MAX_PREVIEW_READS)
+
+        async def read(pointer: ArtifactPointer) -> str:
+            async with reads:
+                return await asyncio.to_thread(
+                    self._store.preview, pointer, limit=self._preview_limit
+                )
+
+        previews = await asyncio.gather(*(read(pointer) for _, pointer in completed))
         sections = [f"The user asked:\n{user_request}"]
         sections += [
             "\n".join(

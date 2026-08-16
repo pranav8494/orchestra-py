@@ -198,8 +198,10 @@ def test_format_result_json_omits_the_ledger_bookkeeping() -> None:
 def test_format_result_json_stays_parseable_on_a_half_finished_run(state: TaskState) -> None:
     document = _document(state)
 
+    # The contract's shape does not vary with how far the run got: a script reading
+    # `.report` finds the key holding null, never a key that is absent.
+    assert set(document) == {"request", "status", "report", "subtasks", "failure_reason"}
     assert document["request"] == REQUEST
-    assert document["report"] is None or document["report"]["chart"] is None
 
 
 def test_format_result_json_ignores_quiet() -> None:

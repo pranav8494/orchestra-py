@@ -7,17 +7,24 @@ the quality of the synthesis, which is not ours to test.
 """
 
 import asyncio
+import threading
+import time
 from pathlib import Path
 
 import pytest
 
 from conftest import FakeProvider
-from orchestra.agents.aggregator import Aggregator, FigureDraft, ReportDraft
+from orchestra.agents.aggregator import (
+    MAX_PREVIEW_READS,
+    Aggregator,
+    FigureDraft,
+    ReportDraft,
+)
 from orchestra.agents.engine import ExecutionEngine
 from orchestra.agents.workers.base import Worker
 from orchestra.agents.workers.stub import EchoWorker
-from orchestra.artifacts import ArtifactStore
-from orchestra.core.errors import ProviderError
+from orchestra.artifacts import DEFAULT_PREVIEW_LIMIT, ArtifactStore
+from orchestra.core.errors import ExitCode, ProviderError, TaskFailure
 from orchestra.core.events import Broker
 from orchestra.core.state import (
     ARTIFACT_PREFIX,
@@ -274,6 +281,70 @@ async def test_write_report_propagates_a_provider_failure(store: ArtifactStore) 
         await Aggregator(provider, store).write_report(state)
 
     assert state.final_result is None
+
+
+@pytest.mark.asyncio
+async def test_write_report_raises_when_an_artifact_the_ledger_claims_is_gone(
+    store: ArtifactStore,
+) -> None:
+    """The store's one error path, reached through the previews.
+
+    A ledger pointing at a payload the run can no longer read has lost data, so the run
+    ends on the taxonomy's `TaskFailure` (§8) rather than reporting over the hole — and
+    it ends before the provider call is paid for.
+    """
+    state = _finished_run(store)
+    store.path_for(state.artifacts["analyse"]).unlink()
+    provider = FakeProvider(responses=[_draft()])
+
+    with pytest.raises(TaskFailure, match="Artifact not found") as exc_info:
+        await Aggregator(provider, store).write_report(state)
+
+    assert exc_info.value.exit_code == ExitCode.TASK_FAILURE
+    assert provider.calls == []
+    assert state.final_result is None
+
+
+@pytest.mark.asyncio
+async def test_write_report_bounds_how_many_previews_it_reads_at_once(
+    store: ArtifactStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§10: never unbounded fan-out. These reads run on the default thread pool that
+    every other `to_thread` in the process shares, so the bound belongs here and not to
+    however many subtasks the plan happened to contain."""
+    plan = Plan(
+        subtasks=[
+            Subtask(id=f"step_{index}", role=AgentRole.ANALYTICS, instruction="Do the thing")
+            for index in range(MAX_PREVIEW_READS * 3)
+        ]
+    )
+    state = TaskState(user_request=REQUEST, plan=plan)
+    for subtask in plan.subtasks:
+        _finish(state, store, subtask.id, f"{subtask.id}.csv", REVENUE_CSV)
+
+    live = 0
+    peak = 0
+    counter = threading.Lock()  # the reads are on threads, so the tally must be too
+    real = store.preview
+
+    def counted(pointer: str, *, limit: int = DEFAULT_PREVIEW_LIMIT) -> str:
+        nonlocal live, peak
+        with counter:
+            live += 1
+            peak = max(peak, live)
+        try:
+            time.sleep(0.01)  # hold the slot long enough for the others to pile up
+            return real(pointer, limit=limit)
+        finally:
+            with counter:
+                live -= 1
+
+    monkeypatch.setattr(store, "preview", counted)
+
+    await Aggregator(FakeProvider(responses=[_draft()]), store).write_report(state)
+
+    assert peak <= MAX_PREVIEW_READS
+    assert peak > 1  # bounded, not serialised into a loop that waits on each read
 
 
 @pytest.mark.asyncio

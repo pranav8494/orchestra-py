@@ -95,6 +95,23 @@ def test_preview_of_oversized_text_elides_and_names_the_omitted_size(store: Arti
     assert "x" * 101 not in preview
 
 
+def test_preview_of_text_exactly_at_the_limit_is_not_elided(store: ArtifactStore) -> None:
+    """The boundary of the elision rule, pinned from both sides: `limit` characters are
+    the whole payload, and one more is what buys the marker."""
+    pointer = store.put_text("exact.csv", "x" * 100)
+
+    assert store.preview(pointer, limit=100) == "x" * 100
+    assert store.preview(pointer, limit=99) == "x" * 99 + "\n... [elided, 1 more bytes]"
+
+
+def test_preview_of_an_empty_artifact_is_empty(store: ArtifactStore) -> None:
+    """A worker that wrote nothing shows the aggregator nothing — not a marker claiming
+    bytes were held back, and not `<binary, 0 bytes>`."""
+    pointer = store.put_text("empty.csv", "")
+
+    assert store.preview(pointer) == ""
+
+
 def test_preview_of_multibyte_text_is_still_read_as_text(store: ArtifactStore) -> None:
     """Regression: the head read cuts mid-character, which a strict decode would call
     binary. The bytes are counted, so the omitted size stays honest for non-ASCII too."""
