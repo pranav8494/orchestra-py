@@ -1,8 +1,8 @@
 """Shared test fixtures and doubles.
 
-`FakeProvider` and `FakeTool` keep the suite off the network (§12). Both live here, not in
-the module that first needed them: `tests/` is not a package, so a cross-module import of a
-double would not resolve (§3.1).
+`FakeProvider` and `FakeTool` keep the suite off the network (§12). Any double a second
+module needs moves here rather than staying in the one that first needed it: one owner, and
+no test module reaching into another's internals (§3.1).
 """
 
 import asyncio
@@ -14,10 +14,15 @@ from typing import TYPE_CHECKING, cast
 import pytest
 from pydantic import BaseModel
 
+from orchestra.agents.planner import Planner
+from orchestra.agents.workers.base import Worker
 from orchestra.artifacts import ArtifactStore
+from orchestra.core.errors import TaskFailure
 from orchestra.core.question import Asker, Question
+from orchestra.core.state import SubtaskContext, TaskState
 from orchestra.providers.base import AssistantTurn, Provider, ProviderMessage, StructuredT
 from orchestra.tools.base import BaseTool, ToolCall, ToolResponse, ToolSpec
+from scenarios import Scenario
 
 # Every setting `Config` reads, listed once so a new field cannot leak the developer's
 # shell into the suite. `TAVILY_API_KEY` is the one that reaches the network: exported, it
@@ -214,9 +219,64 @@ class FakeTool:
         return self._responses.pop(0)
 
 
+@dataclass
+class ScriptedWorker:
+    """A `Worker` that records its context and does what the test scripted.
+
+    `peak_concurrency` is sampled inside the worker, so "these two ran at once" measures
+    the engine's dispatch rather than the test's timing.
+    """
+
+    fail_ids: frozenset[str] = frozenset()
+    # Fails only its first dispatch, so a test can watch the engine's retry succeed.
+    fail_once_ids: frozenset[str] = frozenset()
+    # Raised instead of the default `TaskFailure` when a scripted failure trips.
+    failure: Exception | None = None
+    # Held open until the gate is set. Empty means every subtask waits on it.
+    gate: asyncio.Event | None = None
+    gate_ids: frozenset[str] = frozenset()
+    pointer_override: str | None = None
+    contexts: list[SubtaskContext] = field(default_factory=list)
+    running: int = 0
+    peak_concurrency: int = 0
+
+    async def run(self, context: SubtaskContext) -> str:
+        self.contexts.append(context)
+        attempt = dispatches(self, context.subtask.id)
+        self.running += 1
+        self.peak_concurrency = max(self.peak_concurrency, self.running)
+        try:
+            if self.gate is not None and (not self.gate_ids or context.subtask.id in self.gate_ids):
+                await self.gate.wait()
+            else:
+                # Yield once, so a sibling dispatched in the same pass is observable
+                # running alongside this one.
+                await asyncio.sleep(0)
+            if context.subtask.id in self.fail_ids or (
+                context.subtask.id in self.fail_once_ids and attempt == 1
+            ):
+                raise self.failure or TaskFailure(f"{context.subtask.id} could not be completed")
+            return self.pointer_override or f"artifact:{context.subtask.id}.txt"
+        finally:
+            self.running -= 1
+
+
+def dispatches(worker: ScriptedWorker, subtask_id: str) -> int:
+    """How many times `subtask_id` reached the worker — one per attempt."""
+    return sum(1 for context in worker.contexts if context.subtask.id == subtask_id)
+
+
+async def planned(scenario: Scenario) -> TaskState:
+    """A ledger holding the scenario's plan, built through the real planner."""
+    state = TaskState(user_request=scenario.prompt)
+    await Planner(FakeProvider(responses=[scenario.draft()])).create_plan(state)
+    return state
+
+
 if TYPE_CHECKING:
     # Conformance checked by mypy, not `isinstance`: `runtime_checkable` compares attribute
     # names only, so it would pass a fake whose signature had drifted.
     _PROTOCOL_CHECK: Provider = FakeProvider()
     _TOOL_PROTOCOL_CHECK: BaseTool = FakeTool("x", [])
     _ASKER_PROTOCOL_CHECK: Asker = ScriptedAsker()
+    _WORKER_PROTOCOL_CHECK: Worker = ScriptedWorker()
