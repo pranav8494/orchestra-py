@@ -73,6 +73,31 @@ def test_load_config_artifact_dir_is_always_absolute(
     assert "~" not in str(artifact_dir)
 
 
+def test_load_config_data_dir_defaults_to_the_committed_dataset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bundled mock data is versioned with the code, so it is found from any cwd.
+
+    Asserted by reading a file, not by comparing paths: what matters is that the
+    default points at the dataset the agents actually query (#5).
+    """
+    monkeypatch.setenv("ANTHROPIC_API_KEY", FAKE_KEY)
+
+    data_dir = load_config().data_dir
+
+    assert data_dir.is_absolute()
+    assert (data_dir / "quarterly_financials.csv").is_file()
+
+
+def test_load_config_data_dir_env_var_overrides_default(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", FAKE_KEY)
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "fixtures"))
+
+    assert load_config().data_dir == tmp_path / "fixtures"
+
+
 def test_load_config_missing_api_key_raises_config_error() -> None:
     with pytest.raises(ConfigError) as exc_info:
         load_config()

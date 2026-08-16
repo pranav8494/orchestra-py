@@ -4,8 +4,9 @@ Nothing below this module builds a provider, a store, a broker or a worker — t
 handed one. That is what lets a test run the whole application against `FakeProvider`
 without patching anything, and what keeps `cli/` free of business logic (§4).
 
-Phase A wires the stub worker into every role. Phase B replaces those entries one at a
-time (#5-#7); nothing else in the application changes when it does.
+Phase B replaces the stub role by role (#5-#7). Data Retrieval is real; Analytics and
+Visualization still echo. Nothing else in the application changed when the first one
+landed, which is the property the mapping in `build_orchestra` exists to have.
 """
 
 from collections.abc import Callable
@@ -14,7 +15,9 @@ from contextlib import AbstractAsyncContextManager, AsyncExitStack
 from orchestra.agents.aggregator import Aggregator
 from orchestra.agents.engine import ExecutionEngine
 from orchestra.agents.planner import Planner
+from orchestra.agents.toolsets import data_retrieval_tools
 from orchestra.agents.workers.base import Worker
+from orchestra.agents.workers.data_retrieval import DataRetrievalWorker
 from orchestra.agents.workers.stub import EchoWorker
 from orchestra.artifacts import ArtifactStore
 from orchestra.config import Config, load_config
@@ -105,10 +108,16 @@ def build_orchestra(config: Config) -> Orchestra:
     provider = create_provider(api_key=config.anthropic_api_key, model=config.anthropic_model)
     store = ArtifactStore(config.artifact_dir)
     broker: Broker[TaskEvent] = Broker()
-    # Every role gets the same stub in Phase A; the mapping is the seam Phase B swaps
-    # role by role, which is why it is a mapping and not a conditional in the engine.
-    echo = EchoWorker(store)
-    workers: dict[AgentRole, Worker] = dict.fromkeys(AgentRole, echo)
+    # The mapping is the seam Phase B swaps role by role, which is why it is a mapping
+    # and not a conditional in the engine: a real worker lands as one reassignment.
+    # `dict.fromkeys` first so a role added later still runs, as a stub, rather than
+    # failing `_check_roles` before the run starts.
+    workers: dict[AgentRole, Worker] = dict.fromkeys(AgentRole, EchoWorker(store))
+    workers[AgentRole.DATA_RETRIEVAL] = DataRetrievalWorker(
+        provider=provider,
+        store=store,
+        tools=data_retrieval_tools(config.data_dir),
+    )
     return Orchestra(
         planner=Planner(provider),
         engine=ExecutionEngine(workers=workers, broker=broker),

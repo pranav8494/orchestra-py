@@ -12,7 +12,14 @@ from pydantic import BaseModel, SecretStr, ValidationError
 
 from orchestra.core.errors import ExitCode, ProviderError
 from orchestra.providers.anthropic import AnthropicProvider
-from orchestra.providers.base import MessageRole, Provider, ProviderMessage, create_provider
+from orchestra.providers.base import (
+    MessageRole,
+    Provider,
+    ProviderMessage,
+    ToolResult,
+    create_provider,
+)
+from orchestra.tools.base import ToolCall, ToolSpec
 
 
 class Answer(BaseModel):
@@ -20,13 +27,23 @@ class Answer(BaseModel):
 
 
 class StubMessages:
-    """Stands in for `client.messages`, recording the kwargs it was called with."""
+    """Stands in for `client.messages`, recording the kwargs it was called with.
+
+    One stub for both entry points: `parse_structured` and `send` are two calls on the
+    same SDK object, so a second stub would be a second mocking style to keep in step.
+    """
 
     def __init__(self, result: object) -> None:
         self._result = result
         self.kwargs: dict[str, Any] = {}
 
     async def parse(self, **kwargs: Any) -> object:
+        return self._answer(kwargs)
+
+    async def create(self, **kwargs: Any) -> object:
+        return self._answer(kwargs)
+
+    def _answer(self, kwargs: dict[str, Any]) -> object:
         self.kwargs = kwargs
         if isinstance(self._result, BaseException):
             raise self._result
@@ -38,6 +55,29 @@ class StubParsed:
 
     def __init__(self, parsed_output: Answer | None) -> None:
         self.parsed_output = parsed_output
+
+
+class StubBlock:
+    """One content block of a reply: whatever attributes its `type` implies."""
+
+    def __init__(self, **attributes: Any) -> None:
+        self.__dict__.update(attributes)
+
+
+class StubUsage:
+    def __init__(self, input_tokens: int, output_tokens: int) -> None:
+        self.input_tokens = input_tokens
+        self.output_tokens = output_tokens
+
+
+class StubMessage:
+    """The two attributes of `Message` the adapter reads."""
+
+    def __init__(
+        self, content: list[StubBlock], *, input_tokens: int = 0, output_tokens: int = 0
+    ) -> None:
+        self.content = content
+        self.usage = StubUsage(input_tokens, output_tokens)
 
 
 def _provider(
@@ -123,6 +163,218 @@ async def test_parse_structured_maps_an_sdk_failure_to_provider_error(
 
     with pytest.raises(ProviderError) as exc_info:
         await provider.parse_structured(system="s", messages=[], output_format=Answer)
+
+    assert exc_info.value.exit_code == ExitCode.PROVIDER
+    assert "claude-opus-5" in str(exc_info.value)
+    assert exc_info.value.__cause__ is failure
+
+
+@pytest.mark.asyncio
+async def test_send_decodes_a_plain_reply_with_no_tool_calls_and_summed_usage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No tool calls is how the agent loop learns the model is finished."""
+    reply = StubMessage(
+        [StubBlock(type="text", text="the answer")], input_tokens=120, output_tokens=30
+    )
+    provider, stub = _provider(reply, monkeypatch)
+
+    turn = await provider.send(
+        system="be brief",
+        messages=[ProviderMessage(role=MessageRole.USER, content="hello")],
+    )
+
+    assert turn.text == "the answer"
+    assert turn.tool_calls == ()
+    # Both halves are paid for out of the loop's one budget (§10).
+    assert turn.usage_tokens == 150
+    assert stub.kwargs["model"] == "claude-opus-5"
+    assert stub.kwargs["system"] == "be brief"
+    assert stub.kwargs["messages"] == [{"role": "user", "content": "hello"}]
+    # Thinking is on by default and shares the budget with the output.
+    assert stub.kwargs["max_tokens"] >= 8_000
+    assert not {"temperature", "top_p", "top_k", "thinking"} & stub.kwargs.keys()
+
+
+@pytest.mark.asyncio
+async def test_send_omits_the_tools_argument_when_none_are_offered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The API rejects `tools=[]`, and a final tool-free turn takes this path."""
+    provider, stub = _provider(StubMessage([]), monkeypatch)
+
+    await provider.send(system="s", messages=[], tools=())
+
+    assert "tools" not in stub.kwargs
+
+
+@pytest.mark.asyncio
+async def test_send_translates_tool_specs_into_the_sdk_shape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider, stub = _provider(StubMessage([]), monkeypatch)
+    spec = ToolSpec(
+        name="query_csv",
+        description="Run one SQL-ish query over the sales table.",
+        input_schema={"type": "object", "properties": {"query": {"type": "string"}}},
+    )
+
+    await provider.send(system="s", messages=[], tools=[spec])
+
+    assert stub.kwargs["tools"] == [
+        {
+            "name": "query_csv",
+            "description": "Run one SQL-ish query over the sales table.",
+            "input_schema": {"type": "object", "properties": {"query": {"type": "string"}}},
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_send_decodes_tool_use_blocks_into_tool_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ids must survive: they are what pairs an answer with the call that asked for it."""
+    reply = StubMessage(
+        [
+            StubBlock(type="thinking", thinking="ignored"),
+            StubBlock(type="text", text="looking that up"),
+            StubBlock(
+                type="tool_use", id="toolu_01", name="query_csv", input={"query": "SELECT 1"}
+            ),
+            StubBlock(type="tool_use", id="toolu_02", name="search", input={"q": "margin"}),
+        ],
+        input_tokens=1,
+        output_tokens=2,
+    )
+    provider, _ = _provider(reply, monkeypatch)
+
+    turn = await provider.send(system="s", messages=[])
+
+    assert turn.text == "looking that up"
+    assert turn.tool_calls == (
+        ToolCall(id="toolu_01", name="query_csv", arguments={"query": "SELECT 1"}),
+        ToolCall(id="toolu_02", name="search", arguments={"q": "margin"}),
+    )
+    assert turn.usage_tokens == 3
+
+
+@pytest.mark.asyncio
+async def test_send_replays_an_assistant_turn_as_text_and_tool_use_blocks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The transcript is resent whole each lap; a model that cannot see the call it made
+    cannot read the answer to it."""
+    provider, stub = _provider(StubMessage([]), monkeypatch)
+
+    await provider.send(
+        system="s",
+        messages=[
+            ProviderMessage(role=MessageRole.USER, content="what were sales?"),
+            ProviderMessage(
+                role=MessageRole.ASSISTANT,
+                content="looking that up",
+                tool_calls=(
+                    ToolCall(id="toolu_01", name="query_csv", arguments={"query": "SELECT 1"}),
+                ),
+            ),
+        ],
+    )
+
+    assert stub.kwargs["messages"] == [
+        {"role": "user", "content": "what were sales?"},
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "looking that up"},
+                {
+                    "type": "tool_use",
+                    "id": "toolu_01",
+                    "name": "query_csv",
+                    "input": {"query": "SELECT 1"},
+                },
+            ],
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_send_omits_the_text_block_when_the_assistant_narrated_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The API rejects an empty text block, and calling a tool without narrating it is
+    the common case."""
+    provider, stub = _provider(StubMessage([]), monkeypatch)
+
+    await provider.send(
+        system="s",
+        messages=[
+            ProviderMessage(
+                role=MessageRole.ASSISTANT,
+                tool_calls=(ToolCall(id="toolu_01", name="search", arguments={}),),
+            )
+        ],
+    )
+
+    assert stub.kwargs["messages"] == [
+        {
+            "role": "assistant",
+            "content": [{"type": "tool_use", "id": "toolu_01", "name": "search", "input": {}}],
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_send_sends_tool_results_as_tool_result_blocks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`is_error` rides along so the model reads a failure and retries (§6)."""
+    provider, stub = _provider(StubMessage([]), monkeypatch)
+
+    await provider.send(
+        system="s",
+        messages=[
+            ProviderMessage(
+                role=MessageRole.USER,
+                tool_results=(
+                    ToolResult(call_id="toolu_01", content="42"),
+                    ToolResult(call_id="toolu_02", content="no column `margin`", is_error=True),
+                ),
+            )
+        ],
+    )
+
+    assert stub.kwargs["messages"] == [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_01",
+                    "content": "42",
+                    "is_error": False,
+                },
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_02",
+                    "content": "no column `margin`",
+                    "is_error": True,
+                },
+            ],
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_send_maps_an_sdk_failure_to_provider_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No SDK exception type may escape `providers/` (§6, §8)."""
+    failure = anthropic.AnthropicError("rate limited")
+    provider, _ = _provider(failure, monkeypatch)
+
+    with pytest.raises(ProviderError) as exc_info:
+        await provider.send(system="s", messages=[])
 
     assert exc_info.value.exit_code == ExitCode.PROVIDER
     assert "claude-opus-5" in str(exc_info.value)

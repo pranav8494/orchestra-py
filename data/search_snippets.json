@@ -1,0 +1,37 @@
+[
+  {
+    "keywords": ["saas", "growth", "benchmark", "benchmarks", "industry", "peer", "yoy"],
+    "title": "Industry note: growth benchmarks for mid-market B2B SaaS",
+    "snippet": "Across the mid-market B2B SaaS peer set, annual revenue growth clustered between 25% and 40% in 2025, down from roughly 45% two years earlier. Vendors holding above 50% were almost all still under $50m of annual revenue. A sequential rate near 8-10% therefore reads as in line with the peer group rather than exceptional."
+  },
+  {
+    "keywords": ["margin", "margins", "gross", "profitability", "profit", "operating", "ratio"],
+    "title": "Reference: typical margin ranges by delivery model",
+    "snippet": "Pure-subscription software businesses generally report gross margins of 75-85%, while offerings that bundle managed services sit closer to 55-70%. Operating margin, after sales and R&D, more commonly falls in a 5-25% band once a vendor reaches scale. A margin climbing several points inside a year usually reflects mix shift or operating leverage rather than pricing."
+  },
+  {
+    "keywords": ["cost", "costs", "dip", "drop", "fell", "decline", "expense", "expenses"],
+    "title": "What usually explains a one-quarter drop in reported costs",
+    "snippet": "A single-quarter fall in reported costs is more often timing than efficiency: a delayed hiring wave, an annual software renewal landing in a different period, or project spend capitalised off the operating line. The usual test is a trailing two-quarter average before treating the drop as a durable saving."
+  },
+  {
+    "keywords": ["quarter", "quarterly", "qoq", "sequential", "comparison", "convention", "reporting"],
+    "title": "Convention note: quarter-over-quarter versus year-over-year",
+    "snippet": "Quarter-over-quarter comparisons show momentum but carry seasonal noise, while year-over-year comparisons strip seasonality out and lag turning points by up to three quarters. Common practice is to quote year-over-year for headline growth and quarter-over-quarter when explaining a specific inflection. Mixing the two in one sentence is the most frequent error in quarterly commentary."
+  },
+  {
+    "keywords": ["seasonal", "seasonality", "q1", "first", "renewal", "renewals", "annual"],
+    "title": "Seasonality: why first quarters read weak",
+    "snippet": "In subscription businesses on calendar-year contracts, the first quarter typically prints below the preceding fourth quarter because renewals and multi-year deals are pulled into December. A single-digit sequential decline in Q1 is ordinary and is usually recovered by Q2. Reading the full year off it overstates any slowdown."
+  },
+  {
+    "keywords": ["macro", "economy", "economic", "backdrop", "budget", "budgets", "spending", "demand", "rates"],
+    "title": "Macro backdrop for enterprise software budgets, 2024-2025",
+    "snippet": "Enterprise software budgets tightened through 2024 as financing costs stayed elevated, with buyers consolidating vendors and lengthening approval cycles. Conditions eased over 2025 as rates came down and deal cycles shortened again in the second half. Budget re-approval in the opening weeks of the year has kept first-quarter demand soft across the period."
+  },
+  {
+    "keywords": ["leverage", "efficiency", "scale", "opex", "fixed", "headcount", "productivity"],
+    "title": "Operating leverage: what slower cost growth signals",
+    "snippet": "When revenue grows faster than costs for several consecutive quarters, the widening gap is usually operating leverage: fixed platform and support costs spread over a larger base. The effect holds only while headcount growth stays below revenue growth. A profit line expanding on flat headcount is the clearest signal of it."
+  }
+]

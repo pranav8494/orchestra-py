@@ -5,8 +5,15 @@ plans it, the engine walks the DAG, stub workers write artifacts, the aggregator
 them into a report, and the ledger comes back with pointers to every one of them — over
 `FakeProvider`, so no network (§12).
 
-Two model calls per run, in order: the plan, then the report. `_responses()` queues both,
-so a test that forgets one gets `FakeProvider`'s "no queued response" rather than a hang.
+Two structured calls per run, in order: the plan, then the report. `_responses()` queues
+both, so a test that forgets one gets `FakeProvider`'s "no queued response" rather than a
+hang.
+
+The tests that build their own `Orchestra` still use `EchoWorker` throughout — this file
+is about the composition root, not about any one agent, and a stub keeps a wiring failure
+distinguishable from an agent failure. The two that go through `build_orchestra` get the
+real Data Retrieval agent (#5), so they also queue `_turns()`: the tool-use conversation
+that agent holds, on `FakeProvider`'s separate `turns` queue.
 
 `run_once` is tested through its own wiring: only the vendor adapter is substituted, at
 the provider port, so what the observer contract (#11) is asserted against is the real
@@ -27,6 +34,7 @@ from orchestra import app as app_module
 from orchestra.agents.aggregator import Aggregator, FigureDraft, ReportDraft
 from orchestra.agents.engine import DEFAULT_STEP_CAP, ExecutionEngine
 from orchestra.agents.planner import Planner
+from orchestra.agents.toolsets import QUERY_CSV_TOOL
 from orchestra.agents.workers.base import Worker
 from orchestra.agents.workers.stub import EchoWorker
 from orchestra.app import Orchestra, build_orchestra, run_once
@@ -35,7 +43,8 @@ from orchestra.config import Config
 from orchestra.core.errors import ProviderError
 from orchestra.core.events import Broker
 from orchestra.core.state import AgentRole, EventKind, SubtaskStatus, TaskEvent
-from orchestra.providers.base import Provider
+from orchestra.providers.base import AssistantTurn, Provider
+from orchestra.tools.base import ToolCall
 from scenarios import LINEAR
 
 SUMMARY = "Revenue grew in each of the last three quarters."
@@ -53,6 +62,24 @@ def _responses(*, figure_source: str | None = None) -> list[BaseModel | BaseExce
         else []
     )
     return [LINEAR.draft(), ReportDraft(executive_summary=SUMMARY, key_figures=figures)]
+
+
+def _turns() -> list[AssistantTurn | BaseException]:
+    """The Data Retrieval agent's conversation: one query, then its closing summary.
+
+    Only the runs that go through `build_orchestra` consume these — everywhere else this
+    file wires `EchoWorker` into every role. The tool call is real: the worker runs it
+    against the committed `data/` CSV, so this is also the check that the shipped dataset
+    is readable through the whole stack.
+    """
+    return [
+        AssistantTurn(
+            text="",
+            tool_calls=(ToolCall(id="c1", name=QUERY_CSV_TOOL, arguments={"last_n": 3}),),
+            usage_tokens=100,
+        ),
+        AssistantTurn(text="Retrieved the last three quarters.", usage_tokens=50),
+    ]
 
 
 def _orchestra(
@@ -223,7 +250,7 @@ async def test_run_once_keeps_the_observer_attached_from_the_first_event_to_the_
 ) -> None:
     """The dashboard has to be subscribed *before* the run publishes anything: the plan
     rides on the first event, and an observer entered late never learns the pending rows."""
-    provider = FakeProvider(responses=_responses())
+    provider = FakeProvider(responses=_responses(), turns=_turns())
     _offline_run(monkeypatch, tmp_path, provider)
     observer = RecordingObserver()
 
@@ -243,7 +270,7 @@ async def test_run_once_without_an_observer_runs_headless(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """The default path `cli/app.py` takes today: no subscriber, same ledger."""
-    provider = FakeProvider(responses=_responses())
+    provider = FakeProvider(responses=_responses(), turns=_turns())
     _offline_run(monkeypatch, tmp_path, provider)
 
     state = await run_once(LINEAR.prompt)

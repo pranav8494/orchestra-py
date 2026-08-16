@@ -28,6 +28,21 @@ def default_artifact_dir() -> Path:
     return Path.home() / ".orchestra" / "artifacts"
 
 
+def default_data_dir() -> Path:
+    """The repo's committed `data/` — the bundled mock dataset the agents read (#5).
+
+    Read-only fixtures, so unlike `artifact_dir` this does not belong under `~`: the
+    files are part of the checkout and versioned with the code that reads them.
+
+    Located relative to this module rather than to the working directory, so a run from
+    any directory finds it. That resolution assumes the source layout — installed as a
+    wheel, `data/` sits outside the package and this points at nothing. Deliberate:
+    `DATA_DIR` is the override, and a tool that cannot find its dataset reports that as
+    a `ToolResponse` the model can read (§6) rather than failing the run.
+    """
+    return Path(__file__).resolve().parents[2] / "data"
+
+
 _FIX_HINT = (
     "Fix: copy .env.example to .env and set ANTHROPIC_API_KEY=<your-key>, "
     "or export it in your shell."
@@ -50,8 +65,9 @@ class Config(BaseSettings):
     anthropic_api_key: SecretStr = Field(min_length=1)
     anthropic_model: str = DEFAULT_MODEL
     artifact_dir: Path = Field(default_factory=default_artifact_dir)
+    data_dir: Path = Field(default_factory=default_data_dir)
 
-    @field_validator("artifact_dir")
+    @field_validator("artifact_dir", "data_dir")
     @classmethod
     def _absolute_path(cls, value: Path) -> Path:
         """Taken as given, `ARTIFACT_DIR=~/x` makes a directory named `~` and a relative
