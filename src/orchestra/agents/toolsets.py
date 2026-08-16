@@ -12,7 +12,9 @@ from pathlib import Path
 
 from pydantic import SecretStr
 
+from orchestra.artifacts import ArtifactStore
 from orchestra.tools.base import BaseTool
+from orchestra.tools.python_exec import RunPythonTool
 from orchestra.tools.query_csv import TOOL_NAME as QUERY_CSV_TOOL
 from orchestra.tools.query_csv import QueryCsvTool
 from orchestra.tools.search import TOOL_NAME as SEARCH_TOOL
@@ -23,6 +25,7 @@ __all__ = [
     "QUERY_CSV_TOOL",
     "SEARCH_CORPUS",
     "SEARCH_TOOL",
+    "analytics_tools",
     "data_retrieval_tools",
 ]
 
@@ -51,3 +54,20 @@ def data_retrieval_tools(
         QueryCsvTool(data_dir / FINANCIALS_CSV),
         SearchTool(data_dir / SEARCH_CORPUS, api_key=search_api_key),
     )
+
+
+def analytics_tools(store: ArtifactStore) -> tuple[BaseTool, ...]:
+    """The Analytics agent's toolset: an interpreter, and nothing that fetches data.
+
+    One tool, deliberately. This agent computes over what a previous step retrieved, and
+    handing it `query_csv` as well would let it re-retrieve — bypassing the plan's
+    dependency, so the artifact it analyses is no longer the artifact the plan says it
+    analysed, and the report's figures trace to a source the planner never ordered.
+
+    Args:
+        store: the run's artifact store, which the executor resolves `inputs` against.
+
+    Returns:
+        The tools, in the order the model is shown them.
+    """
+    return (RunPythonTool(store),)

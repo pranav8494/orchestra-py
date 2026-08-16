@@ -12,8 +12,8 @@ hang.
 The tests that build their own `Orchestra` still use `EchoWorker` throughout — this file
 is about the composition root, not about any one agent, and a stub keeps a wiring failure
 distinguishable from an agent failure. The two that go through `build_orchestra` get the
-real Data Retrieval agent (#5), so they also queue `_turns()`: the tool-use conversation
-that agent holds, on `FakeProvider`'s separate `turns` queue.
+real Data Retrieval (#5) and Analytics (#6) agents, so they also queue `_turns()`: the
+tool-use conversation those agents hold, on `FakeProvider`'s separate `turns` queue.
 
 `run_once` is tested through its own wiring: only the vendor adapter is substituted, at
 the provider port, so what the observer contract (#11) is asserted against is the real
@@ -45,6 +45,7 @@ from orchestra.core.events import Broker
 from orchestra.core.state import AgentRole, EventKind, SubtaskStatus, TaskEvent
 from orchestra.providers.base import AssistantTurn, Provider
 from orchestra.tools.base import ToolCall
+from orchestra.tools.python_exec import TOOL_NAME as RUN_PYTHON_TOOL
 from scenarios import LINEAR
 
 SUMMARY = "Revenue grew in each of the last three quarters."
@@ -64,13 +65,25 @@ def _responses(*, figure_source: str | None = None) -> list[BaseModel | BaseExce
     return [LINEAR.draft(), ReportDraft(executive_summary=SUMMARY, key_figures=figures)]
 
 
-def _turns() -> list[AssistantTurn | BaseException]:
-    """The Data Retrieval agent's conversation: one query, then its closing summary.
+# The analysis step's script, run for real in a subprocess. Stdlib only and no pandas:
+# what this run proves is that the pointer the retrieval step minted resolves inside the
+# executor, and an import that costs a second per run would prove it no better.
+_ANALYSIS_CODE = """\
+import json
+data = json.load(open("fetch_quarterly_financials.json"))
+rows = [row for table in data["datasets"] for row in table["csv"].splitlines()[1:] if row]
+print("quarters analysed:", len(rows))
+"""
 
-    Only the runs that go through `build_orchestra` consume these — everywhere else this
-    file wires `EchoWorker` into every role. The tool call is real: the worker runs it
-    against the committed `data/` CSV, so this is also the check that the shipped dataset
-    is readable through the whole stack.
+
+def _turns() -> list[AssistantTurn | BaseException]:
+    """Both real agents' conversations, in the order the plan runs them.
+
+    Retrieval queries the CSV and summarises; analysis runs one script over the artifact
+    retrieval wrote and summarises. Only the runs that go through `build_orchestra`
+    consume these — everywhere else this file wires `EchoWorker` into every role. Both
+    tool calls are real, so this is also the check that the shipped dataset is readable
+    and that one worker's pointer reaches the next one's subprocess.
     """
     return [
         AssistantTurn(
@@ -79,6 +92,21 @@ def _turns() -> list[AssistantTurn | BaseException]:
             usage_tokens=100,
         ),
         AssistantTurn(text="Retrieved the last three quarters.", usage_tokens=50),
+        AssistantTurn(
+            text="",
+            tool_calls=(
+                ToolCall(
+                    id="c2",
+                    name=RUN_PYTHON_TOOL,
+                    arguments={
+                        "code": _ANALYSIS_CODE,
+                        "inputs": ["artifact:fetch_quarterly_financials.json"],
+                    },
+                ),
+            ),
+            usage_tokens=100,
+        ),
+        AssistantTurn(text="Revenue rose in each quarter.", usage_tokens=50),
     ]
 
 

@@ -24,7 +24,12 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from orchestra.tools.base import ToolCall, ToolResponse, ToolSpec
+from orchestra.tools.base import (
+    ToolCall,
+    ToolResponse,
+    ToolSpec,
+    format_validation_error,
+)
 
 TOOL_NAME = "query_csv"
 
@@ -111,7 +116,8 @@ class QueryCsvTool:
             params = QueryCsvParams.model_validate(call.arguments)
         except ValidationError as exc:
             return ToolResponse(
-                content=f"Invalid arguments for {TOOL_NAME}: {_problems(exc)}", is_error=True
+                content=f"Invalid arguments for {TOOL_NAME}: {format_validation_error(exc)}",
+                is_error=True,
             )
 
         try:
@@ -228,16 +234,3 @@ def _to_csv(columns: list[str], header: list[str], rows: list[list[str]]) -> str
 def _quarters(available: list[str]) -> str:
     """Name the quarters on file for an error message, or say there are none."""
     return ", ".join(available) if available else "no quarters (it has no data rows)"
-
-
-def _problems(exc: ValidationError) -> str:
-    """Flatten a pydantic error into one line the model can act on.
-
-    Deliberately duplicated in `search.py` (§2.3): two tools, five lines, and no third
-    caller yet to show whether the axis of variation is the wording or the shape. It
-    moves into `tools/base.py` for every implementer at the third (§2.2).
-    """
-    return "; ".join(
-        f"{'.'.join(str(part) for part in error['loc']) or 'arguments'}: {error['msg']}"
-        for error in exc.errors()
-    )
