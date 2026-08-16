@@ -183,12 +183,19 @@ class InterruptHandler:
             kept = sum(1 for subtask in plan.subtasks if subtask.status is SubtaskStatus.DONE)
             plan = decision.plan
             state.plan = plan
-            # The replacements are new ids by construction, so none of them carries an
-            # attempt count for the engine to clear.
+            # Everything not carried over is a step about to run for the first time — and a
+            # replacement may legally reuse the id of the unfinished step it replaces, so
+            # the engine has to be told to drop that id's attempt count and its last error.
+            # Without this the reconciliation reports a failure the new step never had.
+            stale = frozenset(
+                subtask.id for subtask in plan.subtasks if subtask.status is not SubtaskStatus.DONE
+            )
             message = f"Replanned: {len(plan.subtasks)} subtasks, {kept} already done"
         else:
             stale = _reset(state, plan, decision.restart)
             message = f"Rerunning {len(stale)} subtasks: {', '.join(sorted(stale))}"
+        # Named, not inferred: only the pause knows which ids are starting over, and the
+        # engine's counters are keyed by id, not by object.
 
         # `plan_created`, not a kind of its own: a subscriber cannot draw rows from
         # transitions it has not seen, and this is a new set of rows. Deep-copied for the

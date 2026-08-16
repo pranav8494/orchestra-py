@@ -74,8 +74,7 @@ class ConsoleChat:
         self._cooked_mode: list[Any] | None = None
 
     async def __aenter__(self) -> "ConsoleChat":
-        """Start watching for the key, if there is a terminal to watch."""
-        self._listen()
+        """Claim the terminal for the run. Watching starts at the first `requested`."""
         return self
 
     async def __aexit__(
@@ -88,13 +87,24 @@ class ConsoleChat:
         self._deafen()
 
     def requested(self) -> bool:
-        """Has the key been pressed since this was last called? Consuming."""
+        """Has the key been pressed since this was last called? Consuming.
+
+        The first call is also what starts watching, because it is the engine's first lap
+        and so the first moment there is a run to interrupt. Arming any earlier would hold
+        stdin out of line mode across the planner's clarification prompt (#10), which reads
+        its answer through `input()` — with `ECHO` cleared the user types it blind.
+        """
+        self._listen()
         pressed, self._requested = self._requested, False
         return pressed
 
     @contextmanager
     def session(self) -> Iterator[None]:
         """Hold the terminal for one pause: region down, stdin back in line mode."""
+        # Presses before the chat opened are spent by opening it. Someone whose first `i`
+        # seemed to do nothing presses again, and that must not queue a second pause on
+        # the far side of this one.
+        self._requested = False
         with self._region.suspended(), self._line_mode():
             self._announce(BANNER)
             try:
@@ -142,18 +152,27 @@ class ConsoleChat:
             err_console.print(text, markup=False, highlight=False)
 
     def _listen(self) -> None:
-        """Put stdin in cbreak and read it from the event loop, on a terminal only.
+        """Put stdin in cbreak and read it from the event loop. Idempotent.
 
         Both streams have to be a terminal, as for `cli/app._asker`: the key is read from
         stdin and everything the pause shows is written to stderr.
         """
-        if sys.platform == "win32" or not sys.stdin.isatty() or not err_console.is_terminal:
+        if self._fd is not None or sys.platform == "win32":
+            return
+        if not sys.stdin.isatty() or not err_console.is_terminal:
             return
         fd = sys.stdin.fileno()
-        self._cooked_mode = termios.tcgetattr(fd)
+        cooked = termios.tcgetattr(fd)
         tty.setcbreak(fd)
-        self._fd = fd
-        asyncio.get_running_loop().add_reader(fd, self._on_key)
+        try:
+            asyncio.get_running_loop().add_reader(fd, self._on_key)
+        except BaseException:
+            # Restore before unwinding: nothing has recorded the descriptor yet, so
+            # `_deafen` would not know to put the terminal back and the shell would be
+            # left with no echo (§8).
+            termios.tcsetattr(fd, termios.TCSADRAIN, cooked)
+            raise
+        self._fd, self._cooked_mode = fd, cooked
 
     def _deafen(self) -> None:
         """Undo `_listen`. Idempotent, so an unwind through a pause is harmless."""
@@ -182,8 +201,12 @@ class ConsoleChat:
         """Give stdin its line discipline back for the block, and take it away after.
 
         The reader goes with it: `Prompt.ask` reads the same descriptor, and two readers on
-        one terminal split the user's line between them. `setcbreak` flushes on the way
-        back, so what was typed during the chat is not replayed as a second interrupt.
+        one terminal split the user's line between them.
+
+        Flushed both ways — `TCSAFLUSH` here, and `setcbreak`'s own default on the way back
+        — so nothing typed on the far side of the switch is replayed across it: the
+        keypress that opened the pause is not read back as its first message, and what was
+        typed during the chat is not read back as a second interrupt.
         """
         fd, cooked = self._fd, self._cooked_mode
         if fd is None or cooked is None:
@@ -191,7 +214,7 @@ class ConsoleChat:
             return
         loop = asyncio.get_running_loop()
         loop.remove_reader(fd)
-        termios.tcsetattr(fd, termios.TCSADRAIN, cooked)
+        termios.tcsetattr(fd, termios.TCSAFLUSH, cooked)
         try:
             yield
         finally:

@@ -450,6 +450,81 @@ async def test_a_pause_that_changed_nothing_leaves_the_attempt_counters_alone() 
 
 
 @pytest.mark.asyncio
+async def test_a_replan_reusing_an_unfinished_id_does_not_inherit_its_failure() -> None:
+    """A replacement may take the id of the step it replaces — nothing reserves an id that
+    never finished. The engine's counters are keyed by id, so without being told, the
+    reconciliation would report the *old* step's error against the new one, which never ran.
+    """
+    state = TaskState(user_request="Chart it.", plan=_plan())
+    worker = ScriptedWorker(fail_ids=frozenset({"fetch"}))
+    chat = ScriptedChat(
+        messages=["fetch is broken, work around it"],
+        armed=lambda: dispatches(worker, "fetch") == 1,
+    )
+    provider = FakeProvider(
+        responses=[
+            InterruptDraft(
+                action=InterruptAction.REPLAN,
+                reply="Reworking the remaining steps.",
+                subtasks=[
+                    # The same id as the failing step, which is not `kept` and so not reserved.
+                    SubtaskDraft(
+                        id="fetch",
+                        role=AgentRole.DATA_RETRIEVAL,
+                        instruction="Load it differently.",
+                    )
+                ],
+            )
+        ]
+    )
+    engine = ExecutionEngine(
+        workers=dict.fromkeys(AgentRole, worker),
+        broker=Broker(),
+        subtask_attempts=2,
+        interrupts=InterruptHandler(provider, chat=chat, broker=Broker()),
+    )
+
+    await engine.run(state)
+
+    assert state.plan is not None
+    # The replacement got the full budget, rather than the one attempt the old step left.
+    assert dispatches(worker, "fetch") == 3
+    failures = [
+        event
+        for event in state.events
+        if event.kind is EventKind.SUBTASK_FAILED and event.subtask_id == "fetch"
+    ]
+    # One real failure, from the attempt that actually ran out — not a second invented by
+    # the reconciliation reading the pre-replan error.
+    assert len(failures) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_provider_failure_during_a_pause_ends_the_run_with_its_report() -> None:
+    """§8: the error is raised inside a `TaskGroup` body, where anything escaping becomes an
+    `ExceptionGroup` the CLI renders as a bug. It has to come out as a `TaskFailure` the
+    ledger can record, so the artifacts already on disk are still reported."""
+    state = TaskState(user_request="Chart it.", plan=_plan())
+    worker = ScriptedWorker()
+    chat = ScriptedChat(
+        messages=["change the chart"], armed=lambda: set(state.artifacts) == {"fetch"}
+    )
+    provider = FakeProvider(responses=[ProviderError("rate limited")])
+    engine = ExecutionEngine(
+        workers=dict.fromkeys(AgentRole, worker),
+        broker=Broker(),
+        interrupts=InterruptHandler(provider, chat=chat, broker=Broker()),
+    )
+
+    with pytest.raises(TaskFailure) as raised:
+        await engine.run(state)
+
+    assert "rate limited" in str(raised.value)
+    assert state.artifacts == {"fetch": "artifact:fetch.txt"}  # the finished work survives
+    assert state.events[-1].kind is EventKind.RUN_FINISHED  # nobody is left on a spinner
+
+
+@pytest.mark.asyncio
 async def test_no_pause_is_opened_once_the_step_cap_has_ended_the_run() -> None:
     """A conversation cannot lift the run's work budget, so offering one would be a chat
     whose replan nothing would dispatch (§10)."""

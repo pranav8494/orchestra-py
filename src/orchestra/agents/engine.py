@@ -98,10 +98,9 @@ class ExecutionEngine:
         So is `plan`, when an interrupt replans what is left (#12).
 
         Raises:
-            TaskFailure: there is no plan, a role has no worker, or the step cap was
-                exceeded. All three end the run — a failed *subtask* does not.
-            ProviderError: the provider failed while the orchestrator was handling an
-                interrupt; passed through from the adapter.
+            TaskFailure: there is no plan, a role has no worker, the step cap was
+                exceeded, or an interrupt could not be handled. All four end the run — a
+                failed *subtask* does not.
             asyncio.CancelledError: in-flight subtasks are cancelled with it and the error
                 is re-raised, never swallowed (§10).
         """
@@ -137,6 +136,10 @@ class ExecutionEngine:
         last_error: dict[str, str] = {}
         interrupts = self._interrupts
         paused = False
+        # A pause that failed. Held rather than raised, for the reason `capped` is: an
+        # exception leaving the `TaskGroup` body comes out as an `ExceptionGroup`, which
+        # `app.py` cannot recognise and the CLI would render as a bug (§8).
+        interrupt_error: OrchestraError | None = None
 
         async with asyncio.TaskGroup() as group:
             while True:
@@ -149,16 +152,22 @@ class ExecutionEngine:
                     paused = paused or interrupts.pending()
                     if paused and not in_flight:
                         paused = False
-                        restarted = await interrupts.handle(state)
+                        try:
+                            restarted = await interrupts.handle(state)
+                        except OrchestraError as exc:
+                            # Not `Exception`: anything outside the taxonomy is a bug and
+                            # must reach the boundary as one (§8).
+                            interrupt_error = exc
+                            restarted = frozenset()
                         if state.plan is not None:
                             plan = state.plan  # a replan hands back a different one
-                        # A step the user sent back starts its attempts afresh — only
+                        # A step the pause sent back starts its attempts afresh — only
                         # those, so a pause that changed nothing changes nothing. The step
                         # cap is untouched, so the run's total work stays bounded (§10).
                         for subtask_id in restarted:
                             attempts.pop(subtask_id, None)
                             last_error.pop(subtask_id, None)
-                if not capped and not paused:
+                if not capped and not paused and interrupt_error is None:
                     for subtask in _ready(plan, in_flight):
                         if dispatched >= self._step_cap:
                             # Stop dispatching but let in-flight work finish: the cap ends
@@ -198,6 +207,18 @@ class ExecutionEngine:
                 )
 
         done = sum(1 for subtask in plan.subtasks if subtask.status is SubtaskStatus.DONE)
+
+        if interrupt_error is not None:
+            # A `TaskFailure`, not the original: `app.py` records this on the ledger so the
+            # report still names the artifacts on disk, where re-raising a `ProviderError`
+            # would exit 4 with nothing on stdout. Settled the same way for a failed
+            # synthesis in #9.
+            message = (
+                f"The run stopped while handling an interrupt: {interrupt_error}. "
+                f"{done} of {len(plan.subtasks)} subtasks finished before stopping."
+            )
+            await self._emit(state, EventKind.RUN_FINISHED, message=message)
+            raise TaskFailure(message) from interrupt_error
 
         if capped:
             # `app.py` records this message on `state.failure_reason` and the report names
