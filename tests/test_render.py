@@ -11,10 +11,14 @@ race and teardown.
 
 import asyncio
 import functools
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
+from rich.console import Group
+from rich.live import Live
 from rich.panel import Panel
+from rich.spinner import Spinner
 from rich.table import Table
 
 from orchestra.agents.engine import ExecutionEngine
@@ -27,11 +31,16 @@ from orchestra.cli.console import console
 from orchestra.cli.format import OutputFormat
 from orchestra.cli.render import (
     DASHBOARD_TASK_NAME,
+    EVENT_LOG_LINES,
     PLANNING_HEADLINE,
+    SPINNER_TASK_NAME,
     RenderMode,
     RunView,
+    active_panel,
     dashboard,
+    dashboard_frame,
     event_line,
+    event_log,
     result_renderable,
     run_table,
 )
@@ -220,6 +229,99 @@ def test_run_table_title_is_the_headline() -> None:
     assert str(run_table(view).title) == "Executing 3 subtasks"
 
 
+# --------------------------------------------------------------------------
+# The polish half of #11: spinners, the active-agent panel, and the event log.
+# --------------------------------------------------------------------------
+
+
+def _started(subtask_id: str) -> TaskEvent:
+    return TaskEvent(kind=EventKind.SUBTASK_STARTED, subtask_id=subtask_id, message="working")
+
+
+def test_run_view_seeds_each_row_with_its_instruction() -> None:
+    """The active panel names the work, and only the plan carries it."""
+    assert _seeded_view().rows["crunch"].instruction == "Compute the trend"
+
+
+def test_run_view_active_lists_every_running_row_in_plan_order() -> None:
+    """The fan-out signal (#17): two subtasks dispatched at once are two entries, so the
+    panel below draws two spinners rather than one summary line."""
+    view = _seeded_view()
+    view.apply(_started("fetch"))
+    view.apply(_started("crunch"))
+    view.apply(
+        TaskEvent(kind=EventKind.SUBTASK_COMPLETED, subtask_id="fetch", message="artifact:f.txt")
+    )
+    view.apply(_started("chart"))
+
+    assert [row.id for row in view.active] == ["crunch", "chart"]
+
+
+def test_run_view_log_keeps_the_most_recent_events_and_drops_the_oldest() -> None:
+    """Bounded, so it scrolls: a long run must not grow the region past the terminal."""
+    view = RunView()
+    for index in range(EVENT_LOG_LINES + 3):
+        view.apply(
+            TaskEvent(kind=EventKind.SUBTASK_WARNING, subtask_id="fetch", message=str(index))
+        )
+
+    assert len(view.log) == EVENT_LOG_LINES
+    assert view.log[-1].endswith(str(EVENT_LOG_LINES + 2))
+    assert view.log[0].endswith(" 3")  # the first three scrolled off
+
+
+def test_run_view_log_records_an_event_for_a_subtask_it_has_no_row_for() -> None:
+    """`apply` drops such an event from the table on purpose; the log is where it stays
+    visible, which is the only way an operator sees a plan/stream mismatch."""
+    view = _seeded_view()
+
+    view.apply(TaskEvent(kind=EventKind.SUBTASK_FAILED, subtask_id="ghost", message="boom"))
+
+    assert "ghost" not in view.rows
+    assert view.log[-1] == "failed  ghost boom"
+
+
+def test_active_panel_draws_one_spinner_per_running_subtask() -> None:
+    """The renderable, not Rich's painting of it (§12): one `Spinner` per active row."""
+    view = _seeded_view()
+    view.apply(_started("fetch"))
+    view.apply(_started("crunch"))
+
+    panel = active_panel(view)
+
+    assert isinstance(panel.renderable, Group)
+    spinners = [part for part in panel.renderable.renderables if isinstance(part, Spinner)]
+    assert len(spinners) == len(panel.renderable.renderables)
+    assert [str(spinner.text) for spinner in spinners] == [
+        "data_retrieval  Load the ledger",
+        "analytics  Compute the trend",
+    ]
+
+
+def test_event_log_shows_the_stream_oldest_first() -> None:
+    view = _seeded_view()
+    view.apply(_started("fetch"))
+
+    body = str(event_log(view).renderable)
+
+    assert body.splitlines() == ["plan    Executing 3 subtasks", "start   fetch working"]
+
+
+def test_dashboard_frame_omits_the_panels_that_have_nothing_to_say() -> None:
+    """An empty box claims content the run has not produced. Before the first event there
+    is only the table; once a step is running there are all three."""
+    empty = dashboard_frame(RunView())
+    assert isinstance(empty, Group)
+    assert [type(part) for part in empty.renderables] == [Table]
+
+    view = _seeded_view()
+    view.apply(_started("fetch"))
+    running = dashboard_frame(view)
+
+    assert isinstance(running, Group)
+    assert [type(part) for part in running.renderables] == [Table, Panel, Panel]
+
+
 @pytest.mark.parametrize(
     ("event", "expected"),
     [
@@ -311,6 +413,27 @@ def test_result_renderable_panel_folds_a_long_line_instead_of_cropping_it() -> N
     assert pointer in captured.get()
 
 
+def test_result_renderable_panel_embeds_the_ascii_chart_and_its_openable_path(
+    tmp_path: Path,
+) -> None:
+    """#11's last polish item. The drawing is inline so a piped run still shows it, and the
+    path is resolved against the run's directory so the pointer is something to open."""
+    state = _finished_state()
+    state.artifact_dir = tmp_path
+    state.final_result = FinalReport(
+        executive_summary=SUMMARY,
+        chart="artifact:trend.html",
+        chart_ascii="Q1 ###\nQ2 #####",
+    )
+
+    rendered = result_renderable(state, output=OutputFormat.TEXT, quiet=False, terminal=True)
+
+    assert isinstance(rendered, Panel)
+    body = str(rendered.renderable)
+    assert "Q2 #####" in body
+    assert f"Chart: {tmp_path / 'trend.html'}" in body
+
+
 def test_result_renderable_quiet_drops_the_trace_and_keeps_the_report() -> None:
     """§5: `--quiet` suppresses progress, never the result. The trace is the progress."""
     rendered = result_renderable(
@@ -338,7 +461,8 @@ def _pending_tasks() -> list[asyncio.Task[None]]:
     return [
         task
         for task in asyncio.all_tasks()
-        if task is not asyncio.current_task() and task.get_name() == DASHBOARD_TASK_NAME
+        if task is not asyncio.current_task()
+        and task.get_name() in {DASHBOARD_TASK_NAME, SPINNER_TASK_NAME}
     ]
 
 
@@ -426,6 +550,40 @@ async def test_dashboard_live_mode_folds_events_in_and_leaves_stdout_alone(
     assert view.rows["fetch"].status is SubtaskStatus.RUNNING
     assert capsys.readouterr().out == ""
     assert broker.subscriber_count == 0
+
+
+@pytest.mark.asyncio
+async def test_dashboard_live_mode_redraws_between_events_so_the_spinners_advance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Rich advances a spinner only when the region is redrawn, and lifecycle events arrive
+    seconds apart — without the tick a "spinner" is a still frame. Counting refreshes, not
+    reading frames: which glyph Rich picked is Rich's business (§12)."""
+    monkeypatch.setattr(render, "SPINNER_TICK_SECONDS", 0.001)
+    refreshes = 0
+
+    def count(_live: Live) -> None:
+        nonlocal refreshes
+        refreshes += 1
+
+    monkeypatch.setattr(Live, "refresh", count)
+    broker: Broker[TaskEvent] = Broker()
+
+    async with dashboard(broker, mode=RenderMode.LIVE) as view:
+        idle = refreshes
+        await asyncio.sleep(0.05)
+        assert refreshes == idle  # nothing is running, so there is nothing to animate
+
+        await broker.publish_lifecycle(_plan_created())
+        await broker.publish_lifecycle(_started("fetch"))
+        await asyncio.sleep(0.01)  # let the consumer drain both
+        assert view.active
+        after_events = refreshes
+        await asyncio.sleep(0.05)  # no further events: only the tick can redraw
+        ticked = refreshes - after_events
+
+    assert ticked > 0
+    assert _pending_tasks() == []  # and the ticker went with the consumer
 
 
 @pytest.mark.asyncio

@@ -1,8 +1,9 @@
 """The live dashboard: the one module that may import `rich.live` (§3.1, §5).
 
-**A model, then a drawing of it.** `RunView` is Rich-free and `run_table`/`event_line`
-are pure functions of it, which is what makes §12's "assert on the data handed to the
-renderer" practical.
+**A model, then a drawing of it.** `RunView` is Rich-free and `run_table`/`active_panel`/
+`event_log`/`event_line` are pure functions of it, which is what makes §12's "assert on
+the data handed to the renderer" practical. `dashboard_frame` composes them into the
+region `Live` owns.
 
 **The renderer never reads state.** Everything it draws arrives as a `TaskEvent`,
 including the pending rows (`TaskEvent.plan`). Polling `TaskState` would race the
@@ -14,14 +15,16 @@ the corruption §5 forbids. The mode is `cli/app.py`'s decision; no flag policy 
 """
 
 import asyncio
+from collections import deque
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 
-from rich.console import RenderableType
+from rich.console import Group, RenderableType
 from rich.live import Live
 from rich.panel import Panel
+from rich.spinner import Spinner
 from rich.table import Table
 from rich.text import Text
 
@@ -37,6 +40,19 @@ PLANNING_HEADLINE = "Planning the request"
 # Named so a leaked task is identifiable in a task dump, and a constant so a test
 # asserting cleanup cannot drift from the string that creates it.
 DASHBOARD_TASK_NAME = "dashboard"
+SPINNER_TASK_NAME = "dashboard-spinner"
+
+# How many lines the event log keeps. Bounded because a run publishes unboundedly many
+# and the region has to fit a terminal; dropping the oldest is what makes it scroll.
+EVENT_LOG_LINES = 8
+
+# ASCII frames (`-\|/`), not the default braille: this is the one animated glyph on
+# screen, and #31 has a unicode one raising `UnicodeEncodeError` on a non-UTF-8 stream.
+SPINNER_NAME = "line"
+
+# Rich advances a spinner only when the region is redrawn, and lifecycle events arrive
+# seconds apart. Matches `SPINNER_NAME`'s own frame interval in `rich._spinners`.
+SPINNER_TICK_SECONDS = 0.13
 
 # Valued with the ledger's own `SubtaskStatus`: a second status enum for the table would
 # parallel an existing closed set (§1.5) and drift when the engine gains a state.
@@ -93,6 +109,9 @@ class RunRow:
     id: str
     role: AgentRole
     status: SubtaskStatus
+    # From the plan, so it is known before the step starts. The table has no room for it;
+    # the active panel is where "what is this agent actually doing" belongs.
+    instruction: str = ""
     detail: str = ""
     # Kept out of `detail` because the two arrive in the wrong order: a warning is raised
     # mid-step and the completion that overwrites `detail` lands after it.
@@ -108,6 +127,17 @@ class RunView:
     # Insertion order is plan order, seeded from `Plan.subtasks` in one pass. Keyed by id
     # because every later event names a subtask, not a position.
     rows: dict[str, RunRow] = field(default_factory=dict)
+    # Every event, in arrival order, already formatted by `event_line` — the same lines
+    # the plain sink writes, so the piped log and the on-screen one cannot drift (§2).
+    log: deque[str] = field(default_factory=lambda: deque(maxlen=EVENT_LOG_LINES))
+
+    @property
+    def active(self) -> list[RunRow]:
+        """The rows the stream last reported as running — one spinner each.
+
+        A list, not a count: concurrent subtasks have to be individually visible (#17).
+        """
+        return [row for row in self.rows.values() if row.status is SubtaskStatus.RUNNING]
 
     def apply(self, event: TaskEvent) -> None:
         """Fold one event into the view.
@@ -117,6 +147,10 @@ class RunView:
         `plan_created`; inventing a row would state a role the stream never gave, and
         crashing would lose the dashboard over one frame.
         """
+        # Before the row lookup: an event naming an unknown subtask still happened, and
+        # the log is the one place it can be seen.
+        self.log.append(event_line(event))
+
         if event.kind is EventKind.PLAN_CREATED:
             self.headline = event.message
             if event.plan is not None:
@@ -124,7 +158,12 @@ class RunView:
                 # would keep rows from a plan no longer being executed. Status comes off
                 # the event — a resumed run's plan need not be all-pending.
                 self.rows = {
-                    subtask.id: RunRow(id=subtask.id, role=subtask.role, status=subtask.status)
+                    subtask.id: RunRow(
+                        id=subtask.id,
+                        role=subtask.role,
+                        status=subtask.status,
+                        instruction=subtask.instruction,
+                    )
                     for subtask in event.plan.subtasks
                 }
             return
@@ -176,6 +215,57 @@ def run_table(view: RunView) -> Table:
             Text(row.warning, style=_WARNING_STYLE) if row.warning else Text(row.detail),
         )
     return table
+
+
+def active_panel(view: RunView) -> Panel:
+    """The working agents, one spinner each. Pure — no console, no I/O.
+
+    Instruction rather than status: the table already says "running", and what a fan-out
+    has to show is *which* agent is doing *what* while another does something else.
+    """
+    return Panel(
+        Group(
+            *(
+                Spinner(
+                    SPINNER_NAME,
+                    # `Text`, as in `run_table`: an instruction quoting a bracketed token
+                    # must survive Rich's markup parser.
+                    text=Text(f"{row.role.value}  {row.instruction}"),
+                    style=_STATUS_STYLES[SubtaskStatus.RUNNING],
+                )
+                for row in view.active
+            )
+        ),
+        title="Active",
+        title_align="left",
+    )
+
+
+def event_log(view: RunView) -> Panel:
+    """The last `EVENT_LOG_LINES` events, oldest first. Pure — no console, no I/O.
+
+    Elided, not wrapped, for the same reason as the table's detail column: a reflowed
+    line changes the region's height and scrolls the frames above it off screen.
+    """
+    return Panel(
+        Text("\n".join(view.log), no_wrap=True, overflow="ellipsis"),
+        title="Events",
+        title_align="left",
+    )
+
+
+def dashboard_frame(view: RunView) -> RenderableType:
+    """The whole `Live` region: the plan, who is working, and what just happened.
+
+    A panel with nothing to say is dropped rather than drawn empty — an empty box claims
+    content the run has not produced yet.
+    """
+    parts: list[RenderableType] = [run_table(view)]
+    if view.active:
+        parts.append(active_panel(view))
+    if view.log:
+        parts.append(event_log(view))
+    return Group(*parts)
 
 
 def event_line(event: TaskEvent) -> str:
@@ -299,12 +389,32 @@ async def _consume(
 
         # One `Live`, on stderr (§5). `auto_refresh=False` keeps Rich's refresh thread out
         # of the event loop; refreshing per event is cheaper and prompter than its 4/s.
-        with Live(run_table(view), console=err_console, auto_refresh=False) as live:
+        with Live(dashboard_frame(view), console=err_console, auto_refresh=False) as live:
 
             def redraw(_event: TaskEvent) -> None:
-                live.update(run_table(view), refresh=True)
+                live.update(dashboard_frame(view), refresh=True)
 
-            await _pump(queue, view, redraw)
+            spinner = asyncio.create_task(_spin(live, view), name=SPINNER_TASK_NAME)
+            try:
+                await _pump(queue, view, redraw)
+            finally:
+                # Bounded to this `with`, so the region is never refreshed after it is
+                # exited and no task outlives the consumer that owns it (§10).
+                spinner.cancel()
+                await asyncio.wait({spinner})
+
+
+async def _spin(live: Live, view: RunView) -> None:
+    """Redraw while an agent is working, so the spinners advance between events.
+
+    A task on our own loop rather than `Live(auto_refresh=True)`, which runs Rich's
+    refresh thread beside the event loop. Idle when nothing is running: a finished run
+    has no animation to drive, and neither has one still being planned.
+    """
+    while True:
+        await asyncio.sleep(SPINNER_TICK_SECONDS)
+        if view.active:
+            live.refresh()
 
 
 async def _pump(
