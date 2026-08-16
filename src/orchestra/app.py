@@ -36,10 +36,9 @@ RUN_DIR_FORMAT = "%Y-%m-%dT%H-%M-%SZ"
 def _run_directory() -> str:
     """This run's subdirectory name.
 
-    Generated here, not in `config.py`: a timestamp is not configuration, and §6 keeps
-    that module the only reader of the environment. Second granularity keeps the name
-    readable — two runs starting in the same second share a directory, and
-    `ArtifactStore._reserve`'s `-1` suffix already separates their files.
+    Generated here, not in `config.py`: a timestamp is not configuration. Second
+    granularity keeps the name readable, at the price of two runs starting in the same
+    second sharing a directory.
     """
     return datetime.now(UTC).strftime(RUN_DIR_FORMAT)
 
@@ -110,8 +109,8 @@ def build_orchestra(config: Config) -> Orchestra:
         model=config.anthropic_model,
         max_tokens=config.anthropic_max_tokens,
     )
-    # Per run, not one flat directory for all time: a second run of the same plan would
-    # otherwise interleave with the first and be renamed around it by `_reserve`.
+    # Per run, not one flat directory for all time, where a repeated plan lands as
+    # `_reserve`'s `-1` variants with nothing recording which run wrote which.
     store = ArtifactStore(config.artifact_dir / _run_directory())
     broker: Broker[TaskEvent] = Broker()
     # A mapping, not a conditional in the engine: a real worker lands as one

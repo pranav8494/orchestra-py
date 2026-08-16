@@ -18,11 +18,11 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict
 
 from orchestra.core.state import (
-    ARTIFACT_PREFIX,
     AgentRole,
     ArtifactPointer,
     SubtaskStatus,
     TaskState,
+    artifact_path,
 )
 
 # Never print nothing: a silent command is indistinguishable from one that crashed.
@@ -89,8 +89,8 @@ class ResultDocument(BaseModel):
     report: ReportView | None
     subtasks: list[SubtaskView]
     failure_reason: str | None
-    # A string, so the document stays plain JSON. `report.chart` keeps its pointer: this
-    # is what makes it resolvable, not a replacement for it.
+    # Beside `report.chart`, which stays a pointer: the document reports what the run
+    # recorded, and rewriting one field into a path is the text shape's job, not this one's.
     artifact_dir: str | None
 
 
@@ -134,28 +134,29 @@ def _text(state: TaskState, *, quiet: bool) -> str:
             # The path, not the pointer: the user has to be able to open it.
             blocks.append(f"Chart: {_artifact_path(report.chart, state.artifact_dir)}")
 
-    steps = _steps(state)
-    if steps and not quiet:
-        blocks.append(steps)
+    trace = _trace(state)
+    if trace and not quiet:
+        blocks.append(trace)
     return "\n\n".join(blocks)
 
 
-def _artifact_path(pointer: str, artifact_dir: Path | None) -> str:
+def _artifact_path(pointer: ArtifactPointer, artifact_dir: Path | None) -> str:
     """Where `pointer`'s payload is, or the pointer itself when the run named no directory.
 
-    String work on the directory rather than `ArtifactStore._resolve`: that one is I/O and
-    raises, and this module promises neither (§2.3 — across a layer boundary).
+    `core.state.artifact_path` rather than `ArtifactStore._resolve`: that one does I/O and
+    raises, and this module promises neither.
     """
     if artifact_dir is None:
         return pointer
-    return str(artifact_dir / pointer.removeprefix(ARTIFACT_PREFIX))
+    return str(artifact_path(artifact_dir, pointer))
 
 
-def _steps(state: TaskState) -> str:
-    """Where the run's artifacts are, then one line per subtask: status, id, artifact.
+def _trace(state: TaskState) -> str:
+    """The run's trace as one block: its directory, then a line per subtask.
 
     Fixed column widths, not fitted to the ids, so the block diffs cleanly between runs.
-    The directory leads so a run that produced no chart is still findable.
+    The directory leads so a run that produced no chart is still findable, and rides in
+    the same block so `--quiet` drops the two together.
     """
     lines = [] if state.artifact_dir is None else [f"Artifacts: {state.artifact_dir}"]
     if state.plan is not None:

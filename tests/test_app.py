@@ -16,9 +16,9 @@ import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pytest
 from pydantic import BaseModel, SecretStr
@@ -37,10 +37,17 @@ from orchestra.agents.workers.visualization import ChartDraft
 from orchestra.app import RUN_DIR_FORMAT, Orchestra, build_orchestra, run_once
 from orchestra.artifacts import ArtifactStore
 from orchestra.charts import ChartKind, ChartSeries, ChartSpec
+from orchestra.cli.format import OutputFormat, format_result
 from orchestra.config import Config
 from orchestra.core.errors import ProviderError
 from orchestra.core.events import Broker
-from orchestra.core.state import AgentRole, EventKind, SubtaskStatus, TaskEvent
+from orchestra.core.state import (
+    ARTIFACT_PREFIX,
+    AgentRole,
+    EventKind,
+    SubtaskStatus,
+    TaskEvent,
+)
 from orchestra.providers.anthropic import AnthropicProvider
 from orchestra.providers.base import AssistantTurn, Provider
 from orchestra.tools.base import ToolCall
@@ -51,7 +58,7 @@ SUMMARY = "Revenue grew in each of the last three quarters."
 # From the scenario rather than spelled out, so a renamed step fails on the name and not
 # on a stale literal.
 FIRST_STEP = LINEAR.draft().subtasks[0].id
-FIRST_POINTER = f"artifact:{FIRST_STEP}.txt"
+FIRST_POINTER = f"{ARTIFACT_PREFIX}{FIRST_STEP}.txt"
 CHART_STEP = next(
     subtask.id for subtask in LINEAR.draft().subtasks if subtask.role is AgentRole.VISUALIZATION
 )
@@ -154,6 +161,19 @@ def _orchestra(
     )
 
 
+def _config(tmp_path: Path, **overrides: Any) -> Config:
+    """A valid config that writes under `tmp_path` and nowhere else, plus `overrides`.
+
+    Here rather than in `conftest.py`: this is the only module that builds a `Config` by
+    hand, and a fixture nobody else can use is one shared too early.
+    """
+    return Config(
+        anthropic_api_key=SecretStr("test-key"),
+        artifact_dir=tmp_path / "artifacts",
+        **overrides,
+    )
+
+
 @pytest.mark.asyncio
 async def test_run_task_plans_executes_and_returns_a_ledger_of_pointers(
     store: ArtifactStore,
@@ -164,7 +184,7 @@ async def test_run_task_plans_executes_and_returns_a_ledger_of_pointers(
 
     assert state.plan is not None
     assert state.user_request == LINEAR.prompt
-    assert state.artifact_dir == store.root  # the ledger names where its pointers resolve
+    assert state.artifact_dir == store.root  # the ledger records the store it was wired to
     assert [subtask.status for subtask in state.plan.subtasks] == [SubtaskStatus.DONE] * 3
     assert state.failed_subtasks == []
     for subtask in state.plan.subtasks:
@@ -228,12 +248,11 @@ async def test_build_orchestra_wires_the_app_from_config_without_touching_the_ne
     tmp_path: Path,
 ) -> None:
     """Construction is offline and eager: the artifact directory exists before step one (§9)."""
-    artifacts = tmp_path / "artifacts"
-    config = Config(anthropic_api_key=SecretStr("test-key"), artifact_dir=artifacts)
+    config = _config(tmp_path)
 
     orchestra = build_orchestra(config)
     try:
-        assert artifacts.is_dir()
+        assert config.artifact_dir.is_dir()
         assert orchestra.broker.subscriber_count == 0
     finally:
         await orchestra.aclose()
@@ -243,18 +262,15 @@ async def test_build_orchestra_wires_the_app_from_config_without_touching_the_ne
 async def test_build_orchestra_roots_the_run_in_a_timestamped_subdirectory(
     tmp_path: Path,
 ) -> None:
-    """Runs no longer share one flat directory, so a second run of a plan cannot bury the
-    first under `-1` suffixes."""
-    artifacts = tmp_path / "artifacts"
-    config = Config(anthropic_api_key=SecretStr("test-key"), artifact_dir=artifacts)
+    """A run's files land under a stamp of their own, never in `ARTIFACT_DIR` itself."""
+    config = _config(tmp_path)
 
     orchestra = build_orchestra(config)
     try:
-        run_dirs = list(artifacts.iterdir())
+        run_dirs = list(config.artifact_dir.iterdir())
         assert len(run_dirs) == 1
         assert run_dirs[0].is_dir()
-        # Parses as the stamp it claims to be, so the name stays sortable and portable.
-        datetime.strptime(run_dirs[0].name, RUN_DIR_FORMAT).replace(tzinfo=UTC)
+        datetime.strptime(run_dirs[0].name, RUN_DIR_FORMAT)  # the stamp it claims to be
     finally:
         await orchestra.aclose()
 
@@ -263,17 +279,16 @@ async def test_build_orchestra_roots_the_run_in_a_timestamped_subdirectory(
 async def test_build_orchestra_gives_each_run_its_own_directory(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The clock is frozen rather than slept on: two runs in the same second are meant to
-    share a directory, so only a moved clock proves the name tracks it."""
-    artifacts = tmp_path / "artifacts"
-    config = Config(anthropic_api_key=SecretStr("test-key"), artifact_dir=artifacts)
+    """`_run_directory` is scripted rather than waited on: two runs in the same second are
+    meant to share a directory, so only two stamps show the name tracking them."""
+    config = _config(tmp_path)
     stamps = iter(["2026-08-16T09-30-00Z", "2026-08-16T09-30-01Z"])
     monkeypatch.setattr(app_module, "_run_directory", lambda: next(stamps))
 
     first = build_orchestra(config)
     second = build_orchestra(config)
     try:
-        assert sorted(path.name for path in artifacts.iterdir()) == [
+        assert sorted(path.name for path in config.artifact_dir.iterdir()) == [
             "2026-08-16T09-30-00Z",
             "2026-08-16T09-30-01Z",
         ]
@@ -289,9 +304,8 @@ async def test_run_once_keeps_one_run_s_artifacts_together_and_says_where(
 ) -> None:
     """The ledger is self-describing: every pointer it holds resolves under the directory
     it names, and that directory is a child of `ARTIFACT_DIR`, never `ARTIFACT_DIR` itself."""
-    artifacts = tmp_path / "artifacts"
     provider = FakeProvider(responses=_responses(chart=True), turns=_turns())
-    _offline_run(monkeypatch, tmp_path, provider)
+    artifacts = _offline_run(monkeypatch, tmp_path, provider)
 
     state = await run_once(LINEAR.prompt)
 
@@ -300,7 +314,7 @@ async def test_run_once_keeps_one_run_s_artifacts_together_and_says_where(
     assert state.artifacts  # the run wrote something to be wrong about
     written = {path.name for path in state.artifact_dir.iterdir()}
     for pointer in state.artifacts.values():
-        assert pointer.removeprefix("artifact:") in written
+        assert pointer.removeprefix(ARTIFACT_PREFIX) in written
 
 
 @pytest.mark.asyncio
@@ -313,9 +327,8 @@ async def test_build_orchestra_carries_every_configured_bound_to_its_consumer(
     worse than no field, because it reports as configurable and is not, and only a live
     request would otherwise show `ANTHROPIC_MAX_TOKENS` never arriving.
     """
-    config = Config(
-        anthropic_api_key=SecretStr("test-key"),
-        artifact_dir=tmp_path / "artifacts",
+    config = _config(
+        tmp_path,
         anthropic_max_tokens=1234,
         max_concurrency=7,
         worker_token_budget=4321,
@@ -381,16 +394,22 @@ class RecordingObserver:
                 self.exited += 1
 
 
-def _offline_run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, provider: FakeProvider) -> None:
+def _offline_run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, provider: FakeProvider) -> Path:
     """Let `run_once` load its own config and wire its own services; the vendor adapter is
-    swapped at the provider port, the one seam that keeps this offline (§12)."""
+    swapped at the provider port, the one seam that keeps this offline (§12).
+
+    Returns the `ARTIFACT_DIR` it exported, so a caller asserting on where the run wrote
+    reads it from here rather than rebuilding the path.
+    """
+    artifacts = tmp_path / "artifacts"
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
-    monkeypatch.setenv("ARTIFACT_DIR", str(tmp_path / "artifacts"))
+    monkeypatch.setenv("ARTIFACT_DIR", str(artifacts))
 
     def _create_provider(*, api_key: SecretStr, model: str, max_tokens: int) -> Provider:
         return provider
 
     monkeypatch.setattr(app_module, "create_provider", _create_provider)
+    return artifacts
 
 
 @pytest.mark.asyncio
@@ -443,10 +462,16 @@ async def test_run_once_carries_the_visualization_chart_into_the_report(
 
     report = state.final_result
     assert report is not None
-    assert report.chart == f"artifact:{CHART_STEP}.html"
-    # Resolved through the run's own directory, which is where the store now writes.
+    assert report.chart == f"{ARTIFACT_PREFIX}{CHART_STEP}.html"
+    # Resolved through the run's own directory, which is where the store writes.
     assert state.artifact_dir is not None
-    assert "<html" in ArtifactStore(state.artifact_dir).get_text(report.chart)
+    store = ArtifactStore(state.artifact_dir)
+    assert "<html" in store.get_text(report.chart)
+    # The two composers of the pointer-to-path rule, pinned to each other: the path the
+    # CLI prints is the one the store resolves.
+    assert f"Chart: {store.path_for(report.chart)}" in format_result(
+        state, output=OutputFormat.TEXT
+    )
     # The drawing, not just a pointer to one: what the terminal prints is the criterion.
     assert report.chart_ascii is not None
     assert CHART_CATEGORY in report.chart_ascii

@@ -129,7 +129,7 @@ def test_format_result_text_without_an_ascii_chart_leaves_no_blank_block(
 
 
 def test_format_result_text_chart_falls_back_to_the_pointer_without_an_artifact_dir() -> None:
-    """A ledger that never recorded its directory still prints something (§ nothing raises)."""
+    """A ledger that never recorded its directory prints the pointer rather than raising."""
     rendered = _text(_state(report=_report(), artifact_dir=None))
 
     assert "Chart: artifact:trend.html" in rendered
@@ -200,8 +200,7 @@ def test_format_result_json_has_the_documented_keys() -> None:
     assert document["status"] == "failed"  # one subtask failed
     assert document["failure_reason"] is None
     assert document["artifact_dir"] == str(RUN_DIR)
-    # The pointer stays: `report` is a published contract, and the directory beside it is
-    # what makes the pointer resolvable.
+    # `chart` goes out as the pointer the run minted, not as the path the text shape prints.
     assert document["report"] == {
         "executive_summary": SUMMARY,
         "key_figures": [{"label": "Q3 revenue", "value": "145", "source": "artifact:fetch.txt"}],
@@ -228,7 +227,7 @@ def test_format_result_json_carries_the_ascii_chart_as_one_document() -> None:
 
 
 def test_format_result_json_artifact_dir_is_null_when_the_run_recorded_none() -> None:
-    """Null, never absent: a consumer reads one shape (`json.loads` also proves one document)."""
+    """Null, never absent: the key is there whether or not the run recorded a directory."""
     document = _document(_state(report=_report(), artifact_dir=None))
 
     assert document["artifact_dir"] is None

@@ -28,6 +28,16 @@ ArtifactPointer = Annotated[
 ]
 
 
+def artifact_path(root: Path, pointer: ArtifactPointer) -> Path:
+    """The path `pointer` names inside `root`.
+
+    Pure — whether it exists is `artifacts.py`'s question. Here beside the constants it
+    is built from, so the store that writes the file and the CLI that prints its path
+    read the pointer the same way.
+    """
+    return root / pointer.removeprefix(ARTIFACT_PREFIX)
+
+
 class AgentRole(StrEnum):
     """Worker roles a subtask can be assigned to."""
 
