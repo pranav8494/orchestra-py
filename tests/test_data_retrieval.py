@@ -453,7 +453,7 @@ async def test_worker_bound_failure_names_what_was_lost(tmp_path: Path) -> None:
     )
     csv_tool = FakeTool(QUERY_CSV_TOOL, [ToolResponse(content=CSV) for _ in range(2)])
 
-    with pytest.raises(TaskFailure, match="2 table\\(s\\) and 0 search result\\(s\\)"):
+    with pytest.raises(TaskFailure, match=r"kept results from query_csv x2, which are lost"):
         await _worker(provider, ArtifactStore(tmp_path), [csv_tool], max_turns=2).run(_context())
 
 
