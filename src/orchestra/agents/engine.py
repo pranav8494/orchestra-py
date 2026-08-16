@@ -138,9 +138,9 @@ class ExecutionEngine:
         done = sum(1 for subtask in plan.subtasks if subtask.status is SubtaskStatus.DONE)
 
         if capped:
-            # Says what finished rather than promising "partial results": this path
-            # raises, so the CLI renders the error and never prints a report. The
-            # artifacts are on disk; reporting them is #8's.
+            # Says what finished rather than promising "partial results". Raising no
+            # longer loses it: `app.py` records the message on `state.failure_reason`
+            # and the report names the artifacts on disk (#8).
             message = (
                 f"Step cap of {self._step_cap} exceeded; the plan is too large to run. "
                 f"{done} of {len(plan.subtasks)} subtasks finished before stopping."

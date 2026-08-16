@@ -19,7 +19,7 @@ import typer
 from orchestra import __version__
 from orchestra.app import run_once
 from orchestra.cli.console import console, err_console
-from orchestra.cli.format import format_run_summary
+from orchestra.cli.format import OutputFormat, format_result
 from orchestra.core.errors import ExitCode, OrchestraError
 
 app = typer.Typer(
@@ -82,15 +82,27 @@ def main(
 @app.command()
 def run(
     prompt: Annotated[str, typer.Argument(help="The task to solve.")],
+    output: Annotated[
+        OutputFormat,
+        typer.Option("--output", "-o", help="Shape of the result on stdout."),
+    ] = OutputFormat.TEXT,
+    quiet: Annotated[
+        bool,
+        typer.Option("--quiet", "-q", help="Omit the per-step trace. The report still prints."),
+    ] = False,
     debug: Annotated[bool, typer.Option("--debug", help="Show the traceback on failure.")] = False,
 ) -> None:
-    """Plan the request, run the subtasks, and report what each produced."""
+    """Plan the request, run the subtasks, and report on what they produced."""
     with error_boundary(debug=debug):
         # Ctrl-C cancels the run inside `asyncio.run`, which unwinds the TaskGroup and
         # re-raises KeyboardInterrupt here; the boundary maps it to 130 (§8).
         state = asyncio.run(run_once(prompt))
-        console.print(format_run_summary(state))  # the result, so stdout (§5)
-        # A partially failed run still prints its artifacts; only the code says it failed.
-        raise typer.Exit(
-            ExitCode.TASK_FAILURE if state.failed_subtasks else ExitCode.SUCCESS,
-        )
+        if state.failure_reason is not None:
+            # A diagnostic, so stderr (§5, §8) — and an error rather than progress, so
+            # `--quiet` keeps it. Printed under `-o json` too: which stream says what must
+            # not depend on the format. markup/highlight off for `error_boundary`'s
+            # reason — the message can name a bracketed token Rich would eat as a tag.
+            err_console.print(state.failure_reason, markup=False, highlight=False)
+        console.print(format_result(state, output=output, quiet=quiet))  # the result (§5)
+        # A run that fell short still prints its report; only the code says it failed.
+        raise typer.Exit(ExitCode.TASK_FAILURE if state.failed else ExitCode.SUCCESS)
