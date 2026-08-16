@@ -1,9 +1,10 @@
 """Tests for the live dashboard (§5, §10).
 
 Almost nothing here asserts on Rich's drawn output. The subject is the data handed to the
-renderer: `RunView` is what the events fold into, and `run_table`/`event_line`/
-`result_renderable` are pure functions of it. The one exception is the panel-folding
-regression, where the defect *was* the rendering.
+renderer: `RunView` is what the events fold into, and `run_table`/`active_panel`/
+`event_log`/`event_line`/`result_renderable` are pure functions of it. The exceptions are
+the two layout regressions — the folded report panel and the wrapped active row — where
+the defect *was* the rendering, and no assertion on the model would have caught either.
 
 The async tests cover what goes wrong in a subscriber rather than a function: the startup
 race and teardown.
@@ -12,7 +13,7 @@ race and teardown.
 import asyncio
 import functools
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import pytest
 from rich.console import Group
@@ -21,6 +22,7 @@ from rich.panel import Panel
 from rich.spinner import Spinner
 from rich.table import Table
 
+from conftest import wait_until
 from orchestra.agents.engine import ExecutionEngine
 from orchestra.agents.workers.base import Worker
 from orchestra.agents.workers.stub import EchoWorker
@@ -266,8 +268,8 @@ def test_run_view_log_keeps_the_most_recent_events_and_drops_the_oldest() -> Non
         )
 
     assert len(view.log) == EVENT_LOG_LINES
-    assert view.log[-1].endswith(str(EVENT_LOG_LINES + 2))
-    assert view.log[0].endswith(" 3")  # the first three scrolled off
+    assert view.log[-1].message == str(EVENT_LOG_LINES + 2)
+    assert view.log[0].message == "3"  # the first three scrolled off
 
 
 def test_run_view_log_records_an_event_for_a_subtask_it_has_no_row_for() -> None:
@@ -278,24 +280,61 @@ def test_run_view_log_records_an_event_for_a_subtask_it_has_no_row_for() -> None
     view.apply(TaskEvent(kind=EventKind.SUBTASK_FAILED, subtask_id="ghost", message="boom"))
 
     assert "ghost" not in view.rows
-    assert view.log[-1] == "failed  ghost boom"
+    assert event_line(view.log[-1]) == "failed  ghost boom"
+
+
+def _active_grid(view: RunView) -> Table:
+    grid = active_panel(view).renderable
+    assert isinstance(grid, Table)
+    return grid
 
 
 def test_active_panel_draws_one_spinner_per_running_subtask() -> None:
-    """The renderable, not Rich's painting of it (§12): one `Spinner` per active row."""
+    """The renderable, not Rich's painting of it (§12): one `Spinner` per active row, and
+    the role and instruction beside it."""
     view = _seeded_view()
     view.apply(_started("fetch"))
     view.apply(_started("crunch"))
 
-    panel = active_panel(view)
+    grid = _active_grid(view)
 
-    assert isinstance(panel.renderable, Group)
-    spinners = [part for part in panel.renderable.renderables if isinstance(part, Spinner)]
-    assert len(spinners) == len(panel.renderable.renderables)
-    assert [str(spinner.text) for spinner in spinners] == [
+    assert all(isinstance(cell, Spinner) for cell in grid.columns[0].cells)
+    assert [str(cell) for cell in grid.columns[1].cells] == [
         "data_retrieval  Load the ledger",
         "analytics  Compute the trend",
     ]
+
+
+def test_active_panel_elides_a_long_instruction_instead_of_wrapping_it() -> None:
+    """Regression: the label was a `Spinner(text=...)`, and `Spinner.render` rebuilds it
+    through `Text.assemble`, which drops `no_wrap`. A planner instruction is one unbounded
+    sentence, so the panel wrapped on an 80-column terminal — resizing the region every
+    frame and leaving the glyph on the first line only."""
+    plan = Plan(
+        subtasks=[Subtask(id="fetch", role=AgentRole.DATA_RETRIEVAL, instruction="Pull " * 40)]
+    )
+    view = RunView()
+    view.apply(_plan_created(plan))
+    view.apply(_started("fetch"))
+
+    label = _active_grid(view).columns[1]
+    assert label.no_wrap
+    assert label.overflow == "ellipsis"
+
+    with console.capture() as captured:
+        console.print(active_panel(view), width=60)
+    assert len(captured.get().splitlines()) == 3  # the two borders and one row
+
+
+def test_active_panel_holds_an_idle_row_between_steps() -> None:
+    """A sequential plan has a frame with nothing running at every handoff. Dropping the
+    panel there would resize the region once per step."""
+    view = _seeded_view()
+
+    grid = _active_grid(view)
+
+    assert not view.active
+    assert [str(cell) for cell in grid.columns[1].cells] == ["waiting for the next step"]
 
 
 def test_event_log_shows_the_stream_oldest_first() -> None:
@@ -307,19 +346,54 @@ def test_event_log_shows_the_stream_oldest_first() -> None:
     assert body.splitlines() == ["plan    Executing 3 subtasks", "start   fetch working"]
 
 
-def test_dashboard_frame_omits_the_panels_that_have_nothing_to_say() -> None:
-    """An empty box claims content the run has not produced. Before the first event there
-    is only the table; once a step is running there are all three."""
+def test_dashboard_frame_grows_to_three_panels_and_keeps_them() -> None:
+    """Before the first event there is only the table; once there is a plan the panels
+    stay, so a handoff between steps costs no region resize. `run_finished` drops the
+    active panel for good — a finished run has nothing working."""
     empty = dashboard_frame(RunView())
     assert isinstance(empty, Group)
     assert [type(part) for part in empty.renderables] == [Table]
 
     view = _seeded_view()
-    view.apply(_started("fetch"))
     running = dashboard_frame(view)
-
     assert isinstance(running, Group)
     assert [type(part) for part in running.renderables] == [Table, Panel, Panel]
+
+    view.apply(_started("fetch"))
+    still_running = dashboard_frame(view)
+    assert isinstance(still_running, Group)
+    assert [type(part) for part in still_running.renderables] == [Table, Panel, Panel]
+
+    view.apply(TaskEvent(kind=EventKind.RUN_FINISHED, message="3 of 3 subtasks completed"))
+    finished = dashboard_frame(view)
+    assert isinstance(finished, Group)
+    assert [type(part) for part in finished.renderables] == [Table, Panel]
+
+
+def test_event_line_collapses_a_multi_line_message_onto_one_line() -> None:
+    """Regression: `engine.py` publishes `subtask_failed` with `str(exc)`, and
+    `str(ValidationError)` is multi-line. An embedded newline defeats every `no_wrap`
+    here — it adds a row to the region rather than a wrap inside a cell."""
+    event = TaskEvent(
+        kind=EventKind.SUBTASK_FAILED,
+        subtask_id="crunch",
+        message="1 validation error for FinalReport\nexecutive_summary\n  Field required",
+    )
+
+    assert event_line(event) == (
+        "failed  crunch 1 validation error for FinalReport executive_summary Field required"
+    )
+
+
+def test_run_view_collapses_a_multi_line_message_in_the_cells_too() -> None:
+    """The table reads `row.detail`, not `event_line`, so the rule has to apply to both."""
+    view = _seeded_view()
+
+    view.apply(TaskEvent(kind=EventKind.SUBTASK_FAILED, subtask_id="fetch", message="boom\n  at x"))
+    view.apply(TaskEvent(kind=EventKind.SUBTASK_WARNING, subtask_id="crunch", message="a\nb"))
+
+    assert view.rows["fetch"].detail == "boom at x"
+    assert view.rows["crunch"].warning == "a b"
 
 
 @pytest.mark.parametrize(
@@ -416,8 +490,10 @@ def test_result_renderable_panel_folds_a_long_line_instead_of_cropping_it() -> N
 def test_result_renderable_panel_embeds_the_ascii_chart_and_its_openable_path(
     tmp_path: Path,
 ) -> None:
-    """#11's last polish item. The drawing is inline so a piped run still shows it, and the
-    path is resolved against the run's directory so the pointer is something to open."""
+    """#11's last polish item, pinned where the criterion is written rather than where the
+    string is built: `cli/format.py` already covers both blocks (`test_format.py`), and
+    this says the final *panel* carries them. The drawing is inline so a piped run still
+    shows it, and the path is resolved against the run's directory so it can be opened."""
     state = _finished_state()
     state.artifact_dir = tmp_path
     state.final_result = FinalReport(
@@ -584,6 +660,88 @@ async def test_dashboard_live_mode_redraws_between_events_so_the_spinners_advanc
 
     assert ticked > 0
     assert _pending_tasks() == []  # and the ticker went with the consumer
+
+
+@pytest.mark.asyncio
+async def test_spin_keeps_ticking_when_stderr_is_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`orchestra run ... | head -1` closes stderr. §5 lets that cost the animation, never
+    the run, so the ticker drops the `OSError` rather than dying on the first one."""
+    monkeypatch.setattr(render, "SPINNER_TICK_SECONDS", 0.001)
+    refreshes = 0
+
+    class BrokenLive:
+        def refresh(self) -> None:
+            nonlocal refreshes
+            refreshes += 1
+            raise BrokenPipeError("stderr closed")
+
+    view = _seeded_view()
+    view.apply(_started("fetch"))
+    ticker = asyncio.create_task(render._spin(cast(Live, BrokenLive()), view))
+    await asyncio.sleep(0.02)
+
+    assert refreshes > 1  # it kept going rather than stopping on the first failure
+    assert not ticker.done()
+
+    ticker.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await ticker
+
+
+@pytest.mark.asyncio
+async def test_dashboard_reports_a_ticker_that_died_instead_of_losing_it(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """§8: `Task.cancel()` clears the unretrieved-exception flag even on a task that has
+    already raised, so cancelling the ticker without reading it first would erase the
+    failure from both the log and the terminal."""
+
+    async def boom(_live: Live, _view: RunView) -> None:
+        raise RuntimeError("ticker bug")
+
+    monkeypatch.setattr(render, "_spin", boom)
+    broker: Broker[TaskEvent] = Broker()
+
+    async with dashboard(broker, mode=RenderMode.LIVE):
+        await asyncio.sleep(0)  # let the ticker start and die
+        outcome = "the run still produced its result"
+
+    assert outcome == "the run still produced its result"
+    captured = capsys.readouterr()
+    assert captured.out == ""  # a diagnostic, so stderr only (§5)
+    assert "The dashboard stopped: ticker bug" in captured.err
+    assert _pending_tasks() == []
+
+
+@pytest.mark.asyncio
+async def test_dashboard_cancelled_while_a_step_runs_leaks_no_ticker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§15 wants cancellation covered for new async code, and the other teardown tests all
+    cancel a ticker parked in `sleep` having never refreshed. This one cancels it mid-work,
+    which is the window this change introduced."""
+    monkeypatch.setattr(render, "SPINNER_TICK_SECONDS", 0.001)
+    broker: Broker[TaskEvent] = Broker()
+    working = asyncio.Event()
+
+    async def watch() -> None:
+        async with dashboard(broker, mode=RenderMode.LIVE) as view:
+            await broker.publish_lifecycle(_plan_created())
+            await broker.publish_lifecycle(_started("fetch"))
+            await wait_until(lambda: bool(view.active), what="the step to show as running")
+            await asyncio.sleep(0.01)  # and the ticker to actually refresh the region
+            working.set()
+            await asyncio.Event().wait()  # held open until cancelled
+
+    task = asyncio.create_task(watch())
+    await working.wait()
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert broker.subscriber_count == 0
+    assert _pending_tasks() == []  # both the consumer and its ticker went with it
 
 
 @pytest.mark.asyncio

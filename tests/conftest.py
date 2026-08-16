@@ -33,6 +33,12 @@ _SETTING_ENV_VARS = (
     "WORKER_TOKEN_BUDGET",
 )
 
+# Colour forcing, which Click and Rich both read. Exported (Claude Code sets
+# `FORCE_COLOR=3`), a `CliRunner` pipe is treated as a terminal: help text arrives wrapped
+# in ANSI and the report gets the `Panel` §5 reserves for a real terminal. The stream
+# contract has to be asserted against the shape the code chose, not the shell's (#38).
+_COLOUR_ENV_VARS = ("CLICOLOR", "CLICOLOR_FORCE", "FORCE_COLOR", "NO_COLOR")
+
 # One second in total, matching the ceiling the polling callers used before they shared
 # this helper.
 _WAIT_INTERVAL = 0.001
@@ -45,8 +51,12 @@ def _isolated_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
 
     `Config` resolves `.env` against the cwd, so both halves are needed for a developer
     with an exported key to match CI. Autouse because the hazard is suite-wide.
+
+    The colour variables go with them: they are not configuration, but they change which
+    shape the CLI writes, so leaving them ambient makes the §5 stream tests pass or fail
+    on the developer's shell (#38).
     """
-    for var in _SETTING_ENV_VARS:
+    for var in (*_SETTING_ENV_VARS, *_COLOUR_ENV_VARS):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.chdir(tmp_path)
 
