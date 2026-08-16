@@ -123,8 +123,7 @@ def _to_plan(draft: PlanDraft) -> Plan:
 
     Raises:
         ValidationError: the draft is not a runnable DAG.
-        Rejected: the draft's data edges are unknown or unordered — `Plan` checks
-            `depends_on` but not `inputs`, so `_check_inputs` owns that half.
+        Rejected: the draft's data edges are unknown or unordered — see `_check_inputs`.
     """
     _check_inputs(draft)
     return Plan(

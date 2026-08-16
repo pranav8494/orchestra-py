@@ -413,9 +413,8 @@ async def test_run_fails_a_subtask_once_its_attempts_are_spent() -> None:
 async def test_run_counts_every_retry_against_the_step_cap() -> None:
     """Retries spend the run's budget, so a failing subtask cannot loop past the cap.
 
-    And the retry the cap took away has to be reconciled: `_dispatch` leaves a retriable
-    failure `PENDING` for a re-dispatch that now never comes, so a subtask that failed
-    twice was reported as pending, absent from `failed_subtasks`, still spinning (#9).
+    And the retry the cap took away has to be reconciled: without that, a subtask that
+    failed twice was reported as pending and absent from `failed_subtasks` (#9).
     """
     state = await _planned(LINEAR)
     worker = ScriptedWorker(fail_ids=frozenset({"fetch_quarterly_financials"}))

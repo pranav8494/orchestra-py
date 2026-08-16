@@ -1,9 +1,8 @@
 """Detects a worker stuck repeating itself: the same call, the same result, again (§3.3).
 
 The output is part of the signature on purpose — the same call returning something new is
-progress, and only a call whose result never changes is a loop. A sliding window rather
-than a running tally, so a tool legitimately polled early in a subtask cannot trip a step
-later on.
+progress. A sliding window rather than a running tally, so a tool legitimately polled early
+in a subtask cannot trip a step later on.
 
 Pure counting (§3.2): what a trip *means* is the caller's — `agents/workers/tool_loop.py`
 turns it into a `TaskFailure`.
@@ -20,11 +19,6 @@ DEFAULT_MAX_REPEATS = 5
 
 def step_signature(name: str, arguments: Mapping[str, object], output: str) -> str:
     """Identify one tool step by what was called, with what, and what came back.
-
-    Args:
-        name: the tool called.
-        arguments: the call's arguments; key order does not affect the result.
-        output: what the tool returned, as the model saw it.
 
     Returns:
         The SHA-256 hex digest of the three parts.
@@ -47,13 +41,8 @@ class RepetitionDetector:
     ) -> None:
         """Set how far back to look and how much repetition to tolerate.
 
-        Args:
-            window: how many recent steps are counted; older ones age out.
-            max_repeats: occurrences within the window that are still acceptable.
-
         Raises:
-            ValueError: a non-positive bound — a wiring bug, caught at construction like
-                the engine's and the tool loop's.
+            ValueError: a non-positive bound — a wiring bug, caught at construction.
         """
         if window < 1:
             raise ValueError(f"window must be at least 1, got {window}")

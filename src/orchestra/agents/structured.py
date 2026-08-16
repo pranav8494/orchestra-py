@@ -18,7 +18,7 @@ from orchestra.providers.base import MessageRole, Provider, ProviderMessage
 DEFAULT_MAX_RETRIES = 2
 
 # A refusal and off-schema JSON are indistinguishable at the adapter, so the reason has
-# to fit either. Not prompt text (§11) — the caller's `instruction` says what to do.
+# to fit either.
 _NO_OUTPUT = "No usable structured output was returned."
 
 
@@ -31,7 +31,6 @@ class Rejected(ValueError):  # noqa: N818
     """
 
 
-# `StructuredT` mirrors the port's bound; `ResultT` is whatever the caller's ledger type is.
 async def parse_validated[StructuredT: BaseModel, ResultT](
     *,
     provider: Provider,
@@ -45,9 +44,9 @@ async def parse_validated[StructuredT: BaseModel, ResultT](
     """Request `output_format` until `validate` accepts it, feeding each rejection back.
 
     Args:
-        validate: converts the draft into the caller's type. Raises `Rejected`, or the
-            `pydantic.ValidationError` a model constructor raises, when the draft is
-            well-formed but unusable; anything else propagates as the programmer error it is.
+        validate: converts the draft into the caller's type, raising `Rejected` or
+            `ValidationError` when it is well-formed but unusable; anything else
+            propagates as the programmer error it is.
         instruction: prepended to the rejection on every retry turn.
         max_retries: extra calls after the first.
 
@@ -56,7 +55,7 @@ async def parse_validated[StructuredT: BaseModel, ResultT](
 
     Raises:
         ValueError: a negative `max_retries` — a wiring bug, not a user-facing error.
-        ProviderError: the request itself failed. Retrying output is not retrying an outage.
+        ProviderError: the request itself failed.
         asyncio.CancelledError: propagated, never swallowed (§10).
     """
     if max_retries < 0:

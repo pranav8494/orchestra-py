@@ -152,9 +152,8 @@ class ExecutionEngine:
                     break  # nothing running and nothing left that could become ready
                 await finished.wait()
 
-        # A retriable failure is left `PENDING` for a re-dispatch; if the cap stopped that
-        # from ever happening, nothing else would report it and the run would call a
-        # subtask that failed twice "pending".
+        # A retriable failure is left `PENDING` for a re-dispatch the step cap may never
+        # allow; without this, nothing reports it and a failed subtask reads "pending".
         for subtask in plan.subtasks:
             if subtask.status is SubtaskStatus.PENDING and subtask.id in last_error:
                 subtask.status = SubtaskStatus.FAILED

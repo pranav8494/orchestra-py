@@ -9,17 +9,12 @@ artifacts (§7). The chart is not in the draft — it is the ledger's, read back
 visualization step's own artifact rather than asked for again.
 
 **A synthesis failure never loses the report.** The artifacts are already paid for, so
-every failure degrades to a ledger-only report rather than an empty stdout (§8, §10). Two
-paths, deliberately different:
-
-| Failure | What records it |
-|---|---|
-| `OrchestraError`: a provider outage, a lost artifact | `state.failure_reason`, run failed |
-| a refusal, or figures citing nothing this run made | nothing — the ledger summary, on stdout |
-
-The second is a degraded report, not a broken run (#8). The same path serves a run with
-nothing completed. The first remaps what §8's table calls a provider error (exit 4) onto a
-task failure (exit 5) — the trade buys a report, and stderr is what tells the two apart.
+every failure degrades to a ledger-only report rather than an empty stdout (§8, §10) — the
+same path that serves a run with nothing completed. A refusal, or figures citing nothing
+this run made, is a degraded report rather than a broken run (#8); an `OrchestraError` —
+an outage, a lost artifact — also records its reason on `state.failure_reason` and fails
+the run, remapping a provider error (exit 4) onto a task failure (exit 5). The trade buys
+a report, and stderr is what tells the two apart.
 """
 
 import asyncio
@@ -102,9 +97,7 @@ class Aggregator:
 
         `state.final_result` is always set on return, including when the model refused,
         when synthesis failed, and when nothing completed. An `OrchestraError` on either
-        step also records its reason on `state.failure_reason`, marking the run failed; a
-        refusal or wholly unbacked figures degrade to the ledger report silently, whose
-        summary says so on stdout.
+        step also records its reason on `state.failure_reason`, marking the run failed.
 
         Raises:
             asyncio.CancelledError: propagated, never swallowed (§10). Nothing else.
@@ -171,8 +164,7 @@ class Aggregator:
 
         Returns:
             The report, or `None` when every attempt gave nothing usable — a refusal, a
-            truncated reply, or figures citing no artifact of this run. The rejection is
-            dropped rather than recorded: that is a degraded report, not a failed run (#8).
+            truncated reply, or figures citing no artifact of this run.
         """
         briefing = await self._briefing(state.user_request, completed)
 

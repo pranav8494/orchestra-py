@@ -1042,9 +1042,9 @@ def test_run_table_shows_the_warning_in_place_of_the_detail() -> None:
 
 
 def test_run_view_failure_replaces_the_retry_warning_it_follows() -> None:
-    """Regression: the engine warns once per failed attempt and `run_table` shows the
-    warning in place of the detail, so a subtask that failed on its last attempt went red
-    with "Attempt 1 of 2 failed, retrying" and never showed why it failed."""
+    """Regression: `run_table` shows the warning in place of the detail, so a subtask that
+    failed on its last attempt went red with "Attempt 1 of 2 failed, retrying" rather than
+    with why it failed."""
     view = _seeded_view()
     view.apply(
         TaskEvent(

@@ -28,8 +28,8 @@ class OrchestraError(Exception):
 
     def __init__(self, message: str, *, retryable: bool = True) -> None:
         """`retryable=False` when the same input would reach the same failure — a bound
-        already hit, or a plan whose dependency order is wrong. The engine spends an
-        attempt, and the run's step budget, on nothing otherwise.
+        already hit, or a plan whose dependency order is wrong; the engine would otherwise
+        spend an attempt, and the run's step budget, on nothing.
         """
         super().__init__(message)
         self.retryable = retryable

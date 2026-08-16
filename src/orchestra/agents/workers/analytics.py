@@ -53,11 +53,10 @@ class AnalysisResult(BaseModel):
 
     # Field order is load-bearing. The aggregator (#8) sees `ArtifactStore.preview`, which
     # elides past 800 characters — less than one escaped pandas script — so *every* figure
-    # goes ahead of *any* script. A figure carries its source pointer as well as the number,
-    # so it spends more of that budget than the bare string it replaced: fewer fit, and
-    # leading is what keeps them. `computations` repeats each number beside its code, which
-    # is provenance and may be elided. `instruction` is last, unlike `RetrievedDataset`: the
-    # aggregator already has the plan's.
+    # goes ahead of *any* script — the more so now a figure carries its source pointer too,
+    # which spends more of that budget than the bare string it replaced. `computations`
+    # repeats each number beside its code, which is provenance and may be elided.
+    # `instruction` is last, unlike `RetrievedDataset`: the aggregator already has the plan's.
     summary: str
     figures: list[KeyFigure] = Field(default_factory=list)
     computations: list[Computation] = Field(default_factory=list)

@@ -205,8 +205,8 @@ async def test_loop_repeating_one_call_and_result_fails_before_the_turn_cap() ->
 
     # Tripped on the sixth call, so the third turn was never answered.
     assert len(tool.calls) == 6
-    # The sharpest of the four: the detector is rebuilt per dispatch, so a retry pays the
-    # whole `max_turns` again to abort in exactly the same place.
+    # The detector is rebuilt per dispatch, so a retry pays the whole `max_turns` again to
+    # abort in exactly the same place.
     assert not bound.value.retryable
 
 

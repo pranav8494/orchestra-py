@@ -63,8 +63,7 @@ class EventKind(StrEnum):
     PLAN_CREATED = "plan_created"
     SUBTASK_STARTED = "subtask_started"
     # A note on a step, not a transition: it degraded (a backend fell back), or an attempt
-    # failed and will be retried. Never a status, so a consumer keeps its own — but a
-    # retry notice is only about the attempt that raised it, and does not outlive it.
+    # failed and will be retried. Never a status, so a consumer keeps its own.
     SUBTASK_WARNING = "subtask_warning"
     SUBTASK_COMPLETED = "subtask_completed"
     SUBTASK_FAILED = "subtask_failed"

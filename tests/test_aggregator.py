@@ -381,9 +381,9 @@ async def test_write_report_takes_the_last_visualization_when_a_plan_draws_twice
 async def test_write_report_degrades_only_the_chart_when_the_receipt_cannot_be_read(
     store: ArtifactStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The receipt is read whole and the briefing reads previews, so the receipt's read can
-    fail alone. It costs the chart, not the answer: the artifacts the summary is written
-    from are all still readable, and skipping synthesis would throw away a paid-for run."""
+    """The receipt is read whole while the briefing reads previews, so its read can fail
+    alone. It costs the chart, not the answer — skipping the synthesis the rest of the
+    artifacts still support would throw away a paid-for run."""
     state = _finished_run(store)
 
     def unreadable(pointer: str) -> str:
