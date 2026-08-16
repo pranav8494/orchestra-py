@@ -3,8 +3,9 @@
 Nothing below builds a provider, store, broker or worker — they are handed one, which
 is what lets a test run the whole application against `FakeProvider` without patching.
 
-Phase B replaces the stub role by role (#5-#7); Visualization still echoes. Landing a
-real worker changes nothing outside `build_orchestra`'s mapping, which is its point.
+Phase B replaced the stub role by role (#5-#7), each landing as one reassignment in
+`build_orchestra`'s mapping and nothing else — which was its point. `EchoWorker` stays
+as the mapping's default, so a role added later runs rather than failing at startup.
 """
 
 from collections.abc import Callable
@@ -18,6 +19,7 @@ from orchestra.agents.workers.analytics import AnalyticsWorker
 from orchestra.agents.workers.base import Worker
 from orchestra.agents.workers.data_retrieval import DataRetrievalWorker
 from orchestra.agents.workers.stub import EchoWorker
+from orchestra.agents.workers.visualization import VisualizationWorker
 from orchestra.artifacts import ArtifactStore
 from orchestra.config import Config, load_config
 from orchestra.core.errors import TaskFailure
@@ -113,6 +115,11 @@ def build_orchestra(config: Config) -> Orchestra:
         tools=analytics_tools(store),
         max_turns=config.worker_max_turns,
         token_budget=config.worker_token_budget,
+    )
+    # No loop bounds: one structured call, not a tool-use conversation, so there is no
+    # iteration count or budget for the operator to set (§10).
+    workers[AgentRole.VISUALIZATION] = VisualizationWorker(
+        provider=provider, store=store, broker=broker
     )
     return Orchestra(
         planner=Planner(provider),

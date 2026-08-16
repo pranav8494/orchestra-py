@@ -21,6 +21,7 @@ from orchestra.agents.aggregator import (
 from orchestra.agents.engine import ExecutionEngine
 from orchestra.agents.workers.base import Worker
 from orchestra.agents.workers.stub import EchoWorker
+from orchestra.agents.workers.visualization import VisualizationResult
 from orchestra.artifacts import DEFAULT_PREVIEW_LIMIT, ArtifactStore
 from orchestra.core.errors import ExitCode, ProviderError, TaskFailure
 from orchestra.core.events import Broker
@@ -37,6 +38,8 @@ from orchestra.prompts import AGGREGATOR_SYSTEM_PROMPT
 
 REQUEST = "Summarize the last 3 quarters' financial trends and create a chart"
 REVENUE_CSV = "quarter,revenue\nQ1,120\nQ2,131\nQ3,145\n"
+CHART = "artifact:chart.html"
+ASCII_CHART = "Q1 ######\nQ2 #######\nQ3 ########"
 
 
 def _plan() -> Plan:
@@ -78,12 +81,23 @@ def _finish(
     return pointer
 
 
-def _finished_run(store: ArtifactStore) -> TaskState:
+def _receipt(*, chart: str | None = CHART, ascii_chart: str = ASCII_CHART) -> str:
+    """The visualization worker's artifact: the chart file's pointer and the text chart."""
+    return VisualizationResult(
+        summary="Revenue rose in each quarter.",
+        chart=chart,
+        ascii_chart=ascii_chart,
+        instruction="Plot the quarterly revenue trend.",
+    ).model_dump_json(indent=2)
+
+
+def _finished_run(store: ArtifactStore, *, receipt: str | None = None) -> TaskState:
     """The walking skeleton's happy ending: three subtasks done, three artifacts stored."""
     state = TaskState(user_request=REQUEST, plan=_plan())
     _finish(state, store, "fetch", "revenue.csv", REVENUE_CSV)
     _finish(state, store, "analyse", "growth.md", "Revenue grew 9.2% in Q2 and 10.7% in Q3.")
-    _finish(state, store, "chart", "trend.html", "<html>chart</html>")
+    # The visualization subtask's pointer names the receipt, not the drawing.
+    _finish(state, store, "chart", "chart.json", receipt if receipt is not None else _receipt())
     return state
 
 
@@ -117,8 +131,9 @@ async def test_write_report_keeps_backed_figures_and_takes_the_chart_from_the_le
         state.artifacts["fetch"],
         state.artifacts["analyse"],
     ]
-    # From the visualization subtask: the draft schema has no chart field.
-    assert report.chart == state.artifacts["chart"]
+    # From the visualization subtask's receipt: the draft schema has no chart field.
+    assert report.chart == CHART
+    assert report.chart_ascii == ASCII_CHART
 
 
 @pytest.mark.asyncio
@@ -193,7 +208,8 @@ async def test_write_report_falls_back_to_the_ledger_when_the_model_returns_noth
 
     assert state.final_result is report
     assert report.key_figures == []  # nothing is invented on the way down
-    assert report.chart == state.artifacts["chart"]
+    assert report.chart == CHART
+    assert report.chart_ascii == ASCII_CHART
     for subtask_id, pointer in state.artifacts.items():
         assert f"{subtask_id} (" in report.executive_summary
         assert pointer in report.executive_summary
@@ -251,6 +267,85 @@ async def test_write_report_without_a_visualization_subtask_leaves_the_chart_uns
     report = await Aggregator(provider, store).write_report(state)
 
     assert report.chart is None
+    assert report.chart_ascii is None
+
+
+@pytest.mark.asyncio
+async def test_write_report_keeps_the_text_chart_when_the_data_was_too_thin_to_draw(
+    store: ArtifactStore,
+) -> None:
+    """Thin data costs the drawing, not the explanation: the message is what gets printed."""
+    thin = "Only one point to plot, so there is no trend to draw."
+    state = _finished_run(store, receipt=_receipt(chart=None, ascii_chart=thin))
+    provider = FakeProvider(responses=[_draft()])
+
+    report = await Aggregator(provider, store).write_report(state)
+
+    assert report.chart is None
+    assert report.chart_ascii == thin
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("responses", [[_draft()], [None]], ids=["synthesised", "ledger"])
+async def test_write_report_degrades_when_the_visualization_artifact_is_not_a_receipt(
+    store: ArtifactStore, responses: list[ReportDraft | None]
+) -> None:
+    """`EchoWorker` still backs the role and writes plain text. An artifact the aggregator
+    cannot read costs the report its chart, never the run (§8) — on both paths."""
+    state = _finished_run(store, receipt="role: visualization\ninstruction: plot it")
+    provider = FakeProvider(responses=list(responses))
+
+    report = await Aggregator(provider, store).write_report(state)
+
+    assert report.chart is None
+    assert report.chart_ascii is None
+    assert report.executive_summary  # the rest of the report survives
+
+
+@pytest.mark.asyncio
+async def test_write_report_takes_the_last_visualization_when_a_plan_draws_twice(
+    store: ArtifactStore,
+) -> None:
+    """A plan that draws twice draws the summarising chart last."""
+    state = _finished_run(store)
+    assert state.plan is not None
+    state.plan.subtasks.append(
+        Subtask(
+            id="chart_2",
+            role=AgentRole.VISUALIZATION,
+            instruction="Plot the summary.",
+            depends_on=["chart"],
+        )
+    )
+    _finish(
+        state,
+        store,
+        "chart_2",
+        "chart_2.json",
+        _receipt(chart="artifact:summary.html", ascii_chart="Q3 ########"),
+    )
+    provider = FakeProvider(responses=[_draft()])
+
+    report = await Aggregator(provider, store).write_report(state)
+
+    assert report.chart == "artifact:summary.html"
+    assert report.chart_ascii == "Q3 ########"
+
+
+@pytest.mark.asyncio
+async def test_write_report_raises_when_the_visualization_receipt_is_gone(
+    store: ArtifactStore,
+) -> None:
+    """The receipt is read, not previewed, so its loss is the same lost data as any
+    other artifact's: `TaskFailure`, not a chartless report."""
+    state = _finished_run(store)
+    store.path_for(state.artifacts["chart"]).unlink()
+    provider = FakeProvider(responses=[_draft()])
+
+    with pytest.raises(TaskFailure, match="Artifact not found"):
+        await Aggregator(provider, store).write_report(state)
+
+    assert state.final_result is None
 
 
 @pytest.mark.asyncio
@@ -362,7 +457,9 @@ async def test_write_report_closes_the_skeleton_over_real_engine_and_stub_worker
 
     assert not state.failed
     assert [figure.source for figure in report.key_figures] == ["artifact:analyse.txt"]
-    assert report.chart == "artifact:chart.txt"
+    # `EchoWorker` writes text, not a receipt, so there is no chart to point at.
+    assert report.chart is None
+    assert report.chart_ascii is None
     # Proof the previews resolve against what the engine wrote, not against a fixture.
     assert "Plot the quarterly revenue trend." in provider.calls[0].messages[0].content
 

@@ -23,6 +23,7 @@ from orchestra.core.state import (
 
 REQUEST = "Summarize the last 3 quarters' financial trends and create a chart"
 SUMMARY = "Revenue grew in each of the last three quarters."
+ASCII_CHART = "Q1 ######\nQ2 #######\nQ3 ########"
 
 
 def _state(*, report: FinalReport | None, failure_reason: str | None = None) -> TaskState:
@@ -46,13 +47,16 @@ def _state(*, report: FinalReport | None, failure_reason: str | None = None) -> 
     )
 
 
-def _report(*, figures: bool = True, chart: bool = True) -> FinalReport:
+def _report(
+    *, figures: bool = True, chart: bool = True, chart_ascii: str | None = None
+) -> FinalReport:
     return FinalReport(
         executive_summary=SUMMARY,
         key_figures=[KeyFigure(label="Q3 revenue", value="145", source="artifact:fetch.txt")]
         if figures
         else [],
         chart="artifact:trend.html" if chart else None,
+        chart_ascii=chart_ascii,
     )
 
 
@@ -81,6 +85,32 @@ def test_format_result_text_renders_summary_figures_chart_and_steps() -> None:
     assert "done     fetch  artifact:fetch.txt" in rendered
     assert "failed   analyze  -" in rendered
     assert not rendered.endswith("\n")  # the console adds the newline (§5)
+
+
+def test_format_result_text_prints_the_ascii_chart_above_the_pointer() -> None:
+    """The drawing is read in the terminal; the pointer is what opens the file after it."""
+    rendered = _text(_state(report=_report(chart_ascii=ASCII_CHART)))
+
+    assert f"\n\n{ASCII_CHART}\n\nChart: artifact:trend.html" in rendered
+
+
+def test_format_result_text_prints_the_ascii_chart_when_there_is_no_chart_file() -> None:
+    """Thin data leaves a message in place of the drawing. It is still worth printing."""
+    thin = "Only one point to plot, so there is no trend to draw."
+    rendered = _text(_state(report=_report(chart=False, chart_ascii=thin)))
+
+    assert thin in rendered
+    assert "Chart:" not in rendered
+
+
+@pytest.mark.parametrize("chart_ascii", [None, ""], ids=["absent", "empty"])
+def test_format_result_text_without_an_ascii_chart_leaves_no_blank_block(
+    chart_ascii: str | None,
+) -> None:
+    rendered = _text(_state(report=_report(chart_ascii=chart_ascii)))
+
+    assert "\n\n\n" not in rendered
+    assert rendered == _text(_state(report=_report()))
 
 
 def test_format_result_text_without_figures_or_chart_omits_those_blocks() -> None:
@@ -143,6 +173,7 @@ def test_format_result_json_has_the_documented_keys() -> None:
         "executive_summary": SUMMARY,
         "key_figures": [{"label": "Q3 revenue", "value": "145", "source": "artifact:fetch.txt"}],
         "chart": "artifact:trend.html",
+        "chart_ascii": None,
     }
     # Roles and statuses go out as their `StrEnum` values, not as `AgentRole.ANALYTICS`.
     assert document["subtasks"][0] == {
@@ -152,6 +183,15 @@ def test_format_result_json_has_the_documented_keys() -> None:
         "artifact": "artifact:fetch.txt",
     }
     assert document["subtasks"][1]["artifact"] is None
+
+
+def test_format_result_json_carries_the_ascii_chart_as_one_document() -> None:
+    """The text chart is multi-line, so it is the field most likely to break the document
+    if it were ever emitted rather than encoded."""
+    document = _document(_state(report=_report(chart_ascii=ASCII_CHART)))
+
+    assert document["report"]["chart_ascii"] == ASCII_CHART
+    assert document["report"]["chart"] == "artifact:trend.html"
 
 
 def test_format_result_json_carries_the_run_ending_reason() -> None:

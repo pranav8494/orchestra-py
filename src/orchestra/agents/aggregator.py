@@ -5,7 +5,8 @@
 
 **Why a draft model.** A draft figure's `source` is a plain `str` because a model can emit
 anything; the conversion to `FinalReport` is where it is checked against this run's
-artifacts (§7). The chart is not in the draft — the ledger already knows it.
+artifacts (§7). The chart is not in the draft — it is the ledger's, read back from the
+visualization step's own artifact rather than asked for again.
 
 **Why one call and no retry.** The artifacts are already paid for, so a refusal or figures
 citing nothing real degrades to a ledger-only report rather than raising (§8, §10). The
@@ -14,8 +15,9 @@ same path serves a run with nothing completed.
 
 import asyncio
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from orchestra.agents.workers.visualization import VisualizationResult
 from orchestra.artifacts import DEFAULT_PREVIEW_LIMIT, ArtifactStore
 from orchestra.core.state import (
     AgentRole,
@@ -98,17 +100,47 @@ class Aggregator:
         """
         completed = _completed(state)
         # From the ledger, not the model: the chart is a fact the run already recorded.
-        chart = _chart_pointer(completed)
+        chart, chart_ascii = await self._chart_outputs(completed)
 
-        report = await self._synthesise(state, completed, chart) if completed else None
+        report = await self._synthesise(state, completed, chart, chart_ascii) if completed else None
         if report is None:
-            report = _ledger_report(state.user_request, completed, chart)
+            report = _ledger_report(state.user_request, completed, chart, chart_ascii)
 
         state.final_result = report
         return report
 
+    async def _chart_outputs(
+        self, completed: list[_Completed]
+    ) -> tuple[ArtifactPointer | None, str | None]:
+        """The chart to open and the chart to print, from the visualization step's receipt.
+
+        Last rather than first: a plan that draws twice draws the summarising chart last.
+
+        Returns `(None, None)` when no visualization ran, and when its artifact is not a
+        `VisualizationResult` — `EchoWorker` still backs the role and writes plain text,
+        which costs the report its chart, not the run (§8). A `TaskFailure` from the store
+        still propagates, as the previews' reads do: that is lost data, not a bad shape.
+        """
+        receipts = [
+            pointer for subtask, pointer in completed if subtask.role is AgentRole.VISUALIZATION
+        ]
+        if not receipts:
+            return None, None
+        try:
+            # `to_thread` because the store is blocking I/O; whole, not previewed, since
+            # the fields wanted are the ones a preview may elide.
+            payload = await asyncio.to_thread(self._store.get_text, receipts[-1])
+            result = VisualizationResult.model_validate_json(payload)
+        except (ValidationError, UnicodeDecodeError):
+            return None, None
+        return result.chart, result.ascii_chart
+
     async def _synthesise(
-        self, state: TaskState, completed: list[_Completed], chart: ArtifactPointer | None
+        self,
+        state: TaskState,
+        completed: list[_Completed],
+        chart: ArtifactPointer | None,
+        chart_ascii: str | None,
     ) -> FinalReport | None:
         """Ask the model for one report and validate what comes back.
 
@@ -141,6 +173,7 @@ class Aggregator:
             executive_summary=draft.executive_summary,
             key_figures=figures,
             chart=chart,
+            chart_ascii=chart_ascii,
         )
 
     async def _briefing(self, user_request: str, completed: list[_Completed]) -> str:
@@ -185,17 +218,11 @@ def _completed(state: TaskState) -> list[_Completed]:
     ]
 
 
-def _chart_pointer(completed: list[_Completed]) -> ArtifactPointer | None:
-    """The chart the report points at: the last completed visualization, or nothing.
-
-    Last rather than first: a plan that draws twice draws the summarising chart last.
-    """
-    charts = [pointer for subtask, pointer in completed if subtask.role is AgentRole.VISUALIZATION]
-    return charts[-1] if charts else None
-
-
 def _ledger_report(
-    user_request: str, completed: list[_Completed], chart: ArtifactPointer | None
+    user_request: str,
+    completed: list[_Completed],
+    chart: ArtifactPointer | None,
+    chart_ascii: str | None,
 ) -> FinalReport:
     """Build a report from the ledger alone, no model involved.
 
@@ -216,4 +243,6 @@ def _ledger_report(
                 ),
             ]
         )
-    return FinalReport(executive_summary=summary, key_figures=[], chart=chart)
+    return FinalReport(
+        executive_summary=summary, key_figures=[], chart=chart, chart_ascii=chart_ascii
+    )

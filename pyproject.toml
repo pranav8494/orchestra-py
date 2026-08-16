@@ -112,8 +112,10 @@ disallow_any_explicit = false
 warn_return_any = false
 disallow_untyped_calls = false
 
+# Vendor packages that ship no `py.typed`. Listed by module path so the relaxation
+# cannot spread to our own code.
 [[tool.mypy.overrides]]
-module = ["anthropic.*", "openai.*"]
+module = ["anthropic.*", "openai.*", "plotly.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
