@@ -393,10 +393,14 @@ class RecordingObserver:
     entered: int = 0
     exited: int = 0
     events: list[TaskEvent] = field(default_factory=list)
+    # Held while attached, so a test can ask what had been published at a given moment
+    # rather than only what arrived by the end.
+    queue: asyncio.Queue[TaskEvent] | None = None
 
     @asynccontextmanager
     async def __call__(self, broker: Broker[TaskEvent]) -> AsyncIterator[None]:
         async with broker.subscribe() as queue:
+            self.queue = queue
             self.entered += 1
             try:
                 yield
@@ -406,6 +410,19 @@ class RecordingObserver:
                 # cancellation too, which is the point (§10).
                 self.events.extend(queue.get_nowait() for _ in range(queue.qsize()))
                 self.exited += 1
+
+
+@dataclass
+class WatchingAsker(ScriptedAsker):
+    """`ScriptedAsker`, plus how much had reached the observer when it was asked."""
+
+    observer: RecordingObserver | None = None
+    published_before_asking: list[int] = field(default_factory=list)
+
+    async def ask(self, question: Question) -> str:
+        queue = None if self.observer is None else self.observer.queue
+        self.published_before_asking.append(0 if queue is None else queue.qsize())
+        return await super().ask(question)
 
 
 def _offline_run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, provider: FakeProvider) -> Path:
@@ -462,14 +479,19 @@ async def test_run_once_answers_the_planners_question_before_the_run_starts(
     responses.insert(0, PlannerDraft(action=PlannerAction.CLARIFY, questions=[metric]))
     provider = FakeProvider(responses=responses, turns=_turns())
     _offline_run(monkeypatch, tmp_path, provider)
-    asker = ScriptedAsker(answers=["revenue"])
+    observer = RecordingObserver()
+    asker = WatchingAsker(answers=["revenue"], observer=observer)
 
-    state = await run_once("Make a chart of performance", asker=asker)
+    state = await run_once("Make a chart of performance", observer=observer, asker=asker)
 
     assert asker.asked == [metric]
     assert [(entry.question, entry.answer) for entry in state.clarifications] == [
         (metric.text, "revenue")
     ]
+    # Nothing had been published when the question was put. `cli/render.py` opens its
+    # `Live` region on the first event and so relies on this: publish while a prompt is
+    # open and the region lands on top of it (#10).
+    assert asker.published_before_asking == [0]
     assert state.final_result is not None
     assert not state.failed
 

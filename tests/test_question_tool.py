@@ -12,7 +12,7 @@ import pytest
 
 from conftest import ScriptedAsker, tool_call, wait_until
 from orchestra.tools.base import BaseTool, ToolCall
-from orchestra.tools.question import TOOL_NAME, AskUserTool
+from orchestra.tools.question import DECLINED, TOOL_NAME, AskUserTool
 
 # Ceiling on every wait here. Long enough not to flake on a loaded machine, short enough
 # that a swallowed cancellation fails rather than hangs the suite.
@@ -140,7 +140,10 @@ async def test_ask_user_blank_answer_is_empty_not_an_error() -> None:
 
     assert response.is_empty
     assert not response.is_error
-    assert response.content == ""
+    # A sentence, not "": every other tool pairs `is_empty` with something to act on, and
+    # the API rejects an empty `tool_result` block outright.
+    assert response.content == DECLINED
+    assert "declined" in response.content
 
 
 @pytest.mark.asyncio

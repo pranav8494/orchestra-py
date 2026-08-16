@@ -33,8 +33,10 @@ from orchestra.cli.format import OutputFormat, format_result
 from orchestra.core.events import Broker
 from orchestra.core.state import AgentRole, EventKind, SubtaskStatus, TaskEvent, TaskState
 
-# Shown before `plan_created` arrives: an empty opening frame reads as a hang, and
-# planning is the slowest part of a short run.
+# Printed before `plan_created` arrives, above the region rather than in it: planning is
+# the slowest part of a short run and may stop to ask a question (#10), so the window it
+# covers is the one where nothing may own the terminal. Also `RunView`'s opening headline,
+# which only the plain sink now draws.
 PLANNING_HEADLINE = "Planning the request"
 
 # Named so a leaked task is identifiable in a task dump, and a constant so a test

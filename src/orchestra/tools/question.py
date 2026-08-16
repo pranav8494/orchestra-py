@@ -21,6 +21,10 @@ from orchestra.tools.base import (
 
 TOOL_NAME = "ask_user"
 
+# What a decline comes back as. A sentence, not "": every other tool pairs `is_empty` with
+# something the model can act on, and an empty `tool_result` block is rejected by the API.
+DECLINED = "The user declined to answer. Continue with a stated assumption; do not ask again."
+
 # A prompt (§6). The cost being described is a human turn-around, so most of this is about
 # when *not* to call it; the field-level guidance lives on `Question` itself, which the
 # model reads as this tool's schema.
@@ -75,4 +79,6 @@ class AskUserTool:
         answer = await self._asker.ask(question)
         # Whitespace counts as blank: someone who pressed space and Enter declined as much
         # as someone who pressed Enter. `is_empty`, not `is_error` — see the module docstring.
-        return ToolResponse(content=answer, is_empty=not answer.strip())
+        if not answer.strip():
+            return ToolResponse(content=DECLINED, is_empty=True)
+        return ToolResponse(content=answer)

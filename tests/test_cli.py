@@ -276,17 +276,25 @@ def test_run_with_a_piped_stdin_offers_nobody_to_answer_questions(
     assert askers == [None]
 
 
-@pytest.mark.parametrize("tty", [True, False])
-def test_asker_follows_whether_stdin_is_a_terminal(
-    monkeypatch: pytest.MonkeyPatch, tty: bool
+@pytest.mark.parametrize(
+    ("stdin_tty", "stderr_tty", "offered"),
+    [(True, True, True), (True, False, False), (False, True, False), (False, False, False)],
+)
+def test_asker_needs_both_streams_to_be_a_terminal(
+    monkeypatch: pytest.MonkeyPatch, stdin_tty: bool, stderr_tty: bool, offered: bool
 ) -> None:
-    """Both arms of the policy, called directly: `CliRunner` replaces `sys.stdin` inside
-    `invoke`, so the terminal one cannot be reached through the command."""
-    monkeypatch.setattr(sys, "stdin", _Stdin(tty=tty))
+    """A question needs a stream to appear on and a stream to be answered on. Redirect
+    either and nobody can answer — `2>log` in particular would put the question in the
+    file and leave the user staring at a terminal that has stopped.
+
+    Called directly: `CliRunner` replaces `sys.stdin` inside `invoke`.
+    """
+    monkeypatch.setattr(sys, "stdin", _Stdin(tty=stdin_tty))
+    _force_terminal(monkeypatch, value=stderr_tty)
 
     asker = cli_app._asker()
 
-    assert isinstance(asker, ConsoleAsker) if tty else asker is None
+    assert isinstance(asker, ConsoleAsker) is offered
 
 
 def test_run_on_a_terminal_asks_for_the_live_dashboard(monkeypatch: pytest.MonkeyPatch) -> None:

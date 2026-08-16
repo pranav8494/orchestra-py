@@ -76,10 +76,10 @@ You have already had your one round of questions and they were answered. Return 
 now, using the answers.\
 """
 
-CLARIFY_UNAVAILABLE = """\
-Nobody is available to answer questions in this run. Plan the request as it stands, \
-choosing the most reasonable reading, and say in the closest `instruction` what you \
-assumed.\
+CLARIFY_UNANSWERED = """\
+No answers are coming - nobody is at the prompt, or the user declined. Plan the request \
+as it stands, choosing the most reasonable reading, and say in the closest `instruction` \
+what you assumed.\
 """
 
 REFORMAT_INSTRUCTION = """\

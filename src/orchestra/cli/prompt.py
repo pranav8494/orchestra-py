@@ -88,14 +88,19 @@ class ConsoleAsker:
         deliberately: `asyncio.to_thread` uses non-daemon threads, so a Ctrl-C while the
         user sits at the prompt could not end the process — the interpreter would wait on
         the thread that is waiting on the user. Blocking directly lets `KeyboardInterrupt`
-        reach the CLI boundary and exit 130 (§8). Safe because the clarification round runs
-        before the engine starts, with nothing else on the loop to stall.
+        reach the CLI boundary and exit 130 (§8).
+
+        The trade only holds at a pre-engine call site, where the sole other task on the
+        loop is a dashboard consumer parked on its queue with no region open. Offering
+        this tool to a worker's model (#12) would freeze the `Live` region and every
+        concurrent subtask for as long as the human thinks, and needs a different answer.
         """
         try:
             return self._read(question)
-        except EOFError:
-            # stdin closed — a pipe, or Ctrl-D. Declining, not a crash: the caller reads
-            # "" as "no answer given" and proceeds (`Asker`).
+        except (EOFError, OSError):
+            # stdin closed — a pipe, or Ctrl-D — or stderr went away mid-prompt. Declining,
+            # not a crash: §5 lets a dead stream cost the interaction, never the run, and
+            # the caller reads "" as "no answer given" (`Asker`).
             return DECLINED
 
     def _read(self, question: Question) -> str:

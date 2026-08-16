@@ -13,7 +13,7 @@ from conftest import FakeProvider, ScriptedAsker, wait_until
 from orchestra.agents.planner import Planner, PlannerAction, PlannerDraft, SubtaskDraft
 from orchestra.core.errors import ExitCode, ProviderError, TaskFailure
 from orchestra.core.question import MAX_QUESTIONS, Question, QuestionKind
-from orchestra.core.state import AgentRole, EventKind, SubtaskStatus, TaskState
+from orchestra.core.state import AgentRole, Clarification, EventKind, SubtaskStatus, TaskState
 from orchestra.prompts import PLANNER_SYSTEM_PROMPT
 from orchestra.tools.question import AskUserTool
 from scenarios import LINEAR
@@ -339,23 +339,29 @@ async def test_create_plan_never_asks_when_nobody_can_answer() -> None:
     plan = await Planner(provider).create_plan(state)  # no ask tool
 
     assert state.clarifications == []
-    assert "Nobody is available to answer" in provider.calls[1].messages[-1].content
+    assert "No answers are coming" in provider.calls[1].messages[-1].content
     assert len(plan.subtasks) == 3
 
 
 @pytest.mark.asyncio
 async def test_create_plan_records_no_clarification_for_an_answer_the_user_declined() -> None:
-    """A blank answer is not an answer: quoting it back would tell the planner the user
-    said nothing at all."""
-    provider = FakeProvider(responses=[_clarify(METRIC_QUESTION), _financial_plan()])
+    """A blank answer is not an answer. The round is still spent, but the model must be
+    told there is nothing to plan *with* — pointing it at answers that do not exist is how
+    it clarifies again and burns the retry cap on a run it could have planned."""
+    # Asks, is declined, asks again: the second try is what shows which reason it was given.
+    provider = FakeProvider(
+        responses=[_clarify(METRIC_QUESTION), _clarify(METRIC_QUESTION), _financial_plan()]
+    )
     asker = ScriptedAsker(answers=["   "])
     state = TaskState(user_request=AMBIGUOUS_REQUEST)
 
     await _asking_planner(provider, asker).create_plan(state)
 
-    assert asker.asked == [METRIC_QUESTION]
+    assert asker.asked == [METRIC_QUESTION]  # the round is spent even though it yielded nothing
     assert state.clarifications == []
-    assert len(provider.calls[1].messages) == 1  # nothing to send back
+    replan = provider.calls[1].messages
+    assert [message.content for message in replan] == [AMBIGUOUS_REQUEST]  # nothing to add
+    assert "No answers are coming" in provider.calls[2].messages[-1].content
 
 
 @pytest.mark.asyncio
@@ -371,6 +377,48 @@ async def test_create_plan_rejects_a_clarification_carrying_subtasks() -> None:
 
     assert asker.asked == []
     assert "send no subtasks" in provider.calls[1].messages[1].content
+
+
+@pytest.mark.asyncio
+async def test_create_plan_rejects_an_empty_plan() -> None:
+    """`subtasks` lost its `min_length` to the shared draft, so the constraint moved from
+    the wire schema to this rejection — nothing else enforces it now."""
+    provider = FakeProvider(responses=[PlannerDraft(action=PlannerAction.PLAN), _financial_plan()])
+
+    plan = await Planner(provider).create_plan(TaskState(user_request=REQUEST))
+
+    assert "at least one subtask" in provider.calls[1].messages[1].content
+    assert len(plan.subtasks) == 3
+
+
+@pytest.mark.asyncio
+async def test_create_plan_rejects_a_plan_carrying_questions() -> None:
+    """The mirror of the clarify-with-subtasks case: a reply must be one thing or the
+    other, or the questions are dropped without the user ever seeing them."""
+    both = _financial_plan()
+    both.questions = [METRIC_QUESTION]
+    provider = FakeProvider(responses=[both, _financial_plan()])
+    asker = ScriptedAsker()
+
+    await _asking_planner(provider, asker).create_plan(TaskState(user_request=REQUEST))
+
+    assert asker.asked == []
+    assert "questions belong to action 'clarify'" in provider.calls[1].messages[1].content
+
+
+@pytest.mark.asyncio
+async def test_create_plan_does_not_reopen_a_round_the_ledger_already_carries() -> None:
+    """One round per *run*, not per call: a replan (#12) re-entering here must not start a
+    second one, so the guard is the ledger rather than this method being called once."""
+    provider = FakeProvider(responses=[_financial_plan()])
+    asker = ScriptedAsker(answers=["never read"])
+    state = TaskState(user_request=AMBIGUOUS_REQUEST)
+    state.clarifications.append(Clarification(question=METRIC_QUESTION.text, answer="revenue"))
+
+    await _asking_planner(provider, asker).create_plan(state)
+
+    assert asker.asked == []
+    assert len(provider.calls) == 1
 
 
 @pytest.mark.asyncio

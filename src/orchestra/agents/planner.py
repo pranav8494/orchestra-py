@@ -10,10 +10,11 @@ schema cannot say — unique ids, known `depends_on`, acyclic graph. `agents/str
 runs up to three attempts with each rejection fed back, then the run fails.
 
 **Why the planner owns clarification (#10).** A request missing a parameter is a planning
-problem, so the ambiguity check is the planner's and so is its guardrail: exactly one
-round of questions per run, because only this method can start one. Round two asks with
-`_to_plan`, which rejects `clarify` outright — the model is then told to plan with the
-answers, and the retry cap ends the run if it will not.
+problem, so the ambiguity check is the planner's and so is its guardrail. One round per
+*run*, not per call: a ledger that already carries clarifications never opens another, so
+a later replan (#12) re-entering `create_plan` cannot start a second round. The round that
+follows validates with `_plan_only`, which rejects `clarify` outright, and the retry cap
+ends the run if the model will not plan.
 """
 
 from collections.abc import Callable
@@ -36,14 +37,13 @@ from orchestra.core.state import (
 from orchestra.prompts import (
     PLANNER_CLARIFICATION_PREAMBLE,
     PLANNER_CLARIFY_SPENT,
-    PLANNER_CLARIFY_UNAVAILABLE,
+    PLANNER_CLARIFY_UNANSWERED,
     PLANNER_REFORMAT_INSTRUCTION,
     PLANNER_SYSTEM_PROMPT,
 )
 from orchestra.providers.base import MessageRole, Provider, ProviderMessage
-from orchestra.tools.base import ToolCall
+from orchestra.tools.base import BaseTool, ToolCall
 from orchestra.tools.question import TOOL_NAME as ASK_USER_TOOL
-from orchestra.tools.question import AskUserTool
 
 
 class PlannerAction(StrEnum):
@@ -98,7 +98,7 @@ class PlannerDraft(BaseModel):
 class Planner:
     """Turns a request into a plan. One per run, built in `app.py` with its provider."""
 
-    def __init__(self, provider: Provider, *, ask_tool: AskUserTool | None = None) -> None:
+    def __init__(self, provider: Provider, *, ask_tool: BaseTool | None = None) -> None:
         """Store the provider and, when someone can answer, the tool that asks.
 
         `ask_tool` is `None` for a non-interactive run: the ambiguity check still runs,
@@ -122,16 +122,19 @@ class Planner:
             asyncio.CancelledError: propagated, never swallowed (§10).
         """
         ask_tool = self._ask_tool
-        if ask_tool is None:
-            unavailable = _plan_only(PLANNER_CLARIFY_UNAVAILABLE)
-            return self._commit(state, await self._request(state, unavailable))
+        # `state.clarifications` is the run's record of its one round, so asking is
+        # unreachable once it holds anything — whoever called, and however often.
+        if ask_tool is not None and not state.clarifications:
+            outcome = await self._request(state, _to_outcome)
+            if isinstance(outcome, Plan):
+                return self._commit(state, outcome)
+            await self._ask(state, outcome, ask_tool)
 
-        outcome = await self._request(state, _to_outcome)
-        if isinstance(outcome, Plan):
-            return self._commit(state, outcome)
-
-        await self._ask(state, outcome, ask_tool)
-        return self._commit(state, await self._request(state, _plan_only(PLANNER_CLARIFY_SPENT)))
+        # Nobody could be asked, or the round is over. Which reason the model is given
+        # turns on whether an answer was recorded, not on which branch arrived here: a
+        # round everyone declined leaves nothing to plan with, exactly as no round does.
+        refusal = PLANNER_CLARIFY_SPENT if state.clarifications else PLANNER_CLARIFY_UNANSWERED
+        return self._commit(state, await self._request(state, _plan_only(refusal)))
 
     async def _request[ResultT](
         self, state: TaskState, validate: Callable[[PlannerDraft], ResultT]
@@ -154,7 +157,7 @@ class Planner:
         return result
 
     async def _ask(
-        self, state: TaskState, request: ClarificationRequest, ask_tool: AskUserTool
+        self, state: TaskState, request: ClarificationRequest, ask_tool: BaseTool
     ) -> None:
         """Put each question to the user and record the answers on the ledger.
 

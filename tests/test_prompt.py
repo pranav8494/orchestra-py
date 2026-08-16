@@ -162,10 +162,15 @@ async def test_console_asker_free_text_returns_what_was_typed() -> None:
     [QuestionKind.YES_NO, QuestionKind.SINGLE_CHOICE, QuestionKind.MULTI_CHOICE],
     ids=str,
 )
-async def test_console_asker_empty_line_declines_rather_than_reasking(kind: QuestionKind) -> None:
-    """Without a default, Rich re-asks a `yes_no` or `single_choice` forever — a user who
-    cannot answer would have no way out but Ctrl-C, and an exhausted stream would hang the
-    suite. Enter means "no answer", which the tool reports as `is_empty`."""
+async def test_console_asker_a_user_who_answers_nothing_declines(kind: QuestionKind) -> None:
+    """Without a default, Rich re-asks a `yes_no` or `single_choice` forever, and a user
+    who cannot answer has no way out but Ctrl-C. `default=DECLINED` ends it: no answer
+    means "no answer", which the tool reports as `is_empty`.
+
+    Reached here through the exhausted stream rather than the bare newline — Rich's
+    `stream` path does not strip it, where the builtin `input()` production uses does, so
+    a real Enter takes the default one iteration sooner than this does.
+    """
     choices = CHOICES if kind.needs_choices else []
     question = Question(kind=kind, text="Which quarter?", choices=choices)
 
