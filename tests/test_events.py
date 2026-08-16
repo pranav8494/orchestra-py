@@ -1,8 +1,7 @@
-"""Tests for the typed broker (CONVENTIONS.md §6, §12).
+"""Tests for the typed broker (§6).
 
-The two publish modes are asserted against their failure cases, not their happy path:
-the contract is what happens when a subscriber stops draining — progress is dropped,
-lifecycle waits and then gives up, and neither stalls the publisher.
+The contract is what happens when a subscriber stops draining: progress is dropped,
+lifecycle waits then gives up, and neither stalls the publisher.
 """
 
 import asyncio
@@ -48,7 +47,7 @@ async def test_publish_progress_drops_for_a_full_subscriber_instead_of_blocking(
 
     async with broker.subscribe() as queue:
         broker.publish_progress(_event())
-        broker.publish_progress(_event())  # returns; there is no await here to stall on
+        broker.publish_progress(_event())  # returns; no await here to stall on
 
         assert queue.qsize() == 1
         assert broker.dropped_progress == 1
@@ -70,11 +69,10 @@ async def test_publish_lifecycle_gives_up_on_a_wedged_subscriber() -> None:
 
 @pytest.mark.asyncio
 async def test_publish_lifecycle_still_reaches_the_subscribers_after_a_wedged_one() -> None:
-    """One wedged subscriber must not cost the others their events."""
     broker: Broker[TaskEvent] = Broker(queue_size=1, lifecycle_timeout=0.01)
     event = _event(EventKind.RUN_FINISHED)
 
-    # Subscribed first, so the wedged queue is the one the publish waits on first.
+    # Subscribed first, so the publish waits on the wedged queue first.
     async with broker.subscribe() as wedged, broker.subscribe() as healthy:
         await broker.publish_lifecycle(_event())  # fills both, capacity being 1
         healthy.get_nowait()  # only this one keeps up
@@ -88,8 +86,7 @@ async def test_publish_lifecycle_still_reaches_the_subscribers_after_a_wedged_on
 
 @pytest.mark.asyncio
 async def test_subscribe_detaches_on_cancellation() -> None:
-    """§6: unsubscribe on cancellation. An abandoned queue costs every later publish
-    the full lifecycle timeout, so leaking one degrades the whole run."""
+    """§6: an abandoned queue costs every later publish the full lifecycle timeout."""
     broker: Broker[TaskEvent] = Broker()
     attached = asyncio.Event()
 

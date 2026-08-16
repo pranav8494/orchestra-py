@@ -1,17 +1,15 @@
 """The synthesis pass: every completed artifact in, one `FinalReport` out.
 
-**Previews, never payloads.** The one agent that looks behind a pointer, and it looks
-through `ArtifactStore.preview` — a chart's HTML costs a few hundred characters of
-prompt, not the file.
+**Previews, never payloads.** The one agent that looks behind a pointer, and only through
+`ArtifactStore.preview` — a few hundred characters of prompt, not the file.
 
-**Why a draft model.** `ReportDraft` is what the model fills in, `FinalReport` what the
-ledger keeps. A draft figure's `source` is a plain `str` because a model can emit
-anything; converting between the two is where it is checked against this run's artifacts
-(§7). The chart is not in the draft — the ledger already knows it.
+**Why a draft model.** A draft figure's `source` is a plain `str` because a model can emit
+anything; the conversion to `FinalReport` is where it is checked against this run's
+artifacts (§7). The chart is not in the draft — the ledger already knows it.
 
-**Why one call and no retry.** The artifacts are already paid for, so a refusal or a set
-of figures citing nothing real degrades to a ledger-only report rather than raising
-(§8, §10). The same path serves a run with nothing completed.
+**Why one call and no retry.** The artifacts are already paid for, so a refusal or figures
+citing nothing real degrades to a ledger-only report rather than raising (§8, §10). The
+same path serves a run with nothing completed.
 """
 
 import asyncio
@@ -35,7 +33,6 @@ from orchestra.providers.base import MessageRole, Provider, ProviderMessage
 # thread pool, so the bound is stated here rather than left to the plan's size.
 MAX_PREVIEW_READS = 4
 
-# One completed subtask and the artifact it produced, paired at the filter.
 _Completed = tuple[Subtask, ArtifactPointer]
 
 
@@ -81,8 +78,6 @@ class Aggregator:
         """Store the injected services. Nothing is constructed here (§3.3).
 
         Args:
-            provider: the model provider to synthesise with.
-            store: the run's artifact store, used only to preview payloads.
             preview_limit: characters of each artifact the model is shown.
         """
         self._provider = provider
@@ -92,12 +87,8 @@ class Aggregator:
     async def write_report(self, state: TaskState) -> FinalReport:
         """Synthesise the run's artifacts, record the report in `state`, and return it.
 
-        Args:
-            state: the run's ledger, after execution. `state.final_result` is always set
-                on return, including when the model refused and when nothing completed.
-
-        Returns:
-            The report, the same object as `state.final_result`.
+        `state.final_result` is always set on return, including when the model refused and
+        when nothing completed.
 
         Raises:
             TaskFailure: an artifact the ledger claims to hold is gone from the store, so
@@ -123,8 +114,7 @@ class Aggregator:
 
         Returns:
             The report, or `None` when the model gave nothing usable — a refusal, a
-            truncated reply, or figures citing no artifact of this run. All three mean
-            the same to the caller: fall back to the ledger.
+            truncated reply, or figures citing no artifact of this run.
         """
         briefing = await self._briefing(state.user_request, completed)
         draft = await self._provider.parse_structured(
@@ -135,9 +125,8 @@ class Aggregator:
         if draft is None:
             return None
 
-        # Validation at the trust boundary (§7), not the guardrail framework #9 will add:
-        # a figure survives only if its source is an artifact this run produced. The set
-        # comes from the ledger, so survivors are valid pointers by construction.
+        # Trust boundary (§7), not the guardrail framework #9 will add: a figure survives
+        # only if its source is an artifact this run produced, per the ledger.
         produced = set(state.artifacts.values())
         figures = [
             KeyFigure(label=figure.label, value=figure.value, source=figure.source)
@@ -160,8 +149,7 @@ class Aggregator:
         Formatting lives here, not in `prompts/` (§11), and both the request and the
         previews stay out of the system prompt — untrusted text.
         """
-        # `to_thread` because the store is blocking I/O, gathered because the reads are
-        # independent, bounded because §10 wants the bound stated.
+        # `to_thread` because the store is blocking I/O; bounded because §10 says so.
         reads = asyncio.Semaphore(MAX_PREVIEW_READS)
 
         async def read(pointer: ArtifactPointer) -> str:
@@ -187,10 +175,7 @@ class Aggregator:
 
 
 def _completed(state: TaskState) -> list[_Completed]:
-    """The subtasks that finished with something to show, in plan order.
-
-    A `DONE` subtask with no pointer produced nothing to preview.
-    """
+    """The subtasks that finished with something to show, in plan order."""
     if state.plan is None:
         return []
     return [
@@ -214,9 +199,8 @@ def _ledger_report(
 ) -> FinalReport:
     """Build a report from the ledger alone, no model involved.
 
-    The degraded path: it states what the run produced and stops. No key figures —
-    reading a number out of an artifact is the model's job, and guessing one is the
-    invention this design forbids.
+    The degraded path: states what the run produced and stops. No key figures — reading a
+    number out of an artifact is the model's job, and guessing one is invention.
     """
     if not completed:
         summary = f"No subtask produced a result, so this run has no answer to: {user_request}"

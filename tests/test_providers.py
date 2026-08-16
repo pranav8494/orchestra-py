@@ -1,7 +1,7 @@
-"""Tests for the provider port and the Anthropic adapter (CONVENTIONS.md §6, §12).
+"""Tests for the provider port and the Anthropic adapter (§6).
 
-No request leaves the process: the SDK client is replaced with a stub, so what is under
-test is the translation and the error mapping — the two things the adapter exists for.
+No request leaves the process: the SDK client is stubbed, so what is under test is the
+translation and the error mapping — the two things the adapter exists for.
 """
 
 from typing import Any
@@ -29,8 +29,8 @@ class Answer(BaseModel):
 class StubMessages:
     """Stands in for `client.messages`, recording the kwargs it was called with.
 
-    One stub for both entry points: `parse_structured` and `send` are two calls on the
-    same SDK object, so a second stub would be a second mocking style to keep in step.
+    One stub for both entry points: `parse_structured` and `send` are two calls on the same
+    SDK object, so a second stub would be a second mocking style to keep in step.
     """
 
     def __init__(self, result: object) -> None:
@@ -91,9 +91,8 @@ def _provider(
 ) -> tuple[AnthropicProvider, StubMessages]:
     """Build a provider whose SDK client answers with `result`.
 
-    Replaces the private `_client` deliberately: taking the client as a constructor
-    argument would put an SDK type in the signature, and the point of the adapter is
-    that nothing outside it knows that type exists.
+    Replaces the private `_client` deliberately: a constructor argument would put an SDK
+    type in the signature, and the adapter exists so nothing outside knows that type.
     """
     provider = AnthropicProvider(api_key=SecretStr("test-key"), model="claude-opus-5")
     stub = StubMessages(result)
@@ -127,8 +126,7 @@ async def test_parse_structured_translates_our_messages_and_returns_parsed_outpu
     assert stub.kwargs["system"] == "be brief"
     assert stub.kwargs["messages"] == [{"role": "user", "content": "hello"}]
     assert stub.kwargs["output_format"] is Answer
-    # Thinking is on by default and shares the budget with the output, so a plan-sized
-    # answer needs room for both.
+    # Thinking is on by default and shares the budget with the output.
     assert stub.kwargs["max_tokens"] >= 8_000
     # The default model answers all four of these with a 400.
     assert not {"temperature", "top_p", "top_k", "thinking"} & stub.kwargs.keys()
@@ -150,8 +148,8 @@ async def test_parse_structured_returns_none_when_nothing_was_parsed(
 async def test_parse_structured_returns_none_when_the_reply_fails_the_schema(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The SDK validates the text block itself, so a wrong-shaped reply raises there.
-    To the caller that is the same condition as an unparsed reply."""
+    """The SDK validates the text block itself; to the caller a raise there is the same
+    condition as an unparsed reply."""
     provider, _ = _provider(_schema_failure(), monkeypatch)
 
     result = await provider.parse_structured(system="s", messages=[], output_format=Answer)
@@ -269,8 +267,7 @@ async def test_send_decodes_tool_use_blocks_into_tool_calls(
 async def test_send_replays_an_assistant_turn_as_text_and_tool_use_blocks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The transcript is resent whole each lap; a model that cannot see the call it made
-    cannot read the answer to it."""
+    """A model that cannot see the call it made cannot read the answer to it."""
     provider, stub = _provider(StubMessage([]), monkeypatch)
 
     await provider.send(
@@ -308,8 +305,7 @@ async def test_send_replays_an_assistant_turn_as_text_and_tool_use_blocks(
 async def test_send_omits_the_text_block_when_the_assistant_narrated_nothing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The API rejects an empty text block, and calling a tool without narrating it is
-    the common case."""
+    """The API rejects an empty text block, and a tool call without narration is common."""
     provider, stub = _provider(StubMessage([]), monkeypatch)
 
     await provider.send(
@@ -388,8 +384,8 @@ async def test_send_maps_an_sdk_failure_to_provider_error(
 
 
 def test_every_sdk_error_the_adapter_can_meet_derives_from_the_class_it_catches() -> None:
-    """One `except` covers the SDK's failures only while this holds; if a release breaks
-    it, an auth error would surface as an exit-1 bug instead of exit 4."""
+    """One `except` covers the SDK's failures only while this holds; if a release breaks it,
+    an auth error surfaces as an exit-1 bug instead of exit 4."""
     for error in (
         anthropic.APIError,
         anthropic.APIStatusError,
@@ -437,10 +433,15 @@ async def test_aclose_propagates_an_sdk_failure_as_provider_error(
 
 
 def test_create_provider_returns_an_anthropic_provider() -> None:
-    provider: Provider = create_provider(api_key=SecretStr("test-key"), model="claude-opus-5")
+    provider: Provider = create_provider(
+        api_key=SecretStr("test-key"), model="claude-opus-5", max_tokens=1234
+    )
 
     assert isinstance(provider, AnthropicProvider)
     assert provider.model == "claude-opus-5"
+    # The factory's one job beyond choosing the vendor: the caller's cap must reach the
+    # client, since only a live request would otherwise reveal that it did not.
+    assert provider._max_tokens == 1234
 
 
 # --------------------------------------------------------------------------
@@ -450,11 +451,8 @@ def test_create_provider_returns_an_anthropic_provider() -> None:
 
 @pytest.mark.asyncio
 async def test_send_keeps_the_whole_reply_for_replay(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The decoded fields are a summary of the turn, not a substitute for it.
-
-    The default model reasons before calling a tool and the API requires that reasoning
-    back alongside the call, so the adapter has to keep blocks it does not decode.
-    """
+    """The decoded fields summarise the turn but do not replace it: the API requires the
+    model's reasoning back alongside the call, so undecoded blocks have to be kept."""
     blocks = [
         StubBlock(type="thinking"),
         StubBlock(type="tool_use", id="toolu_01", name="q", input={}),
@@ -470,10 +468,8 @@ async def test_send_keeps_the_whole_reply_for_replay(monkeypatch: pytest.MonkeyP
 async def test_send_replays_raw_content_instead_of_rebuilding_the_turn(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Given the handle back, the adapter sends it — it does not reconstruct from fields.
-
-    Reconstructing is what drops the undecoded blocks and gets the next request rejected.
-    """
+    """Reconstructing from fields is what drops the undecoded blocks and gets the next
+    request rejected."""
     blocks = [{"type": "thinking", "thinking": "", "signature": "abc"}]
     provider, stub = _provider(StubMessage([]), monkeypatch)
 

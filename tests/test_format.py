@@ -1,11 +1,8 @@
-"""Tests for the `text | json` switch (CONVENTIONS.md §5, §12).
+"""Tests for the `text | json` switch (§5).
 
-No console and no CliRunner here: `format_result` returns a string, which is the whole
-reason the switch is a module of its own (§3.3). What reaches which stream is
-`test_cli.py`'s subject.
-
-The JSON assertions go through `json.loads` rather than comparing text, because the
-contract is the document — keys, types, and nulls — not pydantic's indentation.
+No console and no CliRunner: `format_result` returns a string, which is why the switch is
+its own module (§3.3). What reaches which stream is `test_cli.py`'s subject. JSON is
+asserted through `json.loads` because the contract is the document, not the indentation.
 """
 
 import json
@@ -174,8 +171,8 @@ def test_format_result_json_status_is_completed_when_nothing_failed() -> None:
 
 
 def test_format_result_json_omits_the_ledger_bookkeeping() -> None:
-    """Regression guard on the contract: the event log and `current_step` are ours, not
-    the caller's, and dumping `TaskState` would publish both."""
+    """Regression: the event log and `current_step` are ours, not the caller's, and
+    dumping `TaskState` would publish both."""
     state = _state(report=_report())
     state.current_step = 3
 
@@ -198,8 +195,7 @@ def test_format_result_json_omits_the_ledger_bookkeeping() -> None:
 def test_format_result_json_stays_parseable_on_a_half_finished_run(state: TaskState) -> None:
     document = _document(state)
 
-    # The contract's shape does not vary with how far the run got: a script reading
-    # `.report` finds the key holding null, never a key that is absent.
+    # Shape does not vary with how far the run got: `.report` is null, never absent.
     assert set(document) == {"request", "status", "report", "subtasks", "failure_reason"}
     assert document["request"] == REQUEST
 

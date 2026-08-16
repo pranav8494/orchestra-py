@@ -1,19 +1,18 @@
-"""Tests for the execution engine (CONVENTIONS.md §10, §12).
+"""Tests for the execution engine (§10).
 
-The subject is orchestration, not work: `ScriptedWorker` does nothing but record what it
-was handed and, when a test asks, block or fail. Plans come from `scenarios.py` through
-the real planner, so the graph the engine walks is the one the planner emits — the two
-cannot drift apart here.
+The subject is orchestration, not work: `ScriptedWorker` records what it was handed and,
+when a test asks, blocks or fails. Plans come from `scenarios.py` through the real planner,
+so the graph the engine walks is the one the planner emits.
 """
 
 import asyncio
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 import pytest
 
-from conftest import FakeProvider
-from orchestra.agents.engine import ExecutionEngine
+from conftest import FakeProvider, wait_until
+from orchestra.agents.engine import DEFAULT_MAX_CONCURRENCY, DEFAULT_STEP_CAP, ExecutionEngine
 from orchestra.agents.planner import Planner
 from orchestra.agents.workers.base import Worker
 from orchestra.core.errors import ExitCode, TaskFailure
@@ -33,11 +32,10 @@ from scenarios import FAN_OUT, LINEAR, ROLE_OMISSION, Scenario
 
 @dataclass
 class ScriptedWorker:
-    """A `Worker` that records its context and does exactly what the test scripted.
+    """A `Worker` that records its context and does what the test scripted.
 
-    `peak_concurrency` is what makes "these two ran at once" an assertion rather than a
-    hope: it is sampled inside the worker, so it measures the engine's dispatch rather
-    than the test's timing.
+    `peak_concurrency` is sampled inside the worker, so "these two ran at once" measures
+    the engine's dispatch rather than the test's timing.
     """
 
     fail_ids: frozenset[str] = frozenset()
@@ -50,7 +48,6 @@ class ScriptedWorker:
     peak_concurrency: int = 0
 
     async def run(self, context: SubtaskContext) -> str:
-        """See `Worker.run`."""
         self.contexts.append(context)
         self.running += 1
         self.peak_concurrency = max(self.peak_concurrency, self.running)
@@ -58,7 +55,7 @@ class ScriptedWorker:
             if self.gate is not None and (not self.gate_ids or context.subtask.id in self.gate_ids):
                 await self.gate.wait()
             else:
-                # Yield once, so a sibling dispatched in the same pass can be observed
+                # Yield once, so a sibling dispatched in the same pass is observable
                 # running alongside this one.
                 await asyncio.sleep(0)
             if context.subtask.id in self.fail_ids:
@@ -81,8 +78,8 @@ def _engine(
     worker: Worker,
     broker: Broker[TaskEvent] | None = None,
     *,
-    max_concurrency: int = 4,
-    step_cap: int = 15,
+    max_concurrency: int = DEFAULT_MAX_CONCURRENCY,
+    step_cap: int = DEFAULT_STEP_CAP,
 ) -> ExecutionEngine:
     return ExecutionEngine(
         workers=_workers(worker),
@@ -97,18 +94,6 @@ async def _planned(scenario: Scenario) -> TaskState:
     state = TaskState(user_request=scenario.prompt)
     await Planner(FakeProvider(responses=[scenario.draft()])).create_plan(state)
     return state
-
-
-async def _wait_until(predicate: Callable[[], bool], *, what: str) -> None:
-    """Yield to the loop until `predicate` holds, rather than sleeping a guessed interval.
-
-    Bounded, so a scheduler that never gets there fails the test instead of hanging it.
-    """
-    for _ in range(1000):
-        if predicate():
-            return
-        await asyncio.sleep(0)
-    raise AssertionError(f"timed out waiting for {what}")
 
 
 def _kinds(events: list[TaskEvent]) -> list[EventKind]:
@@ -195,7 +180,7 @@ async def test_run_gives_the_worker_a_copy_the_ledger_does_not_share() -> None:
 
 @pytest.mark.asyncio
 async def test_run_emits_every_transition_to_the_ledger_and_the_broker() -> None:
-    """A dropped completion strands a dashboard on a spinner, so both sides are asserted."""
+    """A dropped completion strands a dashboard on a spinner, so both sides are checked."""
     state = await _planned(ROLE_OMISSION)
     broker = _broker()
 
@@ -210,8 +195,8 @@ async def test_run_emits_every_transition_to_the_ledger_and_the_broker() -> None
         EventKind.SUBTASK_COMPLETED,
         EventKind.RUN_FINISHED,
     ]
-    # The planner wrote plan_created to the ledger; the engine republished it to the
-    # broker, which did not exist when the planner ran.
+    # The planner wrote plan_created to the ledger; the engine republishes it, since the
+    # broker did not exist when the planner ran.
     assert _kinds(state.events) == [EventKind.PLAN_CREATED, *lifecycle]
     assert _kinds(published) == [EventKind.PLAN_CREATED, *lifecycle]
     assert [event.subtask_id for event in published[1:3]] == ["fetch_revenue_history"] * 2
@@ -220,7 +205,7 @@ async def test_run_emits_every_transition_to_the_ledger_and_the_broker() -> None
 @pytest.mark.asyncio
 async def test_run_publishes_the_plan_on_plan_created_and_on_no_other_event() -> None:
     """A subscriber joins with no ledger of its own (#11), so the pending rows can only
-    reach it here. Every later event, and every ledger entry, stays plan-free."""
+    reach it here."""
     state = await _planned(LINEAR)
     broker = _broker()
 
@@ -240,9 +225,8 @@ async def test_run_publishes_the_plan_on_plan_created_and_on_no_other_event() ->
 
 @pytest.mark.asyncio
 async def test_run_publishes_a_plan_copy_the_engine_does_not_go_on_mutating() -> None:
-    """The event is history, not a live view. The engine writes `Subtask.status` in place
-    as it dispatches, so a shared reference would show a subscriber `done` rows it was
-    never told about — and never redraw them."""
+    """The event is history, not a live view: the engine writes `Subtask.status` in place,
+    so a shared reference would show a subscriber `done` rows it was never told about."""
     state = await _planned(LINEAR)
     broker = _broker()
 
@@ -250,7 +234,7 @@ async def test_run_publishes_a_plan_copy_the_engine_does_not_go_on_mutating() ->
         await _engine(ScriptedWorker(), broker).run(state)
         plan_created = _drain(queue)[0]
 
-    assert set(_statuses(state).values()) == {SubtaskStatus.DONE}  # the engine moved them all
+    assert set(_statuses(state).values()) == {SubtaskStatus.DONE}  # the engine moved them
     published_plan = plan_created.plan
     assert published_plan is not None
     assert [subtask.status for subtask in published_plan.subtasks] == [SubtaskStatus.PENDING] * 3
@@ -287,11 +271,8 @@ async def test_run_bounds_concurrency_with_the_semaphore() -> None:
 
 @pytest.mark.asyncio
 async def test_run_starts_a_subtask_without_waiting_for_an_unrelated_slow_one() -> None:
-    """Completion-driven, not wave-by-wave.
-
-    `analyse` depends only on `fetch`, so it must start while the unrelated `slow_fetch`
-    is still running. A scheduler that ran the graph level by level would hold it back.
-    """
+    """Completion-driven, not wave-by-wave: a scheduler running the graph level by level
+    would hold `analyse` back behind the unrelated `slow_fetch`."""
     state = TaskState(
         user_request=LINEAR.prompt,
         plan=Plan(
@@ -314,7 +295,7 @@ async def test_run_starts_a_subtask_without_waiting_for_an_unrelated_slow_one() 
     worker = ScriptedWorker(gate=gate, gate_ids=frozenset({"slow_fetch"}))
 
     run = asyncio.create_task(_engine(worker).run(state))
-    await _wait_until(
+    await wait_until(
         lambda: _statuses(state)["analyse"] is SubtaskStatus.DONE, what="analyse to finish"
     )
 
@@ -348,7 +329,7 @@ async def test_run_marks_a_failed_subtask_and_leaves_its_dependents_pending() ->
         "chart_comparison": SubtaskStatus.PENDING,
     }
     assert EventKind.SUBTASK_FAILED in _kinds(published)
-    # The run ends rather than deadlocking on a dependency that will never arrive.
+    # Ends rather than deadlocking on a dependency that will never arrive.
     assert _kinds(published)[-1] is EventKind.RUN_FINISHED
     assert [subtask.id for subtask in state.failed_subtasks] == ["fetch_recent_quarters"]
 
@@ -382,7 +363,7 @@ async def test_run_stops_when_the_step_cap_is_exceeded() -> None:
         published = _drain(queue)
 
     assert exc_info.value.exit_code is ExitCode.TASK_FAILURE
-    # Says what finished: this path raises, so nothing else reports the work that did.
+    # This path raises, so nothing else reports the work that did finish.
     assert "2 of 3 subtasks finished before stopping" in str(exc_info.value)
     assert _statuses(state)["chart_trends"] is SubtaskStatus.PENDING
     # Still emitted, so a subscriber learns the run stopped instead of spinning.
@@ -391,7 +372,7 @@ async def test_run_stops_when_the_step_cap_is_exceeded() -> None:
 
 @pytest.mark.asyncio
 async def test_run_fails_before_dispatching_when_a_role_has_no_worker() -> None:
-    """§9: fail fast. Finding this out three steps in would waste the steps before it."""
+    """§9: fail fast — finding out three steps in would waste the steps before it."""
     worker = ScriptedWorker()
     state = await _planned(LINEAR)
     engine = ExecutionEngine(workers={AgentRole.DATA_RETRIEVAL: worker}, broker=_broker())
@@ -433,12 +414,12 @@ async def test_run_cancellation_stops_in_flight_subtasks_and_propagates() -> Non
     worker = ScriptedWorker(gate=asyncio.Event())  # never set
 
     run = asyncio.create_task(_engine(worker).run(state))
-    await _wait_until(lambda: worker.running == 2, what="both retrievals to be in flight")
+    await wait_until(lambda: worker.running == 2, what="both retrievals to be in flight")
 
     run.cancel()
     with pytest.raises(asyncio.CancelledError):
         await run
 
     assert worker.running == 0  # every in-flight worker unwound
-    # Not marked failed: a cancelled subtask did not fail, and the run is over anyway.
+    # Not marked failed: a cancelled subtask did not fail.
     assert _statuses(state)["fetch_recent_quarters"] is SubtaskStatus.RUNNING

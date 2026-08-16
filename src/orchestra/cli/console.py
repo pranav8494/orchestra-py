@@ -1,25 +1,16 @@
 """THE two `Console` objects. No other module in `src/` may construct one (§5).
 
-Two objects rather than one with a `stderr=` argument: a caller cannot then send a
-progress line to stdout by forgetting a keyword. stdout carries results a script can
-parse; stderr carries diagnostics, progress, and errors.
-
-Rich already does the environment handling §5 asks for, so none of it is repeated
-here: a non-empty `NO_COLOR` sets `Console.no_color`, `TERM=dumb`/`unknown` drops the
-colour system to `None`, and a non-tty file leaves `is_terminal` False so nothing
-styled is emitted down a pipe. Call sites still gate *layout* on `console.is_terminal`.
+Two objects rather than one with a `stderr=` argument, so a forgotten keyword cannot
+put a progress line on stdout. Rich already handles `NO_COLOR`, `TERM=dumb` and
+non-tty streams; call sites still gate *layout* on `console.is_terminal`.
 """
 
 from rich.console import Console
 
-# stdout has to survive a pipe intact (§5), which takes three settings, not one:
-# soft_wrap, because with no tty rich assumes 80 columns and hard-wraps a long result
-# line or a JSON document mid-token; markup=False, because a bracketed token inside a
-# result ("[link=...]", "[DEBUG]") would be parsed as a style tag and deleted; and
-# highlight=False, so rich does not colourise numbers and quotes inside a document a
-# script is about to parse. Renderables still style normally — only string markup is off.
+# stdout must survive a pipe intact (§5): soft_wrap so a long line or JSON document is
+# not hard-wrapped at rich's assumed 80 columns, markup/highlight off so a bracketed
+# token is not eaten as a style tag and a parseable document is not colourised.
 console = Console(soft_wrap=True, markup=False, highlight=False)
 
-# Diagnostics, progress, and errors. Wrapping is wanted here: this stream is for eyes,
-# never for a parser.
+# Diagnostics, progress, errors — for eyes, never a parser, so wrapping is wanted.
 err_console = Console(stderr=True)

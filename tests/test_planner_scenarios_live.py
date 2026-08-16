@@ -4,12 +4,9 @@
 uv run pytest -m live          # needs ANTHROPIC_API_KEY; costs three model calls
 ```
 
-Only a real model can show that three differently shaped requests produce three
-differently shaped plans. A failure here is a prompt problem: the shapes come from the
-research doc's table, and `prompts/planner.py` has to satisfy them.
-
-Config is read at import, before `conftest._isolated_env` cuts the environment off, and
-through `load_config()` rather than `os.environ` (§6).
+A failure here is a prompt problem: `prompts/planner.py` has to satisfy the shapes. Config
+is read at import, before `conftest._isolated_env` cuts the environment off, and via
+`load_config()` rather than `os.environ` (§6).
 """
 
 from contextlib import aclosing
@@ -41,9 +38,13 @@ async def test_the_planner_shapes_a_real_plan_to_the_request(scenario: Scenario)
     assert CONFIG is not None  # guaranteed by the skipif; narrows the type for mypy
 
     # Unclosed, the SDK's pooled sockets outlive the test and `filterwarnings = ["error"]`
-    # fails teardown whatever the assertions did.
+    # fails teardown regardless of the assertions.
     async with aclosing(
-        create_provider(api_key=CONFIG.anthropic_api_key, model=CONFIG.anthropic_model)
+        create_provider(
+            api_key=CONFIG.anthropic_api_key,
+            model=CONFIG.anthropic_model,
+            max_tokens=CONFIG.anthropic_max_tokens,
+        )
     ) as provider:
         plan = await Planner(provider).create_plan(TaskState(user_request=scenario.prompt))
 

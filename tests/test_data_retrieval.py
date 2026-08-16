@@ -1,22 +1,19 @@
-"""Tests for the Data Retrieval worker's tool-use loop (CONVENTIONS.md §12).
+"""Tests for the Data Retrieval worker's tool-use loop.
 
-What is asserted is the contract the engine and the next agent depend on: a pointer out,
-a `RetrievedDataset` behind it, both bounds enforced, tool failures fed back to the
-model rather than raised, and cancellation propagated.
+Asserts the contract the engine and the next agent depend on: a pointer out, a
+`RetrievedDataset` behind it, both bounds enforced, tool failures fed back to the model
+rather than raised, and cancellation propagated.
 
-The tools here are `conftest.FakeTool`. The real ones are exercised in `test_tools.py` —
-this file is about the loop, and a test that also parsed a CSV could not say which half
-broke.
+The tools here are `conftest.FakeTool`; the real ones are exercised in `test_tools.py`.
 """
 
 import asyncio
 import json
 from collections.abc import Sequence
-from pathlib import Path
 
 import pytest
 
-from conftest import FakeProvider, FakeTool
+from conftest import FakeProvider, FakeTool, tool_call
 from orchestra.agents.toolsets import QUERY_CSV_TOOL, SEARCH_TOOL
 from orchestra.agents.workers.data_retrieval import (
     DataRetrievalWorker,
@@ -27,7 +24,7 @@ from orchestra.core.errors import TaskFailure
 from orchestra.core.events import Broker
 from orchestra.core.state import AgentRole, EventKind, Subtask, SubtaskContext, TaskEvent, TaskState
 from orchestra.providers.base import AssistantTurn
-from orchestra.tools.base import BaseTool, ToolCall, ToolResponse
+from orchestra.tools.base import BaseTool, ToolResponse
 
 REQUEST = "Summarize the last 3 quarters' financial trends"
 CSV = "quarter,revenue,costs,profit\n2025Q2,1200,700,500\n"
@@ -51,8 +48,8 @@ def _worker(
     broker: Broker[TaskEvent] | None = None,
     **bounds: int,
 ) -> DataRetrievalWorker:
-    """The worker under test. A broker is built when a test does not care about one —
-    warnings are published to nobody, which is what an unobserved run does anyway."""
+    """The worker under test; an unsubscribed `Broker` stands in when a test ignores
+    warnings, as an unobserved run would."""
     return DataRetrievalWorker(
         provider=provider,
         store=store,
@@ -62,10 +59,6 @@ def _worker(
     )
 
 
-def _call(name: str, call_id: str = "call-1", **arguments: object) -> ToolCall:
-    return ToolCall(id=call_id, name=name, arguments=arguments)
-
-
 def _stored(store: ArtifactStore, pointer: str) -> RetrievedDataset:
     """Read the artifact back through its own schema — the next agent's view of it."""
     return RetrievedDataset.model_validate(json.loads(store.get_text(pointer)))
@@ -73,17 +66,18 @@ def _stored(store: ArtifactStore, pointer: str) -> RetrievedDataset:
 
 @pytest.mark.asyncio
 async def test_worker_stores_the_filtered_dataset_and_returns_its_pointer(
-    tmp_path: Path,
+    store: ArtifactStore,
 ) -> None:
-    """The sample subtask, end to end: one query, one summary, one artifact (#5)."""
+    """One query, one summary, one artifact (#5)."""
     provider = FakeProvider(
         turns=[
-            AssistantTurn(text="", tool_calls=(_call(QUERY_CSV_TOOL, last_n=3),), usage_tokens=120),
+            AssistantTurn(
+                text="", tool_calls=(tool_call(QUERY_CSV_TOOL, last_n=3),), usage_tokens=120
+            ),
             AssistantTurn(text="Retrieved three quarters of revenue and costs.", usage_tokens=80),
         ]
     )
     csv_tool = FakeTool(QUERY_CSV_TOOL, [ToolResponse(content=CSV)])
-    store = ArtifactStore(tmp_path)
 
     pointer = await _worker(provider, store, [csv_tool]).run(_context())
 
@@ -97,12 +91,12 @@ async def test_worker_stores_the_filtered_dataset_and_returns_its_pointer(
 
 @pytest.mark.asyncio
 async def test_worker_offers_every_tool_and_keeps_the_request_out_of_the_system_prompt(
-    tmp_path: Path,
+    store: ArtifactStore,
 ) -> None:
     """Both tools are on the table each turn, and untrusted text stays a user turn (§11)."""
     provider = FakeProvider(
         turns=[
-            AssistantTurn(text="", tool_calls=(_call(QUERY_CSV_TOOL),), usage_tokens=10),
+            AssistantTurn(text="", tool_calls=(tool_call(QUERY_CSV_TOOL),), usage_tokens=10),
             AssistantTurn(text="Done.", usage_tokens=10),
         ]
     )
@@ -111,7 +105,7 @@ async def test_worker_offers_every_tool_and_keeps_the_request_out_of_the_system_
         FakeTool(SEARCH_TOOL, []),
     ]
 
-    await _worker(provider, ArtifactStore(tmp_path), tools).run(_context())
+    await _worker(provider, store, tools).run(_context())
 
     offered = {spec.name for spec in provider.send_calls[0].tools}
     assert offered == {QUERY_CSV_TOOL, SEARCH_TOOL}
@@ -120,15 +114,15 @@ async def test_worker_offers_every_tool_and_keeps_the_request_out_of_the_system_
 
 
 @pytest.mark.asyncio
-async def test_worker_records_search_results_as_sources(tmp_path: Path) -> None:
-    """Multi-tool usage: the second tool's answer is kept as provenance, not discarded."""
+async def test_worker_records_search_results_as_sources(store: ArtifactStore) -> None:
+    """The second tool's answer is kept as provenance, not discarded."""
     provider = FakeProvider(
         turns=[
             AssistantTurn(
                 text="",
                 tool_calls=(
-                    _call(QUERY_CSV_TOOL, "c1", last_n=3),
-                    _call(SEARCH_TOOL, "c2", query="saas margin benchmark"),
+                    tool_call(QUERY_CSV_TOOL, "c1", last_n=3),
+                    tool_call(SEARCH_TOOL, "c2", query="saas margin benchmark"),
                 ),
                 usage_tokens=200,
             ),
@@ -139,7 +133,6 @@ async def test_worker_records_search_results_as_sources(tmp_path: Path) -> None:
         FakeTool(QUERY_CSV_TOOL, [ToolResponse(content=CSV)]),
         FakeTool(SEARCH_TOOL, [ToolResponse(content="Sector margins run 70-80%.")]),
     ]
-    store = ArtifactStore(tmp_path)
 
     pointer = await _worker(provider, store, tools).run(_context())
 
@@ -151,16 +144,18 @@ async def test_worker_records_search_results_as_sources(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_worker_feeds_a_tool_failure_back_to_the_model_instead_of_raising(
-    tmp_path: Path,
+    store: ArtifactStore,
 ) -> None:
     """§6: a tool error is data the model reads and corrects, not an unwound loop."""
     provider = FakeProvider(
         turns=[
             AssistantTurn(
-                text="", tool_calls=(_call(QUERY_CSV_TOOL, columns=["margin"]),), usage_tokens=30
+                text="",
+                tool_calls=(tool_call(QUERY_CSV_TOOL, columns=["margin"]),),
+                usage_tokens=30,
             ),
             AssistantTurn(
-                text="", tool_calls=(_call(QUERY_CSV_TOOL, "c2", last_n=3),), usage_tokens=30
+                text="", tool_calls=(tool_call(QUERY_CSV_TOOL, "c2", last_n=3),), usage_tokens=30
             ),
             AssistantTurn(text="Recovered after a bad column.", usage_tokens=30),
         ]
@@ -172,7 +167,6 @@ async def test_worker_feeds_a_tool_failure_back_to_the_model_instead_of_raising(
             ToolResponse(content=CSV),
         ],
     )
-    store = ArtifactStore(tmp_path)
 
     pointer = await _worker(provider, store, [csv_tool]).run(_context())
 
@@ -184,21 +178,21 @@ async def test_worker_feeds_a_tool_failure_back_to_the_model_instead_of_raising(
 
 @pytest.mark.asyncio
 async def test_worker_answers_an_unknown_tool_name_without_ending_the_subtask(
-    tmp_path: Path,
+    store: ArtifactStore,
 ) -> None:
-    """A hallucinated tool is the model's mistake to correct — it gets told the real ones."""
+    """A hallucinated tool is the model's to correct — it gets told the real ones."""
     provider = FakeProvider(
         turns=[
-            AssistantTurn(text="", tool_calls=(_call("fetch_from_sql"),), usage_tokens=20),
+            AssistantTurn(text="", tool_calls=(tool_call("fetch_from_sql"),), usage_tokens=20),
             AssistantTurn(
-                text="", tool_calls=(_call(QUERY_CSV_TOOL, "c2", last_n=3),), usage_tokens=20
+                text="", tool_calls=(tool_call(QUERY_CSV_TOOL, "c2", last_n=3),), usage_tokens=20
             ),
             AssistantTurn(text="Used the right tool.", usage_tokens=20),
         ]
     )
     csv_tool = FakeTool(QUERY_CSV_TOOL, [ToolResponse(content=CSV)])
 
-    await _worker(provider, ArtifactStore(tmp_path), [csv_tool]).run(_context())
+    await _worker(provider, store, [csv_tool]).run(_context())
 
     answer = provider.send_calls[1].messages[-1].tool_results[0]
     assert answer.is_error is True
@@ -206,60 +200,58 @@ async def test_worker_answers_an_unknown_tool_name_without_ending_the_subtask(
 
 
 @pytest.mark.asyncio
-async def test_worker_that_retrieved_nothing_fails_the_subtask(tmp_path: Path) -> None:
-    """A summary with no data behind it is the invented answer the design forbids."""
+async def test_worker_that_retrieved_nothing_fails_the_subtask(store: ArtifactStore) -> None:
+    """A summary with no data behind it is an invented answer."""
     provider = FakeProvider(
         turns=[
-            AssistantTurn(text="", tool_calls=(_call(QUERY_CSV_TOOL),), usage_tokens=20),
+            AssistantTurn(text="", tool_calls=(tool_call(QUERY_CSV_TOOL),), usage_tokens=20),
             AssistantTurn(text="I could not find the data.", usage_tokens=20),
         ]
     )
     csv_tool = FakeTool(QUERY_CSV_TOOL, [ToolResponse(content="no such file", is_error=True)])
 
     with pytest.raises(TaskFailure, match="without retrieving anything"):
-        await _worker(provider, ArtifactStore(tmp_path), [csv_tool]).run(_context())
+        await _worker(provider, store, [csv_tool]).run(_context())
 
 
 @pytest.mark.asyncio
 async def test_worker_still_calling_tools_at_the_turn_cap_fails_the_subtask(
-    tmp_path: Path,
+    store: ArtifactStore,
 ) -> None:
     """§10: the loop is bounded, and exceeding the bound is a failure, not a retry."""
     provider = FakeProvider(
         turns=[
-            AssistantTurn(text="", tool_calls=(_call(QUERY_CSV_TOOL),), usage_tokens=10)
+            AssistantTurn(text="", tool_calls=(tool_call(QUERY_CSV_TOOL),), usage_tokens=10)
             for _ in range(2)
         ]
     )
     csv_tool = FakeTool(QUERY_CSV_TOOL, [ToolResponse(content=CSV) for _ in range(2)])
 
     with pytest.raises(TaskFailure, match="after 2 turns"):
-        await _worker(provider, ArtifactStore(tmp_path), [csv_tool], max_turns=2).run(_context())
+        await _worker(provider, store, [csv_tool], max_turns=2).run(_context())
 
 
 @pytest.mark.asyncio
-async def test_worker_over_its_token_budget_fails_the_subtask(tmp_path: Path) -> None:
+async def test_worker_over_its_token_budget_fails_the_subtask(store: ArtifactStore) -> None:
     """The second bound: turns alone will not catch a model making expensive calls."""
     provider = FakeProvider(
         turns=[
-            AssistantTurn(text="", tool_calls=(_call(QUERY_CSV_TOOL),), usage_tokens=5_000),
+            AssistantTurn(text="", tool_calls=(tool_call(QUERY_CSV_TOOL),), usage_tokens=5_000),
             AssistantTurn(text="never reached", usage_tokens=10),
         ]
     )
     csv_tool = FakeTool(QUERY_CSV_TOOL, [ToolResponse(content=CSV)])
 
     with pytest.raises(TaskFailure, match="budget before finishing"):
-        await _worker(provider, ArtifactStore(tmp_path), [csv_tool], token_budget=100).run(
-            _context()
-        )
+        await _worker(provider, store, [csv_tool], token_budget=100).run(_context())
 
 
 @pytest.mark.asyncio
-async def test_worker_propagates_cancellation(tmp_path: Path) -> None:
+async def test_worker_propagates_cancellation(store: ArtifactStore) -> None:
     """§10: a cancelled run unwinds through the worker, never swallowed."""
     provider = FakeProvider(turns=[AssistantTurn(text="unreached")], blocker=asyncio.Event())
     csv_tool = FakeTool(QUERY_CSV_TOOL, [])
-    worker = _worker(provider, ArtifactStore(tmp_path), [csv_tool])
+    worker = _worker(provider, store, [csv_tool])
 
     task = asyncio.create_task(worker.run(_context()))
     await asyncio.sleep(0)  # let it reach the blocked provider call
@@ -269,11 +261,11 @@ async def test_worker_propagates_cancellation(tmp_path: Path) -> None:
         await task
 
 
-def test_worker_without_tools_is_a_wiring_bug(tmp_path: Path) -> None:
+def test_worker_without_tools_is_a_wiring_bug(store: ArtifactStore) -> None:
     with pytest.raises(ValueError, match="at least one tool"):
         DataRetrievalWorker(
             provider=FakeProvider(),
-            store=ArtifactStore(tmp_path),
+            store=store,
             tools=(),
             broker=Broker(),
         )
@@ -285,19 +277,15 @@ def test_worker_without_tools_is_a_wiring_bug(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_worker_replays_the_providers_own_turn_verbatim(tmp_path: Path) -> None:
-    """The model reasons before calling a tool, and the API wants that reasoning back.
-
-    Rebuilding the assistant turn from `text` and `tool_calls` drops the blocks this
-    codebase never decodes, and the next request is rejected. `raw_content` is the
-    handle that carries them, so what is asserted is that the loop hands it back.
-    """
+async def test_worker_replays_the_providers_own_turn_verbatim(store: ArtifactStore) -> None:
+    """Rebuilding the assistant turn from `text` and `tool_calls` drops the blocks this
+    codebase never decodes, and the next request is rejected; `raw_content` carries them."""
     blocks = object()  # opaque, exactly as the loop must treat it
     provider = FakeProvider(
         turns=[
             AssistantTurn(
                 text="",
-                tool_calls=(_call(QUERY_CSV_TOOL, last_n=3),),
+                tool_calls=(tool_call(QUERY_CSV_TOOL, last_n=3),),
                 usage_tokens=10,
                 raw_content=blocks,
             ),
@@ -306,30 +294,27 @@ async def test_worker_replays_the_providers_own_turn_verbatim(tmp_path: Path) ->
     )
     csv_tool = FakeTool(QUERY_CSV_TOOL, [ToolResponse(content=CSV)])
 
-    await _worker(provider, ArtifactStore(tmp_path), [csv_tool]).run(_context())
+    await _worker(provider, store, [csv_tool]).run(_context())
 
     replayed = provider.send_calls[1].messages[1]
     assert replayed.raw_content is blocks
 
 
 @pytest.mark.asyncio
-async def test_worker_keeps_every_successful_query_not_just_the_last(tmp_path: Path) -> None:
-    """Regression: two complementary queries must not overwrite each other.
-
-    The tool advertises a `columns` filter, so splitting a request across two calls is
-    behaviour it invites. Keeping only the last silently stored half the data under a
-    summary describing all of it.
-    """
+async def test_worker_keeps_every_successful_query_not_just_the_last(store: ArtifactStore) -> None:
+    """Regression: the tool advertises a `columns` filter, so splitting a request across
+    two calls is invited. Keeping only the last stored half the data under a summary
+    describing all of it."""
     provider = FakeProvider(
         turns=[
             AssistantTurn(
                 text="",
-                tool_calls=(_call(QUERY_CSV_TOOL, "c1", columns=["revenue"]),),
+                tool_calls=(tool_call(QUERY_CSV_TOOL, "c1", columns=["revenue"]),),
                 usage_tokens=10,
             ),
             AssistantTurn(
                 text="",
-                tool_calls=(_call(QUERY_CSV_TOOL, "c2", columns=["costs"]),),
+                tool_calls=(tool_call(QUERY_CSV_TOOL, "c2", columns=["costs"]),),
                 usage_tokens=10,
             ),
             AssistantTurn(text="Revenue and costs.", usage_tokens=10),
@@ -339,27 +324,28 @@ async def test_worker_keeps_every_successful_query_not_just_the_last(tmp_path: P
     csv_tool = FakeTool(
         QUERY_CSV_TOOL, [ToolResponse(content=revenue), ToolResponse(content=costs)]
     )
-    store = ArtifactStore(tmp_path)
 
     pointer = await _worker(provider, store, [csv_tool]).run(_context())
 
     dataset = _stored(store, pointer)
     assert [table.csv for table in dataset.datasets] == [revenue, costs]
-    # The arguments ride along, so a reader can tell which table answered which question.
+    # The arguments ride along, so a reader can tell which table answered what.
     assert "revenue" in dataset.datasets[0].query
 
 
 @pytest.mark.asyncio
-async def test_worker_keeps_an_earlier_success_when_a_later_call_fails(tmp_path: Path) -> None:
+async def test_worker_keeps_an_earlier_success_when_a_later_call_fails(
+    store: ArtifactStore,
+) -> None:
     """The failure path must not discard what already succeeded this turn."""
     provider = FakeProvider(
         turns=[
             AssistantTurn(
-                text="", tool_calls=(_call(QUERY_CSV_TOOL, "c1", last_n=3),), usage_tokens=10
+                text="", tool_calls=(tool_call(QUERY_CSV_TOOL, "c1", last_n=3),), usage_tokens=10
             ),
             AssistantTurn(
                 text="",
-                tool_calls=(_call(QUERY_CSV_TOOL, "c2", columns=["margin"]),),
+                tool_calls=(tool_call(QUERY_CSV_TOOL, "c2", columns=["margin"]),),
                 usage_tokens=10,
             ),
             AssistantTurn(text="One worked, one did not.", usage_tokens=10),
@@ -369,7 +355,6 @@ async def test_worker_keeps_an_earlier_success_when_a_later_call_fails(tmp_path:
         QUERY_CSV_TOOL,
         [ToolResponse(content=CSV), ToolResponse(content="No column named margin.", is_error=True)],
     )
-    store = ArtifactStore(tmp_path)
 
     pointer = await _worker(provider, store, [csv_tool]).run(_context())
 
@@ -377,17 +362,14 @@ async def test_worker_keeps_an_earlier_success_when_a_later_call_fails(tmp_path:
 
 
 @pytest.mark.asyncio
-async def test_worker_does_not_record_a_search_that_matched_nothing(tmp_path: Path) -> None:
-    """Regression: "nothing matched" is not provenance, and must not pass the guard.
-
-    `search` reports a miss as a success so the model does not retry it pointlessly. If
-    the worker recorded that as a source, a run that retrieved nothing at all would have
-    written an artifact and been marked DONE.
-    """
+async def test_worker_does_not_record_a_search_that_matched_nothing(store: ArtifactStore) -> None:
+    """Regression: `search` reports a miss as a success so the model does not retry it. If
+    the worker recorded that as a source, a run that retrieved nothing would have written
+    an artifact and been marked DONE."""
     provider = FakeProvider(
         turns=[
             AssistantTurn(
-                text="", tool_calls=(_call(SEARCH_TOOL, query="unrelated"),), usage_tokens=10
+                text="", tool_calls=(tool_call(SEARCH_TOOL, query="unrelated"),), usage_tokens=10
             ),
             AssistantTurn(text="I found nothing.", usage_tokens=10),
         ]
@@ -397,57 +379,54 @@ async def test_worker_does_not_record_a_search_that_matched_nothing(tmp_path: Pa
     )
 
     with pytest.raises(TaskFailure, match="without retrieving anything"):
-        await _worker(provider, ArtifactStore(tmp_path), [search_tool]).run(_context())
+        await _worker(provider, store, [search_tool]).run(_context())
 
 
 @pytest.mark.asyncio
 async def test_worker_treats_a_truncated_reply_as_a_failure_not_a_finished_turn(
-    tmp_path: Path,
+    store: ArtifactStore,
 ) -> None:
     """A reply cut off by the output limit has no tool call — the same shape as "done".
-
-    Thinking shares the output budget on this model, so truncation is reachable. Without
-    the check, half a sentence is stored as the summary and the run reports success.
-    """
+    Without the check, half a sentence is stored as the summary and the run reports
+    success."""
     provider = FakeProvider(
         turns=[AssistantTurn(text="I was about to sa", usage_tokens=10, stop_reason="max_tokens")]
     )
     csv_tool = FakeTool(QUERY_CSV_TOOL, [])
 
     with pytest.raises(TaskFailure, match="cut off by the model's output limit"):
-        await _worker(provider, ArtifactStore(tmp_path), [csv_tool]).run(_context())
+        await _worker(provider, store, [csv_tool]).run(_context())
 
 
 @pytest.mark.asyncio
-async def test_worker_bound_failure_names_what_was_lost(tmp_path: Path) -> None:
+async def test_worker_bound_failure_names_what_was_lost(store: ArtifactStore) -> None:
     """§8: the message has to distinguish "raise the cap" from "debug the agent"."""
     provider = FakeProvider(
         turns=[
-            AssistantTurn(text="", tool_calls=(_call(QUERY_CSV_TOOL),), usage_tokens=10)
+            AssistantTurn(text="", tool_calls=(tool_call(QUERY_CSV_TOOL),), usage_tokens=10)
             for _ in range(2)
         ]
     )
     csv_tool = FakeTool(QUERY_CSV_TOOL, [ToolResponse(content=CSV) for _ in range(2)])
 
     with pytest.raises(TaskFailure, match=r"kept results from query_csv x2, which are lost"):
-        await _worker(provider, ArtifactStore(tmp_path), [csv_tool], max_turns=2).run(_context())
+        await _worker(provider, store, [csv_tool], max_turns=2).run(_context())
 
 
 @pytest.mark.asyncio
-async def test_worker_replays_narration_that_accompanied_a_tool_call(tmp_path: Path) -> None:
+async def test_worker_replays_narration_that_accompanied_a_tool_call(store: ArtifactStore) -> None:
     """A turn can carry text *and* tool calls; the text is narration, not the summary."""
     provider = FakeProvider(
         turns=[
             AssistantTurn(
                 text="Let me check the last three quarters.",
-                tool_calls=(_call(QUERY_CSV_TOOL, last_n=3),),
+                tool_calls=(tool_call(QUERY_CSV_TOOL, last_n=3),),
                 usage_tokens=10,
             ),
             AssistantTurn(text="The real summary.", usage_tokens=10),
         ]
     )
     csv_tool = FakeTool(QUERY_CSV_TOOL, [ToolResponse(content=CSV)])
-    store = ArtifactStore(tmp_path)
 
     pointer = await _worker(provider, store, [csv_tool]).run(_context())
 
@@ -457,32 +436,32 @@ async def test_worker_replays_narration_that_accompanied_a_tool_call(tmp_path: P
 
 @pytest.mark.asyncio
 async def test_worker_with_no_usage_reported_is_still_bounded_by_its_turn_cap(
-    tmp_path: Path,
+    store: ArtifactStore,
 ) -> None:
     """A provider reporting zero tokens leaves the budget inert — turns are the backstop."""
     provider = FakeProvider(
         turns=[
-            AssistantTurn(text="", tool_calls=(_call(QUERY_CSV_TOOL),), usage_tokens=0)
+            AssistantTurn(text="", tool_calls=(tool_call(QUERY_CSV_TOOL),), usage_tokens=0)
             for _ in range(3)
         ]
     )
     csv_tool = FakeTool(QUERY_CSV_TOOL, [ToolResponse(content=CSV) for _ in range(3)])
 
     with pytest.raises(TaskFailure, match="after 3 turns"):
-        await _worker(provider, ArtifactStore(tmp_path), [csv_tool], max_turns=3).run(_context())
+        await _worker(provider, store, [csv_tool], max_turns=3).run(_context())
 
 
 @pytest.mark.asyncio
-async def test_worker_publishes_a_tool_warning_without_failing_the_step(tmp_path: Path) -> None:
-    """A degraded tool is news for the operator, not a reason to fail a step that worked.
-
-    The worker is the only thing that can see it: the engine publishes the step's
-    transitions, and this happens partway through one.
-    """
+async def test_worker_publishes_a_tool_warning_without_failing_the_step(
+    store: ArtifactStore,
+) -> None:
+    """A degraded tool is news for the operator, not a reason to fail a step that worked,
+    and only the worker can see it — the engine publishes transitions, not mid-step
+    events."""
     provider = FakeProvider(
         turns=[
             AssistantTurn(
-                text="", tool_calls=(_call(SEARCH_TOOL, query="margins"),), usage_tokens=10
+                text="", tool_calls=(tool_call(SEARCH_TOOL, query="margins"),), usage_tokens=10
             ),
             AssistantTurn(text="Answered from the corpus.", usage_tokens=10),
         ]
@@ -492,13 +471,11 @@ async def test_worker_publishes_a_tool_warning_without_failing_the_step(tmp_path
         [ToolResponse(content="a note", warning="Live search was unavailable: HTTP 401.")],
     )
     broker: Broker[TaskEvent] = Broker()
-    store = ArtifactStore(tmp_path)
 
     async with broker.subscribe() as queue:
         pointer = await _worker(provider, store, [search_tool], broker).run(_context())
         published = [queue.get_nowait() for _ in range(queue.qsize())]
 
-    # The step still produced its artifact.
     assert pointer == "artifact:fetch_financials.json"
     warnings = [event for event in published if event.kind is EventKind.SUBTASK_WARNING]
     assert [(event.subtask_id, event.message) for event in warnings] == [
@@ -507,11 +484,11 @@ async def test_worker_publishes_a_tool_warning_without_failing_the_step(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_worker_publishes_nothing_when_no_tool_degraded(tmp_path: Path) -> None:
+async def test_worker_publishes_nothing_when_no_tool_degraded(store: ArtifactStore) -> None:
     """The quiet path stays quiet — a warning per call would train the eye to ignore it."""
     provider = FakeProvider(
         turns=[
-            AssistantTurn(text="", tool_calls=(_call(QUERY_CSV_TOOL),), usage_tokens=10),
+            AssistantTurn(text="", tool_calls=(tool_call(QUERY_CSV_TOOL),), usage_tokens=10),
             AssistantTurn(text="Done.", usage_tokens=10),
         ]
     )
@@ -519,7 +496,7 @@ async def test_worker_publishes_nothing_when_no_tool_degraded(tmp_path: Path) ->
     broker: Broker[TaskEvent] = Broker()
 
     async with broker.subscribe() as queue:
-        await _worker(provider, ArtifactStore(tmp_path), [csv_tool], broker).run(_context())
+        await _worker(provider, store, [csv_tool], broker).run(_context())
         published = [queue.get_nowait() for _ in range(queue.qsize())]
 
     assert [event for event in published if event.kind is EventKind.SUBTASK_WARNING] == []
