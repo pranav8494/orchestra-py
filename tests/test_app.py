@@ -24,11 +24,11 @@ from typing import Any, cast
 import pytest
 from pydantic import BaseModel, SecretStr
 
-from conftest import FakeProvider, wait_until
+from conftest import FakeProvider, ScriptedAsker, wait_until
 from orchestra import app as app_module
 from orchestra.agents.aggregator import Aggregator, FigureDraft, ReportDraft
 from orchestra.agents.engine import DEFAULT_STEP_CAP, ExecutionEngine
-from orchestra.agents.planner import Planner
+from orchestra.agents.planner import Planner, PlannerAction, PlannerDraft
 from orchestra.agents.toolsets import QUERY_CSV_TOOL
 from orchestra.agents.workers.analytics import AnalyticsWorker
 from orchestra.agents.workers.base import Worker
@@ -42,6 +42,7 @@ from orchestra.cli.format import OutputFormat, format_result
 from orchestra.config import Config
 from orchestra.core.errors import ProviderError
 from orchestra.core.events import Broker
+from orchestra.core.question import Question, QuestionKind
 from orchestra.core.state import (
     ARTIFACT_PREFIX,
     AgentRole,
@@ -444,6 +445,33 @@ async def test_run_once_keeps_the_observer_attached_from_the_first_event_to_the_
     assert kinds[-1] is EventKind.RUN_FINISHED  # and it was still attached at the end
     assert state.final_result is not None
     assert provider.closed
+
+
+@pytest.mark.asyncio
+async def test_run_once_answers_the_planners_question_before_the_run_starts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """#10 through the composition root: an ambiguous request stops for one question, the
+    answer lands on the ledger, and the run proceeds on the plan that came back."""
+    metric = Question(
+        kind=QuestionKind.SINGLE_CHOICE,
+        text="Which metric should the chart show?",
+        choices=["revenue", "profit"],
+    )
+    responses = _responses(chart=True)
+    responses.insert(0, PlannerDraft(action=PlannerAction.CLARIFY, questions=[metric]))
+    provider = FakeProvider(responses=responses, turns=_turns())
+    _offline_run(monkeypatch, tmp_path, provider)
+    asker = ScriptedAsker(answers=["revenue"])
+
+    state = await run_once("Make a chart of performance", asker=asker)
+
+    assert asker.asked == [metric]
+    assert [(entry.question, entry.answer) for entry in state.clarifications] == [
+        (metric.text, "revenue")
+    ]
+    assert state.final_result is not None
+    assert not state.failed
 
 
 @pytest.mark.asyncio

@@ -26,8 +26,10 @@ from orchestra.artifacts import ArtifactStore
 from orchestra.config import Config, load_config
 from orchestra.core.errors import TaskFailure
 from orchestra.core.events import Broker
+from orchestra.core.question import Asker
 from orchestra.core.state import AgentRole, TaskEvent, TaskState
 from orchestra.providers.base import Provider, create_provider
+from orchestra.tools.question import AskUserTool
 
 # UTC and no colons: sortable as a plain string, and legal on Windows and in a shell.
 RUN_DIR_FORMAT = "%Y-%m-%dT%H-%M-%SZ"
@@ -97,10 +99,14 @@ class Orchestra:
         await self._provider.aclose()
 
 
-def build_orchestra(config: Config) -> Orchestra:
+def build_orchestra(config: Config, *, asker: Asker | None = None) -> Orchestra:
     """Construct the application from validated configuration.
 
     Substitute a service by calling `Orchestra` directly.
+
+    Args:
+        asker: who answers the planner's clarifying questions (#10). `None` runs
+            non-interactively: the planner is told nobody is there and plans anyway.
 
     Raises:
         ConfigError: the artifact directory is unusable (§9 — fail before work starts).
@@ -143,7 +149,10 @@ def build_orchestra(config: Config) -> Orchestra:
         provider=provider, store=store, broker=broker
     )
     return Orchestra(
-        planner=Planner(provider),
+        # Not in `agents/toolsets.py`: that module says which tools each agent's *model*
+        # is shown, and this one is not offered to a model in this phase — the planner
+        # calls it directly to put its own questions.
+        planner=Planner(provider, ask_tool=None if asker is None else AskUserTool(asker)),
         engine=ExecutionEngine(
             workers=workers,
             broker=broker,
@@ -168,18 +177,21 @@ so an observer yielding something — `dashboard` yields its `RunView` — still
 """
 
 
-async def run_once(prompt: str, *, observer: RunObserver | None = None) -> TaskState:
+async def run_once(
+    prompt: str, *, observer: RunObserver | None = None, asker: Asker | None = None
+) -> TaskState:
     """Load configuration, run `prompt` once, and release the provider.
 
     What `cli/app.py` delegates to, so the command body stays parse, delegate, exit (§4).
     `observer` is entered around the run, so it is subscribed before the first event and
-    torn down after the last; `None` runs headless.
+    torn down after the last; `None` runs headless. `asker` answers clarifying questions;
+    `None` never asks any.
 
     Raises:
         OrchestraError: configuration or planning failed. A run that started and then
             stopped short returns its ledger instead.
     """
-    orchestra = build_orchestra(load_config())
+    orchestra = build_orchestra(load_config(), asker=asker)
     try:
         # An exit stack rather than an `if`, which would duplicate the `run_task` call
         # across both branches.

@@ -17,7 +17,7 @@ import itertools
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
-from orchestra.agents.planner import PlanDraft, SubtaskDraft
+from orchestra.agents.planner import PlannerAction, PlannerDraft, SubtaskDraft
 from orchestra.core.state import AgentRole, Plan, Subtask
 
 
@@ -59,12 +59,13 @@ class Scenario:
     prompt: str
     shape: PlanShape
     # A factory, not an instance: a shared draft is one a test can leave mutated.
-    draft: Callable[[], PlanDraft]
+    draft: Callable[[], PlannerDraft]
 
 
-def linear_draft() -> PlanDraft:
+def linear_draft() -> PlannerDraft:
     """Fetch, then analyse, then chart — the answer the linear prompt should get."""
-    return PlanDraft(
+    return PlannerDraft(
+        action=PlannerAction.PLAN,
         subtasks=[
             SubtaskDraft(
                 id="fetch_quarterly_financials",
@@ -85,14 +86,15 @@ def linear_draft() -> PlanDraft:
                 inputs=["analyse_trends"],
                 depends_on=["analyse_trends"],
             ),
-        ]
+        ],
     )
 
 
-def fan_out_draft() -> PlanDraft:
+def fan_out_draft() -> PlannerDraft:
     """Two retrievals, a comparison, then a chart. The missing edge between the retrievals
     is what lets the engine run them at once."""
-    return PlanDraft(
+    return PlannerDraft(
+        action=PlannerAction.PLAN,
         subtasks=[
             SubtaskDraft(
                 id="fetch_recent_quarters",
@@ -118,13 +120,14 @@ def fan_out_draft() -> PlanDraft:
                 inputs=["compare_quarters"],
                 depends_on=["compare_quarters"],
             ),
-        ]
+        ],
     )
 
 
-def role_omission_draft() -> PlanDraft:
+def role_omission_draft() -> PlannerDraft:
     """A written summary and nothing to draw: visualization is dropped, not reordered."""
-    return PlanDraft(
+    return PlannerDraft(
+        action=PlannerAction.PLAN,
         subtasks=[
             SubtaskDraft(
                 id="fetch_revenue_history",
@@ -138,7 +141,7 @@ def role_omission_draft() -> PlanDraft:
                 inputs=["fetch_revenue_history"],
                 depends_on=["fetch_revenue_history"],
             ),
-        ]
+        ],
     )
 
 

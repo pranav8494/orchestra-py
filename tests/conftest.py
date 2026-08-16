@@ -15,6 +15,7 @@ import pytest
 from pydantic import BaseModel
 
 from orchestra.artifacts import ArtifactStore
+from orchestra.core.question import Asker, Question
 from orchestra.providers.base import AssistantTurn, Provider, ProviderMessage, StructuredT
 from orchestra.tools.base import BaseTool, ToolCall, ToolResponse, ToolSpec
 
@@ -169,6 +170,28 @@ class FakeProvider:
         self.closed = True
 
 
+@dataclass
+class ScriptedAsker:
+    """An `Asker` that answers from a queue and keeps what it was asked (§12).
+
+    The questions are kept as objects, not strings: what a test checks is that the
+    planner's typed question reached the renderer intact.
+    """
+
+    answers: list[str] = field(default_factory=list)
+    asked: list[Question] = field(default_factory=list)
+    # As `FakeProvider`'s: holds the question open so a cancellation test has one in flight.
+    blocker: asyncio.Event | None = None
+
+    async def ask(self, question: Question) -> str:
+        self.asked.append(question)
+        if self.blocker is not None:
+            await self.blocker.wait()
+        if not self.answers:
+            raise AssertionError(f"ScriptedAsker has no answer for question {len(self.asked)}")
+        return self.answers.pop(0)
+
+
 class FakeTool:
     """A `BaseTool` that answers from a queue and records what it was called with."""
 
@@ -196,3 +219,4 @@ if TYPE_CHECKING:
     # names only, so it would pass a fake whose signature had drifted.
     _PROTOCOL_CHECK: Provider = FakeProvider()
     _TOOL_PROTOCOL_CHECK: BaseTool = FakeTool("x", [])
+    _ASKER_PROTOCOL_CHECK: Asker = ScriptedAsker()

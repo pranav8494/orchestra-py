@@ -6,6 +6,7 @@ pads help output to the console width — the contract is the text, not the rend
 """
 
 import json
+import sys
 from functools import partial
 
 import pytest
@@ -17,9 +18,11 @@ from orchestra import __version__
 from orchestra.app import RunObserver
 from orchestra.cli.app import app, error_boundary
 from orchestra.cli.console import console, err_console
+from orchestra.cli.prompt import ConsoleAsker
 from orchestra.cli.render import RenderMode
 from orchestra.config import load_config
 from orchestra.core.errors import ConfigError, ExitCode, ProviderError, TaskFailure
+from orchestra.core.question import Asker
 from orchestra.core.state import (
     AgentRole,
     FinalReport,
@@ -134,18 +137,26 @@ def _finished_state(
 
 
 def _stub_run_once(
-    monkeypatch: pytest.MonkeyPatch, outcome: TaskState | BaseException
+    monkeypatch: pytest.MonkeyPatch,
+    outcome: TaskState | BaseException,
+    *,
+    askers: list[Asker | None] | None = None,
 ) -> list[RunObserver | None]:
     """Replace the delegation target, leaving the command's own behaviour under test.
 
     Returns the list the command's observer is recorded in, so a test can assert which
-    dashboard the flags asked for without running one.
+    dashboard the flags asked for without running one. `askers` is the same seam for
+    whoever the command offered to answer clarifying questions (#10).
     """
     observers: list[RunObserver | None] = []
 
-    async def fake_run_once(prompt: str, *, observer: RunObserver | None = None) -> TaskState:
+    async def fake_run_once(
+        prompt: str, *, observer: RunObserver | None = None, asker: Asker | None = None
+    ) -> TaskState:
         assert prompt == PROMPT  # the command passes the argument through unchanged
         observers.append(observer)
+        if askers is not None:
+            askers.append(asker)
         if isinstance(outcome, BaseException):
             raise outcome
         return outcome
@@ -238,6 +249,44 @@ def _force_terminal(monkeypatch: pytest.MonkeyPatch, *, value: bool) -> None:
     tests would then pass against a `_render_mode` reading the wrong stream.
     """
     monkeypatch.setattr(err_console, "_force_terminal", value, raising=False)
+
+
+class _Stdin:
+    """A stdin that is, or is not, a terminal. `CliRunner` always supplies a pipe, so the
+    interactive arm is unreachable through `invoke` — as with `_force_terminal` below."""
+
+    def __init__(self, *, tty: bool) -> None:
+        self._tty = tty
+
+    def isatty(self) -> bool:
+        return self._tty
+
+
+def test_run_with_a_piped_stdin_offers_nobody_to_answer_questions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#10: a script or CI run has no one at the keyboard, so the command hands `run_once`
+    no asker and the planner is told to plan without asking. Anything else hangs."""
+    askers: list[Asker | None] = []
+    _stub_run_once(monkeypatch, _finished_state(SubtaskStatus.DONE), askers=askers)
+
+    result = runner.invoke(app, ["run", PROMPT], prog_name=PROG)
+
+    assert result.exit_code == ExitCode.SUCCESS
+    assert askers == [None]
+
+
+@pytest.mark.parametrize("tty", [True, False])
+def test_asker_follows_whether_stdin_is_a_terminal(
+    monkeypatch: pytest.MonkeyPatch, tty: bool
+) -> None:
+    """Both arms of the policy, called directly: `CliRunner` replaces `sys.stdin` inside
+    `invoke`, so the terminal one cannot be reached through the command."""
+    monkeypatch.setattr(sys, "stdin", _Stdin(tty=tty))
+
+    asker = cli_app._asker()
+
+    assert isinstance(asker, ConsoleAsker) if tty else asker is None
 
 
 def test_run_on_a_terminal_asks_for_the_live_dashboard(monkeypatch: pytest.MonkeyPatch) -> None:

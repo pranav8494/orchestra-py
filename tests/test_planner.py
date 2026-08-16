@@ -9,11 +9,13 @@ import asyncio
 
 import pytest
 
-from conftest import FakeProvider
-from orchestra.agents.planner import PlanDraft, Planner, SubtaskDraft
+from conftest import FakeProvider, ScriptedAsker, wait_until
+from orchestra.agents.planner import Planner, PlannerAction, PlannerDraft, SubtaskDraft
 from orchestra.core.errors import ExitCode, ProviderError, TaskFailure
+from orchestra.core.question import MAX_QUESTIONS, Question, QuestionKind
 from orchestra.core.state import AgentRole, EventKind, SubtaskStatus, TaskState
 from orchestra.prompts import PLANNER_SYSTEM_PROMPT
+from orchestra.tools.question import AskUserTool
 from scenarios import LINEAR
 
 # Reusing the linear scenario as the good-plan fixture keeps the two suites from
@@ -21,11 +23,27 @@ from scenarios import LINEAR
 REQUEST = LINEAR.prompt
 _financial_plan = LINEAR.draft
 
+# The graded case: neither the metric nor the period is stated, so no plan can be written
+# without inventing one (#10).
+AMBIGUOUS_REQUEST = "Make a chart of performance"
+METRIC_QUESTION = Question(
+    kind=QuestionKind.SINGLE_CHOICE,
+    text="Which metric should the chart show?",
+    choices=["revenue", "profit"],
+)
+PERIOD_QUESTION = Question(kind=QuestionKind.FREE_TEXT, text="Which period should it cover?")
 
-def _broken_plan() -> PlanDraft:
+
+def _clarify(*questions: Question) -> PlannerDraft:
+    """The planner asking instead of planning."""
+    return PlannerDraft(action=PlannerAction.CLARIFY, questions=list(questions))
+
+
+def _broken_plan() -> PlannerDraft:
     """Shaped correctly, unrunnable: `depends_on` names a step outside the plan. Structured
     output cannot rule this out, which is why the reformat retry exists."""
-    return PlanDraft(
+    return PlannerDraft(
+        action=PlannerAction.PLAN,
         subtasks=[
             SubtaskDraft(
                 id="chart_trends",
@@ -33,7 +51,7 @@ def _broken_plan() -> PlanDraft:
                 instruction="Plot the quarterly revenue trend.",
                 depends_on=["analyse_trends"],
             )
-        ]
+        ],
     )
 
 
@@ -92,7 +110,7 @@ async def test_create_plan_sends_the_request_as_a_user_message_not_in_the_prompt
     assert call.system == PLANNER_SYSTEM_PROMPT
     assert REQUEST not in call.system
     assert [message.content for message in call.messages] == [REQUEST]
-    assert call.output_format is PlanDraft
+    assert call.output_format is PlannerDraft
 
 
 @pytest.mark.asyncio
@@ -115,7 +133,8 @@ async def test_create_plan_rejects_an_input_the_step_does_not_depend_on() -> Non
     """A data edge with no ordering edge is a race: the engine may start the consumer
     before the producer wrote anything. `Plan` checks `depends_on` only, so the planner
     owns this one."""
-    unordered = PlanDraft(
+    unordered = PlannerDraft(
+        action=PlannerAction.PLAN,
         subtasks=[
             SubtaskDraft(
                 id="fetch_quarterly_financials",
@@ -128,7 +147,7 @@ async def test_create_plan_rejects_an_input_the_step_does_not_depend_on() -> Non
                 instruction="Compute quarter-over-quarter growth.",
                 inputs=["fetch_quarterly_financials"],  # consumed, but not depended on
             ),
-        ]
+        ],
     )
     provider = FakeProvider(responses=[unordered, _financial_plan()])
     state = TaskState(user_request=REQUEST)
@@ -142,7 +161,8 @@ async def test_create_plan_rejects_an_input_the_step_does_not_depend_on() -> Non
 
 @pytest.mark.asyncio
 async def test_create_plan_rejects_an_input_naming_a_step_outside_the_plan() -> None:
-    ghost = PlanDraft(
+    ghost = PlannerDraft(
+        action=PlannerAction.PLAN,
         subtasks=[
             SubtaskDraft(
                 id="chart_trends",
@@ -151,7 +171,7 @@ async def test_create_plan_rejects_an_input_naming_a_step_outside_the_plan() -> 
                 inputs=["analyse_trends"],
                 depends_on=["analyse_trends"],
             )
-        ]
+        ],
     )
     provider = FakeProvider(responses=[ghost, _financial_plan()])
 
@@ -233,3 +253,153 @@ def test_planner_prompt_names_every_agent_role() -> None:
     """The prompt lists roles as literal text; this stops it drifting from `AgentRole`."""
     for role in AgentRole:
         assert role.value in PLANNER_SYSTEM_PROMPT
+
+
+def test_planner_prompt_states_the_ambiguity_check_and_every_question_kind() -> None:
+    """The check is the feature (#10), and the kinds are literal text in it — the same
+    drift guard as the roles above."""
+    assert "ambiguity check" in PLANNER_SYSTEM_PROMPT
+    for action in PlannerAction:
+        assert action.value in PLANNER_SYSTEM_PROMPT
+    for kind in QuestionKind:
+        assert kind.value in PLANNER_SYSTEM_PROMPT
+
+
+# --------------------------------------------------------------------------
+# One round of clarifying questions, and only one (#10).
+# --------------------------------------------------------------------------
+
+
+def _asking_planner(provider: FakeProvider, asker: ScriptedAsker) -> Planner:
+    """The planner as `app.py` wires it when someone is there to answer."""
+    return Planner(provider, ask_tool=AskUserTool(asker))
+
+
+@pytest.mark.asyncio
+async def test_create_plan_asks_the_typed_questions_and_plans_with_the_answers() -> None:
+    """The graded path end to end: questions out, answers in, plan after."""
+    provider = FakeProvider(
+        responses=[_clarify(METRIC_QUESTION, PERIOD_QUESTION), _financial_plan()]
+    )
+    asker = ScriptedAsker(answers=["revenue", "the last three quarters"])
+    state = TaskState(user_request=AMBIGUOUS_REQUEST)
+
+    plan = await _asking_planner(provider, asker).create_plan(state)
+
+    # Typed all the way to the renderer: the kind and the choices survive the round trip.
+    assert asker.asked == [METRIC_QUESTION, PERIOD_QUESTION]
+    assert [(entry.question, entry.answer) for entry in state.clarifications] == [
+        (METRIC_QUESTION.text, "revenue"),
+        (PERIOD_QUESTION.text, "the last three quarters"),
+    ]
+    # The answers reach the model, in a turn of their own beside the untrusted request.
+    replan = provider.calls[1].messages
+    assert replan[0].content == AMBIGUOUS_REQUEST
+    assert "revenue" in replan[1].content and "the last three quarters" in replan[1].content
+    assert plan is state.plan
+
+
+@pytest.mark.asyncio
+async def test_create_plan_asks_nothing_when_the_request_is_unambiguous() -> None:
+    """The sample financial prompt is planned on the first call, with no prompt shown."""
+    provider = FakeProvider(responses=[_financial_plan()])
+    asker = ScriptedAsker(answers=["never read"])
+
+    plan = await _asking_planner(provider, asker).create_plan(TaskState(user_request=REQUEST))
+
+    assert asker.asked == []
+    assert len(provider.calls) == 1
+    assert len(plan.subtasks) == 3
+
+
+@pytest.mark.asyncio
+async def test_create_plan_refuses_a_second_round_of_questions() -> None:
+    """The guardrail against question loops: one round per run, and the model is told why
+    its second attempt was rejected rather than being asked again."""
+    provider = FakeProvider(
+        responses=[_clarify(METRIC_QUESTION), _clarify(PERIOD_QUESTION), _financial_plan()]
+    )
+    asker = ScriptedAsker(answers=["revenue"])
+    state = TaskState(user_request=AMBIGUOUS_REQUEST)
+
+    await _asking_planner(provider, asker).create_plan(state)
+
+    assert asker.asked == [METRIC_QUESTION]  # the second round never reached the user
+    assert len(state.clarifications) == 1
+    assert "already had your one round" in provider.calls[2].messages[-1].content
+
+
+@pytest.mark.asyncio
+async def test_create_plan_never_asks_when_nobody_can_answer() -> None:
+    """A piped run has no one at the prompt, so the planner is told to plan anyway rather
+    than blocking on a question forever."""
+    provider = FakeProvider(responses=[_clarify(METRIC_QUESTION), _financial_plan()])
+    state = TaskState(user_request=AMBIGUOUS_REQUEST)
+
+    plan = await Planner(provider).create_plan(state)  # no ask tool
+
+    assert state.clarifications == []
+    assert "Nobody is available to answer" in provider.calls[1].messages[-1].content
+    assert len(plan.subtasks) == 3
+
+
+@pytest.mark.asyncio
+async def test_create_plan_records_no_clarification_for_an_answer_the_user_declined() -> None:
+    """A blank answer is not an answer: quoting it back would tell the planner the user
+    said nothing at all."""
+    provider = FakeProvider(responses=[_clarify(METRIC_QUESTION), _financial_plan()])
+    asker = ScriptedAsker(answers=["   "])
+    state = TaskState(user_request=AMBIGUOUS_REQUEST)
+
+    await _asking_planner(provider, asker).create_plan(state)
+
+    assert asker.asked == [METRIC_QUESTION]
+    assert state.clarifications == []
+    assert len(provider.calls[1].messages) == 1  # nothing to send back
+
+
+@pytest.mark.asyncio
+async def test_create_plan_rejects_a_clarification_carrying_subtasks() -> None:
+    """`clarify` replaces the plan, it does not accompany one — a draft with both leaves
+    the caller guessing which the model meant."""
+    both = _clarify(METRIC_QUESTION)
+    both.subtasks = _financial_plan().subtasks
+    provider = FakeProvider(responses=[both, _financial_plan()])
+    asker = ScriptedAsker()
+
+    await _asking_planner(provider, asker).create_plan(TaskState(user_request=AMBIGUOUS_REQUEST))
+
+    assert asker.asked == []
+    assert "send no subtasks" in provider.calls[1].messages[1].content
+
+
+@pytest.mark.asyncio
+async def test_create_plan_rejects_more_questions_than_the_cap_allows() -> None:
+    """An interview is not a clarification round; the cap is the schema's, so this is
+    rejected before anyone is prompted."""
+    too_many = _clarify(*[PERIOD_QUESTION] * (MAX_QUESTIONS + 1))
+    provider = FakeProvider(responses=[too_many, _financial_plan()])
+    asker = ScriptedAsker()
+
+    await _asking_planner(provider, asker).create_plan(TaskState(user_request=AMBIGUOUS_REQUEST))
+
+    assert asker.asked == []
+    assert len(provider.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_create_plan_is_cancellable_while_a_question_is_open() -> None:
+    """§10: the prompt is the one place a run waits on a human, so it must be the one
+    place Ctrl-C is guaranteed to work."""
+    provider = FakeProvider(responses=[_clarify(METRIC_QUESTION)])
+    asker = ScriptedAsker(answers=["revenue"], blocker=asyncio.Event())  # never set
+    state = TaskState(user_request=AMBIGUOUS_REQUEST)
+
+    task = asyncio.create_task(_asking_planner(provider, asker).create_plan(state))
+    await wait_until(lambda: bool(asker.asked), what="the question to be put to the user")
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=1)
+    assert state.plan is None
+    assert state.clarifications == []
