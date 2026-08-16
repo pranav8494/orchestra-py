@@ -23,7 +23,8 @@ from orchestra.agents.workers.data_retrieval import (
 )
 from orchestra.artifacts import ArtifactStore
 from orchestra.core.errors import TaskFailure
-from orchestra.core.state import AgentRole, Subtask, SubtaskContext, TaskState
+from orchestra.core.events import Broker
+from orchestra.core.state import AgentRole, EventKind, Subtask, SubtaskContext, TaskEvent, TaskState
 from orchestra.providers.base import AssistantTurn
 from orchestra.tools.base import BaseTool, ToolCall, ToolResponse, ToolSpec
 
@@ -71,12 +72,16 @@ def _worker(
     provider: FakeProvider,
     store: ArtifactStore,
     tools: Sequence[BaseTool],
+    broker: Broker[TaskEvent] | None = None,
     **bounds: int,
 ) -> DataRetrievalWorker:
+    """The worker under test. A broker is built when a test does not care about one —
+    warnings are published to nobody, which is what an unobserved run does anyway."""
     return DataRetrievalWorker(
         provider=provider,
         store=store,
         tools=tuple(tools),
+        broker=broker if broker is not None else Broker(),
         **bounds,
     )
 
@@ -290,7 +295,12 @@ async def test_worker_propagates_cancellation(tmp_path: Path) -> None:
 
 def test_worker_without_tools_is_a_wiring_bug(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="at least one tool"):
-        DataRetrievalWorker(provider=FakeProvider(), store=ArtifactStore(tmp_path), tools=())
+        DataRetrievalWorker(
+            provider=FakeProvider(),
+            store=ArtifactStore(tmp_path),
+            tools=(),
+            broker=Broker(),
+        )
 
 
 # --------------------------------------------------------------------------
@@ -484,3 +494,56 @@ async def test_worker_with_no_usage_reported_is_still_bounded_by_its_turn_cap(
 
     with pytest.raises(TaskFailure, match="after 3 turns"):
         await _worker(provider, ArtifactStore(tmp_path), [csv_tool], max_turns=3).run(_context())
+
+
+@pytest.mark.asyncio
+async def test_worker_publishes_a_tool_warning_without_failing_the_step(tmp_path: Path) -> None:
+    """A degraded tool is news for the operator, not a reason to fail a step that worked.
+
+    The worker is the only thing that can see it: the engine publishes the step's
+    transitions, and this happens partway through one.
+    """
+    provider = FakeProvider(
+        turns=[
+            AssistantTurn(
+                text="", tool_calls=(_call(SEARCH_TOOL, query="margins"),), usage_tokens=10
+            ),
+            AssistantTurn(text="Answered from the corpus.", usage_tokens=10),
+        ]
+    )
+    search_tool = FakeTool(
+        SEARCH_TOOL,
+        [ToolResponse(content="a note", warning="Live search was unavailable: HTTP 401.")],
+    )
+    broker: Broker[TaskEvent] = Broker()
+    store = ArtifactStore(tmp_path)
+
+    async with broker.subscribe() as queue:
+        pointer = await _worker(provider, store, [search_tool], broker).run(_context())
+        published = [queue.get_nowait() for _ in range(queue.qsize())]
+
+    # The step still produced its artifact.
+    assert pointer == "artifact:fetch_financials.json"
+    warnings = [event for event in published if event.kind is EventKind.SUBTASK_WARNING]
+    assert [(event.subtask_id, event.message) for event in warnings] == [
+        ("fetch_financials", "Live search was unavailable: HTTP 401.")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_worker_publishes_nothing_when_no_tool_degraded(tmp_path: Path) -> None:
+    """The quiet path stays quiet — a warning per call would train the eye to ignore it."""
+    provider = FakeProvider(
+        turns=[
+            AssistantTurn(text="", tool_calls=(_call(QUERY_CSV_TOOL),), usage_tokens=10),
+            AssistantTurn(text="Done.", usage_tokens=10),
+        ]
+    )
+    csv_tool = FakeTool(QUERY_CSV_TOOL, [ToolResponse(content=CSV)])
+    broker: Broker[TaskEvent] = Broker()
+
+    async with broker.subscribe() as queue:
+        await _worker(provider, ArtifactStore(tmp_path), [csv_tool], broker).run(_context())
+        published = [queue.get_nowait() for _ in range(queue.qsize())]
+
+    assert [event for event in published if event.kind is EventKind.SUBTASK_WARNING] == []

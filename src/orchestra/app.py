@@ -116,6 +116,7 @@ def build_orchestra(config: Config) -> Orchestra:
     workers[AgentRole.DATA_RETRIEVAL] = DataRetrievalWorker(
         provider=provider,
         store=store,
+        broker=broker,
         tools=data_retrieval_tools(config.data_dir, search_api_key=config.tavily_api_key),
     )
     return Orchestra(

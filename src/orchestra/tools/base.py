@@ -75,6 +75,12 @@ class ToolResponse:
     content: str
     is_error: bool = False
     is_empty: bool = False
+    # Set when the call succeeded but not the way it was meant to — a backend that fell
+    # back, an output that degraded. Structured rather than left for the caller to spot
+    # in `content`, because a caller that greps prose for "unavailable" is a caller that
+    # silently stops noticing the day the wording changes. `content` still says it too:
+    # the model needs it in-band, and the agent needs it out of band to report upward.
+    warning: str = ""
 
 
 class BaseTool(Protocol):

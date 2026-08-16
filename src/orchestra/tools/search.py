@@ -219,30 +219,37 @@ class SearchTool:
                 content=f"Invalid arguments for {TOOL_NAME}: {_problems(exc)}", is_error=True
             )
 
-        notice = ""
+        warning = ""
         if self._api_key is not None:
             try:
                 results = await self._live(params)
             except _LiveSearchError as exc:
                 # Degraded, not failed: the corpus can still answer, and telling the model
                 # what happened is better than a silent downgrade it would read as the
-                # tool's normal output.
-                notice = f"(Live search was unavailable: {exc}. Answering from the corpus.)\n\n"
+                # tool's normal output. Reported twice on purpose — in `content` for the
+                # model, and on `warning` for the agent, which surfaces it to the operator
+                # who is the one that can actually go fix the key or the network.
+                warning = f"Live search was unavailable: {exc}. Answered from the corpus."
             else:
                 if not results:
                     return ToolResponse(content=_nothing_found(params.query), is_empty=True)
                 return ToolResponse(content=_format(params.query, results, _LIVE_PROVENANCE))
 
-        return await self._corpus_search(params, notice)
+        return await self._corpus_search(params, warning)
 
-    async def _corpus_search(self, params: "SearchParams", notice: str) -> ToolResponse:
-        """Rank the bundled notes. The offline path, and the live path's fallback."""
+    async def _corpus_search(self, params: "SearchParams", warning: str) -> ToolResponse:
+        """Rank the bundled notes. The offline path, and the live path's fallback.
+
+        `warning` is empty on the offline path — nothing degraded, this *is* the backend.
+        """
+        notice = f"({warning})\n\n" if warning else ""
         try:
             entries = await self._load()
         except OSError as exc:
             return ToolResponse(
                 content=f"{notice}Could not read the corpus at {self._corpus}: {exc}",
                 is_error=True,
+                warning=warning,
             )
         except ValidationError as exc:
             # Covers both a syntax error and a well-formed file of the wrong shape:
@@ -250,6 +257,7 @@ class SearchTool:
             return ToolResponse(
                 content=f"{notice}The corpus at {self._corpus} is malformed: {_problems(exc)}",
                 is_error=True,
+                warning=warning,
             )
 
         matches = _rank(params.query, entries)[: params.limit]
@@ -260,10 +268,14 @@ class SearchTool:
             # broke", not "no such note". `is_empty` is what stops a caller counting this
             # as something retrieved (§6).
             return ToolResponse(
-                content=notice + _nothing_matched(params.query, entries), is_empty=True
+                content=notice + _nothing_matched(params.query, entries),
+                is_empty=True,
+                warning=warning,
             )
         results = [entry.as_result() for entry in matches]
-        return ToolResponse(content=notice + _format(params.query, results, _CORPUS_PROVENANCE))
+        return ToolResponse(
+            content=notice + _format(params.query, results, _CORPUS_PROVENANCE), warning=warning
+        )
 
     async def _live(self, params: "SearchParams") -> list["SearchResult"]:
         """Ask the live backend, and validate what comes back (§7).

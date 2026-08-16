@@ -33,7 +33,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from orchestra.agents.toolsets import QUERY_CSV_TOOL, SEARCH_TOOL
 from orchestra.artifacts import ArtifactStore
 from orchestra.core.errors import TaskFailure
-from orchestra.core.state import ArtifactPointer, SubtaskContext
+from orchestra.core.events import Broker
+from orchestra.core.state import ArtifactPointer, EventKind, SubtaskContext, TaskEvent
 from orchestra.prompts import DATA_RETRIEVAL_SYSTEM_PROMPT
 from orchestra.providers.base import (
     AssistantTurn,
@@ -102,6 +103,7 @@ class DataRetrievalWorker:
         provider: Provider,
         store: ArtifactStore,
         tools: tuple[BaseTool, ...],
+        broker: Broker[TaskEvent],
         max_turns: int = DEFAULT_MAX_TURNS,
         token_budget: int = DEFAULT_TOKEN_BUDGET,
     ) -> None:
@@ -111,6 +113,9 @@ class DataRetrievalWorker:
             provider: the model provider to run the tool-use conversation with.
             store: the run's artifact store, where the retrieved dataset is written.
             tools: this agent's toolset, from `agents/toolsets.py`.
+            broker: the run's event stream, for warnings this worker raises mid-step.
+                The engine publishes the step's *transitions*; only the worker can see a
+                tool degrade partway through one, so it reports that itself.
             max_turns: how many model turns one subtask may take.
             token_budget: input plus output tokens one subtask may spend.
 
@@ -126,6 +131,7 @@ class DataRetrievalWorker:
             raise ValueError(f"token_budget must be at least 1, got {token_budget}")
         self._provider = provider
         self._store = store
+        self._broker = broker
         self._tools = {tool.info().name: tool for tool in tools}
         self._specs = [tool.info() for tool in tools]
         self._max_turns = max_turns
@@ -182,6 +188,8 @@ class DataRetrievalWorker:
                         call_id=call.id, content=response.content, is_error=response.is_error
                     )
                 )
+                if response.warning:
+                    await self._warn(context, response.warning)
                 # `is_empty` and not just `is_error`: a search that matched nothing ran
                 # correctly, but recording it would let "nothing was found" satisfy the
                 # did-we-retrieve-anything check below (§6, and `ToolResponse`).
@@ -216,6 +224,26 @@ class DataRetrievalWorker:
         # event loop would serialise the engine's concurrent dispatch (§10).
         return await asyncio.to_thread(
             self._store.put_text, f"{context.subtask.id}.json", dataset.model_dump_json(indent=2)
+        )
+
+    async def _warn(self, context: SubtaskContext, warning: str) -> None:
+        """Tell the run that this step degraded, without failing it.
+
+        Must-deliver rather than lossy progress: a dropped frame of a progress stream
+        costs a subscriber nothing, but this one changes what the operator believes the
+        answer is made of, which is the same class of fact as a state transition (§6).
+        Bounded inside the broker, so a wedged dashboard still cannot hang the run.
+
+        Not recorded on the ledger, unlike the engine's own events: a worker sees only
+        its slice and has no `TaskState` to append to (§6). The notice is durable
+        anyway — it is inside the artifact this step writes.
+        """
+        await self._broker.publish_lifecycle(
+            TaskEvent(
+                kind=EventKind.SUBTASK_WARNING,
+                subtask_id=context.subtask.id,
+                message=warning,
+            )
         )
 
     async def _invoke(self, call: ToolCall) -> ToolResponse:

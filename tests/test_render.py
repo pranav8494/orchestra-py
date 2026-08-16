@@ -597,3 +597,81 @@ async def test_dashboard_follows_a_real_engine_run_to_every_row_done(tmp_path: P
     assert view.rows["fetch"].detail == state.artifacts["fetch"]  # the pointer it minted
     assert view.finished
     assert view.headline == "2 of 2 subtasks completed"
+
+
+# --------------------------------------------------------------------------
+# Warnings: a step that succeeded, but not on the path the operator assumes.
+# --------------------------------------------------------------------------
+
+
+def test_run_view_warning_leaves_the_row_status_alone() -> None:
+    """A warning is a caveat on a step, not a transition of one.
+
+    Colouring the status or inventing a fourth one would say the run went worse than it
+    did — the subtask really is going to finish `done`.
+    """
+    view = _seeded_view()
+    view.apply(TaskEvent(kind=EventKind.SUBTASK_STARTED, subtask_id="fetch", message="Load it"))
+
+    view.apply(
+        TaskEvent(
+            kind=EventKind.SUBTASK_WARNING,
+            subtask_id="fetch",
+            message="Live search was unavailable: HTTP 401.",
+        )
+    )
+
+    row = view.rows["fetch"]
+    assert row.status is SubtaskStatus.RUNNING
+    assert row.warning == "Live search was unavailable: HTTP 401."
+    assert row.detail == "Load it"  # untouched
+    # And only the named row.
+    assert view.rows["crunch"].warning == ""
+
+
+def test_run_view_warning_survives_the_completion_that_follows_it() -> None:
+    """Regression: the events arrive in the order that would erase the warning.
+
+    It is raised mid-step and the completion lands after it, so a warning folded into
+    `detail` would vanish the instant the step succeeded — exactly when the operator is
+    reading the row to decide whether to trust the answer.
+    """
+    view = _seeded_view()
+    view.apply(TaskEvent(kind=EventKind.SUBTASK_WARNING, subtask_id="fetch", message="fell back"))
+
+    view.apply(
+        TaskEvent(
+            kind=EventKind.SUBTASK_COMPLETED, subtask_id="fetch", message="artifact:fetch.json"
+        )
+    )
+
+    assert view.rows["fetch"].status is SubtaskStatus.DONE
+    assert view.rows["fetch"].warning == "fell back"
+    assert view.rows["fetch"].detail == "artifact:fetch.json"
+
+
+def test_run_table_shows_the_warning_in_place_of_the_detail() -> None:
+    """The pointer is in the final report; that the answer is degraded is only shown here."""
+    view = _seeded_view()
+    view.apply(TaskEvent(kind=EventKind.SUBTASK_WARNING, subtask_id="fetch", message="fell back"))
+    view.apply(
+        TaskEvent(
+            kind=EventKind.SUBTASK_COMPLETED, subtask_id="fetch", message="artifact:fetch.json"
+        )
+    )
+
+    table = run_table(view)
+
+    assert [str(cell) for cell in table.columns[3].cells] == ["fell back", "", ""]
+    # Status still reads as the success it was.
+    assert [str(cell) for cell in table.columns[2].cells] == ["done", "pending", "pending"]
+
+
+def test_event_line_labels_a_warning_for_the_plain_sink() -> None:
+    """Non-TTY runs get the same notice; `--quiet` and `--output json` are the gap."""
+    line = event_line(
+        TaskEvent(kind=EventKind.SUBTASK_WARNING, subtask_id="fetch", message="fell back")
+    )
+
+    assert line.startswith("warn")
+    assert "fetch" in line and "fell back" in line
