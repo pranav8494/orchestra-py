@@ -4,11 +4,8 @@ An agent's capability is the list it is handed here. Constructing a tool inside 
 would hide that: two workers would drift into two slightly different `query_csv`s, and
 answering "what can the retrieval agent actually do?" would mean reading every worker.
 
-A worker has to recognise which of its tools answered — the dataset comes back from one
-and provenance from another. The names are re-exported from the tools themselves rather
-than written out again here: each tool already declares its own, and a second literal
-would be the parallel definition §1.5 rules out, silently stopping a worker's branch
-from matching the day one is renamed.
+Tool names are re-exported rather than restated: a worker branches on which tool
+answered, and a second literal would stop matching the day one is renamed (§1.5).
 """
 
 from pathlib import Path
@@ -29,9 +26,8 @@ __all__ = [
     "data_retrieval_tools",
 ]
 
-# Filenames inside `Config.data_dir`. Here rather than in the tools because the tools
-# take a path: what they read is the caller's choice, which makes them testable against
-# a fixture and keeps this module the only thing that knows the bundled layout.
+# Filenames inside `Config.data_dir`. Here, not in the tools: the tools take a path, so
+# they stay testable against a fixture and this stays the only module that knows the layout.
 FINANCIALS_CSV = "quarterly_financials.csv"
 SEARCH_CORPUS = "search_snippets.json"
 
@@ -41,16 +37,12 @@ def data_retrieval_tools(
 ) -> tuple[BaseTool, ...]:
     """The Data Retrieval agent's toolset: the company's own figures, plus background.
 
-    Two tools rather than one because the roles genuinely differ — `query_csv` is
-    authoritative and narrow, `search` is contextual — and choosing between them is the
-    judgement the agent exists to make.
+    Two rather than one because the roles differ — `query_csv` is authoritative and
+    narrow, `search` is contextual — and choosing between them is the agent's judgement.
 
     Args:
         data_dir: the directory holding the bundled dataset, from `Config.data_dir`.
-        search_api_key: the live search credential, or `None` to search the bundled
-            corpus only. Optional here rather than required-and-nullable so a caller
-            that does not care about search — every test that is not about it — does not
-            have to say so.
+        search_api_key: the live search credential, or `None` for the bundled corpus only.
 
     Returns:
         The tools, in the order the model is shown them.

@@ -22,10 +22,9 @@ from typing import Protocol, TypeVar
 
 from pydantic import BaseModel, SecretStr
 
-# Imported from `tools/`, not redefined here. The provider transports tool calls and a
-# tool answers them, so both speak one vocabulary; a provider-side copy of `ToolCall` or
-# `ToolSpec` would drift from the one the tools validate against (§1.5). The edge points
-# `providers/` -> `tools/`, which §3.2 allows; nothing in `tools/` knows this exists.
+# Imported, not redefined: the provider transports tool calls and the tool answers them,
+# so a provider-side copy would drift from the one tools validate against (§1.5). The edge
+# points `providers/` -> `tools/`, which §3.2 allows.
 from orchestra.tools.base import ToolCall, ToolSpec
 
 # Bound to BaseModel because structured output is a trust boundary: the schema the
@@ -44,11 +43,9 @@ class MessageRole(StrEnum):
 class ToolResult:
     """One tool's answer, on its way back to the model.
 
-    Not the same thing as `tools.base.ToolResponse`, and deliberately not merged with it
-    (§2.3): a `ToolResponse` is what a tool produced, knowing nothing about the request;
-    this is that content addressed to one `ToolCall`. The `call_id` is the whole
-    difference and it is the agent loop, not the tool, that can supply it — a model
-    running two calls in a turn cannot otherwise tell which one was answered.
+    Not merged with `tools.base.ToolResponse` (§2.3): that is what a tool produced,
+    knowing nothing about the request. `call_id` is the difference, and only the agent
+    loop can supply it — a model making two calls a turn cannot otherwise match answers.
     """
 
     call_id: str  # correlates with `ToolCall.id`
@@ -89,27 +86,19 @@ class AssistantTurn:
     because the budget belongs to the loop, not to the provider — a provider instance is
     shared across agents and would otherwise count someone else's spend.
 
-    **`raw_content` is an opaque replay handle, and the loop is required to pass it
-    back.** A model that reasons before calling a tool returns that reasoning as part of
-    the turn, and the API requires the turn to be replayed *whole* on the next request —
-    a reconstruction carrying only the text and the tool calls is rejected, because the
-    blocks it dropped are the ones that must come back unchanged. So the adapter keeps
-    the vendor's own turn here and the worker hands it straight back on
-    `ProviderMessage.raw_content`.
-
-    Typed `object`, not the SDK's type: this is a token to carry, not a value to read.
-    Nothing outside `providers/` may inspect it, which is what keeps the SDK quarantined
-    (§6) while still letting the transcript survive a round trip.
+    **`raw_content` is an opaque replay handle the loop must pass back.** A model that
+    reasons before calling a tool returns that reasoning in the turn, and the API wants
+    the turn replayed *whole* — a rebuild from `text` and `tool_calls` drops it and is
+    rejected. Typed `object`: a token to carry, not a value to read, so the SDK stays
+    quarantined behind `providers/` (§6).
     """
 
     text: str
     tool_calls: tuple[ToolCall, ...] = ()
     usage_tokens: int = 0  # input + output; the agent loop's token budget (§10) counts these
-    # Why the model stopped. `"max_tokens"` means the reply was cut off mid-generation:
-    # the blocks that arrived are real, but the turn is unfinished, and a truncated reply
-    # with no tool call in it is indistinguishable from a finished one unless the loop
-    # checks this. Vendor-neutral strings, not an enum — the set is the vendor's, and a
-    # value we have not seen must reach the caller rather than fail parsing.
+    # Why the model stopped. `"max_tokens"` is a reply cut off mid-generation, which
+    # without this check looks exactly like a finished one. A plain string, not an enum:
+    # the set is the vendor's, and an unseen value must reach the caller, not fail parsing.
     stop_reason: str = ""
     raw_content: object = None
 

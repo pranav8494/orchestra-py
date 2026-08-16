@@ -1,28 +1,21 @@
 """The first real worker: a bounded tool-use loop over the bundled offline data (#5).
 
-**The model chooses the tool, not the code.** The alternative — inspect the instruction,
-decide `query_csv` or `search` here, call it — is a keyword matcher wearing an agent's
-name, and it cannot handle a step that needs both. So the two tools go to the model with
-their schemas and it picks. The loop's job is only to run what it asks for and to stop.
+**The model chooses the tool, not the code.** Inspecting the instruction and picking
+`query_csv` or `search` here is a keyword matcher wearing an agent's name, and it cannot
+serve a step that needs both. Both schemas go to the model; the loop runs what it asks
+for and stops.
 
 **Both bounds, always (§10).** `max_turns` catches a model that keeps calling tools;
-`token_budget` catches one that keeps calling *expensive* tools, which the turn count
-alone will not see. Exceeding either is a `TaskFailure` — one failed subtask, not a
-retry and not a hung run.
+`token_budget` catches one calling *expensive* ones, which a turn count will not see.
+Exceeding either is a `TaskFailure` — one failed subtask, not a retry.
 
-**One artifact, three parts.** `RetrievedDataset` carries the filtered rows, the search
-snippets behind any claim about the wider market, and the agent's own summary. One
-pointer because `Worker.run` returns one, and JSON because the next agent (#6) reads it
-with `json.loads` rather than a parser written for this file. The rows stay CSV text
-inside it: that is what the tool returned and what pandas will want, and re-encoding it
-into JSON objects here would be a transformation nobody asked for and everybody would
-have to undo.
+**One artifact.** `RetrievedDataset` holds the rows, the search provenance and the
+agent's summary under the one pointer `Worker.run` returns, as JSON so #6 reads it with
+`json.loads`. Rows stay CSV text — what the tool returned and what pandas wants.
 
-**Every successful query is kept, not just the last.** `datasets` is a list because the
-tool advertises a `columns` filter, which invites exactly the split the obvious
-last-one-wins rule would silently eat: ask for revenue, then ask for costs, and the
-artifact holds costs while the summary describes both. Nothing warns anyone — the
-subtask is `DONE`, and the report describes data that is not there.
+**Every successful query is kept.** `datasets` is a list: the tool advertises a `columns`
+filter, so asking for revenue and then costs is invited behaviour, and last-one-wins
+would store half the data under a summary describing all of it.
 """
 
 import asyncio

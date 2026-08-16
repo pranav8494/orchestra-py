@@ -1,22 +1,18 @@
 """The Data Retrieval agent's second tool: web search, or a bundled corpus without a key.
 
-**Two backends, one tool.** With `TAVILY_API_KEY` set this searches the web; without it,
-a few background notes shipped in `data/`. Not two tools, because which one answers is an
-operator's deployment choice and not a decision the model should be making — and a second
-entry in the toolset would mean the model picking between two things it cannot tell apart.
+**Two backends, one tool.** With `TAVILY_API_KEY` set this searches the web, without it
+the notes in `data/`. One tool because which backend answers is the operator's deployment
+choice, not something the model can see or should be picking between.
 
-**The corpus is the floor, not a stub.** The offline path is what makes a run reproducible
-on any machine with no key and no network, so the live path degrades into it rather than
-replacing it: a failed request falls back and says so, instead of failing the subtask.
+**The corpus is the floor, not a stub.** It is what makes a run reproducible with no key
+and no network, so the live path degrades into it — a failed request falls back and says
+so rather than failing the subtask.
 
 **Provenance differs and the model is told which it got.** Corpus notes carry invented
-specifics and are labelled illustrative; live results carry a URL and are labelled sourced.
-The report's rule is that a figure traces to something (§5 of the research doc), and that
-rule is only enforceable if the model knows which kind of note it is reading.
+specifics and are labelled illustrative; live results carry a URL. A figure in the report
+must trace to something, which only works if the model can tell the two apart.
 
-**Why both are validated.** A JSON file on disk and an HTTP response are both trust
-boundaries (§7), so each is parsed through a pydantic model. A malformed corpus or a
-surprising payload is content the model can read, never a `KeyError` unwinding the loop.
+Both are trust boundaries, so both are validated through a pydantic model (§7).
 """
 
 import asyncio
