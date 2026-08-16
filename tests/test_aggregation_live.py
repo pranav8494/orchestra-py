@@ -21,7 +21,7 @@ from orchestra.artifacts import ArtifactStore
 from orchestra.cli.format import OutputFormat, format_result
 from orchestra.config import Config, load_config
 from orchestra.core.errors import ConfigError
-from orchestra.core.state import AgentRole, SubtaskStatus, artifact_path
+from orchestra.core.state import AgentRole, SubtaskStatus
 from scenarios import LINEAR, assert_plan_shape, with_role
 
 try:
@@ -70,7 +70,8 @@ async def test_the_report_cites_this_run_s_own_numbers_and_chart(
     store = ArtifactStore(state.artifact_dir)
     produced = set(state.artifacts.values())
     for figure in report.key_figures:
-        # The anti-hallucination contract: a pointer of this run, and the number really in it.
+        # The pointer check restates the aggregator's own filter; `_traces_to` is the one
+        # doing work here — nothing upstream has checked the number itself.
         assert figure.source in produced, (
             f"{figure.label!r} cites {figure.source}, which this run never produced"
         )
@@ -89,15 +90,13 @@ async def test_the_report_cites_this_run_s_own_numbers_and_chart(
     assert document["report"]["chart_ascii"] == report.chart_ascii
 
     # This prompt asks for a chart, so a plan without one is a planner defect, not a
-    # variation to skip past. The last visualization step is the one the aggregator read.
+    # variation to skip past — and the shape says there is exactly one step to check.
     assert state.plan is not None
     assert_plan_shape(state.plan, LINEAR.shape)
-    step = with_role(state.plan, AgentRole.VISUALIZATION)[-1]
+    (step,) = with_role(state.plan, AgentRole.VISUALIZATION)
     assert step.status is SubtaskStatus.DONE, f"{step.id!r} ended {step.status}, so it drew nothing"
     assert report.chart is not None, "the visualization step ran but the report names no chart"
-    # `artifact_path`, not `store.path_for`: the store raises on a missing file, so that
-    # assertion could only ever raise, never fail.
-    assert "<html" in artifact_path(state.artifact_dir, report.chart).read_text()
+    assert "<html" in store.get_text(report.chart)
     assert report.chart_ascii, "nothing for the terminal to print"
 
 

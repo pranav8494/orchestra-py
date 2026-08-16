@@ -518,8 +518,11 @@ async def test_run_once_reports_a_computed_figure_and_its_chart_in_both_output_s
     # assertion could only ever raise, never fail.
     assert artifact_path(state.artifact_dir, report.chart).is_file()
 
+    # That the figure reached the text, not how it is laid out there — the column widths
+    # are `test_format.py`'s to pin.
     text = format_result(state, output=OutputFormat.TEXT)
-    assert f"{figure.label}  {figure.value}  {figure.source}" in text
+    assert figure.value in text
+    assert figure.source in text
     assert CHART_CATEGORY in text
     # One document, not a fragment; the stream it goes out on is `test_cli.py`'s.
     document = json.loads(format_result(state, output=OutputFormat.JSON))
