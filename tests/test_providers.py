@@ -71,13 +71,19 @@ class StubUsage:
 
 
 class StubMessage:
-    """The two attributes of `Message` the adapter reads."""
+    """The attributes of `Message` the adapter reads."""
 
     def __init__(
-        self, content: list[StubBlock], *, input_tokens: int = 0, output_tokens: int = 0
+        self,
+        content: list[StubBlock],
+        *,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        stop_reason: str | None = "end_turn",
     ) -> None:
         self.content = content
         self.usage = StubUsage(input_tokens, output_tokens)
+        self.stop_reason = stop_reason
 
 
 def _provider(
@@ -435,3 +441,77 @@ def test_create_provider_returns_an_anthropic_provider() -> None:
 
     assert isinstance(provider, AnthropicProvider)
     assert provider.model == "claude-opus-5"
+
+
+# --------------------------------------------------------------------------
+# Replaying a turn whole. Regressions from the review of PR #27.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_send_keeps_the_whole_reply_for_replay(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The decoded fields are a summary of the turn, not a substitute for it.
+
+    The default model reasons before calling a tool and the API requires that reasoning
+    back alongside the call, so the adapter has to keep blocks it does not decode.
+    """
+    blocks = [
+        StubBlock(type="thinking"),
+        StubBlock(type="tool_use", id="toolu_01", name="q", input={}),
+    ]
+    provider, _ = _provider(StubMessage(blocks), monkeypatch)
+
+    turn = await provider.send(system="s", messages=[])
+
+    assert turn.raw_content is blocks
+
+
+@pytest.mark.asyncio
+async def test_send_replays_raw_content_instead_of_rebuilding_the_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Given the handle back, the adapter sends it — it does not reconstruct from fields.
+
+    Reconstructing is what drops the undecoded blocks and gets the next request rejected.
+    """
+    blocks = [{"type": "thinking", "thinking": "", "signature": "abc"}]
+    provider, stub = _provider(StubMessage([]), monkeypatch)
+
+    await provider.send(
+        system="s",
+        messages=[
+            ProviderMessage(
+                role=MessageRole.ASSISTANT,
+                content="this text must not be what is sent",
+                tool_calls=(ToolCall(id="toolu_01", name="query_csv", arguments={}),),
+                raw_content=blocks,
+            )
+        ],
+    )
+
+    assert stub.kwargs["messages"] == [{"role": "assistant", "content": blocks}]
+
+
+@pytest.mark.asyncio
+async def test_send_reports_why_the_model_stopped(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A truncated reply looks exactly like a finished one without this."""
+    provider, _ = _provider(
+        StubMessage([StubBlock(type="text", text="cut off mid-")], stop_reason="max_tokens"),
+        monkeypatch,
+    )
+
+    assert (await provider.send(system="s", messages=[])).stop_reason == "max_tokens"
+
+
+@pytest.mark.asyncio
+async def test_send_joins_multiple_text_blocks_on_a_newline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bare concatenation runs the last word of one block into the first of the next."""
+    blocks = [
+        StubBlock(type="text", text="Let me check"),
+        StubBlock(type="text", text="the numbers"),
+    ]
+    provider, _ = _provider(StubMessage(blocks), monkeypatch)
+
+    assert (await provider.send(system="s", messages=[])).text == "Let me check\nthe numbers"

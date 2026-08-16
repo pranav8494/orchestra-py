@@ -1,0 +1,33 @@
+# Layer enforcement for tools/. See CONVENTIONS.md §3.2 and §14.3, and the sibling
+# config in core/.
+#
+# tools/ sits beside core/ and providers/ at the inward end of the graph: an agent hands
+# a tool a validated call and gets data back, so a tool has no business reaching up into
+# the layers that call it, or sideways into the vendor SDK.
+#
+# `providers/` is the deliberate exception, and it points the other way: the provider
+# imports the tool contract from `tools/base.py` so both speak one vocabulary (§1.5).
+# That edge only stays one-directional if nothing here imports a provider — which is
+# what the ban below enforces, rather than leaving it to a comment nobody re-reads.
+
+extend = "../../../pyproject.toml"
+
+[lint.flake8-tidy-imports]
+banned-module-level-imports = [
+    # Presentation — a tool returns data, it never renders.
+    "rich",
+    "typer",
+    "click",
+    # Vendor SDKs — quarantined behind providers/ (CONVENTIONS.md §6).
+    "anthropic",
+    "openai",
+    # Upward imports — dependencies point inward, never out.
+    "orchestra.app",
+    "orchestra.cli",
+    "orchestra.agents",
+    # Sideways: `providers/` imports this package, so importing it back is the cycle.
+    "orchestra.providers",
+    # A tool's inputs are injected by `agents/toolsets.py`; reading config here would
+    # make it untestable against a fixture and break "no os.environ outside config" (§6).
+    "orchestra.config",
+]

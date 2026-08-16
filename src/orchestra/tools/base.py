@@ -62,10 +62,19 @@ class ToolResponse:
 
     `content` is read by the model, so it is written for one: an error says what was
     wrong *and* what would work, because the next turn is the retry.
+
+    **Three outcomes, not two.** A lookup that ran correctly and matched nothing is
+    neither a failure nor a result: flagging it `is_error` invites a pointless retry,
+    and reporting it as content lets an agent record "nothing matched" as if it were
+    something retrieved. `is_empty` is the third state — the call worked, the answer is
+    that there is no answer. Two booleans rather than a tri-state enum because
+    `is_error` is also the wire flag the provider sends back to the model, and one
+    concept should not have two spellings (§1.5).
     """
 
     content: str
     is_error: bool = False
+    is_empty: bool = False
 
 
 class BaseTool(Protocol):

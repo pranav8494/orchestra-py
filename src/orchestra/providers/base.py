@@ -75,6 +75,9 @@ class ProviderMessage:
     content: str = ""
     tool_calls: tuple[ToolCall, ...] = ()  # assistant turns replay what they asked for
     tool_results: tuple[ToolResult, ...] = ()  # user turns carry the answers
+    # An assistant turn replayed verbatim. See `AssistantTurn.raw_content`; when set, the
+    # adapter sends this instead of rebuilding the turn from `content` and `tool_calls`.
+    raw_content: object = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,11 +88,30 @@ class AssistantTurn:
     is another lap. `usage_tokens` is reported per turn rather than accumulated here
     because the budget belongs to the loop, not to the provider — a provider instance is
     shared across agents and would otherwise count someone else's spend.
+
+    **`raw_content` is an opaque replay handle, and the loop is required to pass it
+    back.** A model that reasons before calling a tool returns that reasoning as part of
+    the turn, and the API requires the turn to be replayed *whole* on the next request —
+    a reconstruction carrying only the text and the tool calls is rejected, because the
+    blocks it dropped are the ones that must come back unchanged. So the adapter keeps
+    the vendor's own turn here and the worker hands it straight back on
+    `ProviderMessage.raw_content`.
+
+    Typed `object`, not the SDK's type: this is a token to carry, not a value to read.
+    Nothing outside `providers/` may inspect it, which is what keeps the SDK quarantined
+    (§6) while still letting the transcript survive a round trip.
     """
 
     text: str
     tool_calls: tuple[ToolCall, ...] = ()
     usage_tokens: int = 0  # input + output; the agent loop's token budget (§10) counts these
+    # Why the model stopped. `"max_tokens"` means the reply was cut off mid-generation:
+    # the blocks that arrived are real, but the turn is unfinished, and a truncated reply
+    # with no tool call in it is indistinguishable from a finished one unless the loop
+    # checks this. Vendor-neutral strings, not an enum — the set is the vendor's, and a
+    # value we have not seen must reach the caller rather than fail parsing.
+    stop_reason: str = ""
+    raw_content: object = None
 
 
 class Provider(Protocol):

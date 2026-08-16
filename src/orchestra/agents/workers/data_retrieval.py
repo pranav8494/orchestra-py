@@ -17,9 +17,16 @@ with `json.loads` rather than a parser written for this file. The rows stay CSV 
 inside it: that is what the tool returned and what pandas will want, and re-encoding it
 into JSON objects here would be a transformation nobody asked for and everybody would
 have to undo.
+
+**Every successful query is kept, not just the last.** `datasets` is a list because the
+tool advertises a `columns` filter, which invites exactly the split the obvious
+last-one-wins rule would silently eat: ask for revenue, then ask for costs, and the
+artifact holds costs while the summary describes both. Nothing warns anyone — the
+subtask is `DONE`, and the report describes data that is not there.
 """
 
 import asyncio
+import json
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -46,6 +53,9 @@ DEFAULT_MAX_TURNS = 6
 # every turn still costs less than the run's other two agents together.
 DEFAULT_TOKEN_BUDGET = 60_000
 
+# `AssistantTurn.stop_reason` when the reply was cut off by the output limit.
+TRUNCATED = "max_tokens"
+
 
 class RetrievalSource(BaseModel):
     """One search the agent ran and what came back — provenance for the soft claims.
@@ -61,6 +71,15 @@ class RetrievalSource(BaseModel):
     result: str
 
 
+class RetrievedTable(BaseModel):
+    """One successful `query_csv` call: what was asked for, and the rows it returned."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    query: str  # the call's arguments, rendered — provenance, symmetric with a source
+    csv: str
+
+
 class RetrievedDataset(BaseModel):
     """The artifact this worker writes. The payload behind the pointer it returns."""
 
@@ -70,7 +89,7 @@ class RetrievedDataset(BaseModel):
     summary: str
     # Empty when the subtask was answered from background alone — a legitimate outcome
     # for "find out what the sector's typical margin is", so not an error here.
-    dataset_csv: str = ""
+    datasets: list[RetrievedTable] = Field(default_factory=list)
     sources: list[RetrievalSource] = Field(default_factory=list)
 
 
@@ -120,21 +139,36 @@ class DataRetrievalWorker:
             asyncio.CancelledError: propagated from the provider or the store (§10).
         """
         messages = [ProviderMessage(role=MessageRole.USER, content=_briefing(context))]
-        dataset_csv = ""
+        datasets: list[RetrievedTable] = []
         sources: list[RetrievalSource] = []
         summary = ""
         spent = 0
 
         for _ in range(self._max_turns):
+            # Checked before the call, not after: the cost of a turn is only known once
+            # it has been paid, so this bounds what the loop *starts*, and one turn may
+            # carry the total past the budget. A ceiling on spend, not on the last bill.
             if spent >= self._token_budget:
                 raise TaskFailure(
                     f"Retrieval for {context.subtask.id!r} spent its {self._token_budget}-token "
-                    f"budget before finishing."
+                    f"budget before finishing. {_gathered(datasets, sources)}"
                 )
             turn = await self._provider.send(
                 system=DATA_RETRIEVAL_SYSTEM_PROMPT, messages=messages, tools=self._specs
             )
+            # The whole prompt is resent every turn, so this counts the transcript once
+            # per lap and the budget bites sooner than a distinct-token count would.
+            # Deliberate: resent tokens are billed tokens, and it is spend being bounded.
             spent += turn.usage_tokens
+
+            if turn.stop_reason == TRUNCATED:
+                # A reply cut off mid-generation carries no tool call, which is exactly
+                # what "the agent is finished" looks like. Left unchecked, half a sentence
+                # is stored as the summary and the run reports success (§8).
+                raise TaskFailure(
+                    f"Retrieval for {context.subtask.id!r} was cut off by the model's output "
+                    f"limit. {_gathered(datasets, sources)}"
+                )
 
             if not turn.tool_calls:
                 summary = turn.text
@@ -148,22 +182,23 @@ class DataRetrievalWorker:
                         call_id=call.id, content=response.content, is_error=response.is_error
                     )
                 )
-                if response.is_error:
+                # `is_empty` and not just `is_error`: a search that matched nothing ran
+                # correctly, but recording it would let "nothing was found" satisfy the
+                # did-we-retrieve-anything check below (§6, and `ToolResponse`).
+                if response.is_error or response.is_empty:
                     continue
-                # Last success wins: a second query is the agent correcting or narrowing
-                # the first, so the later answer is the one it meant to keep.
                 if call.name == QUERY_CSV_TOOL:
-                    dataset_csv = response.content
+                    datasets.append(_table(call, response))
                 elif call.name == SEARCH_TOOL:
                     sources.append(_source(call, response))
             messages.extend(_exchange(turn, tuple(results)))
         else:
             raise TaskFailure(
                 f"Retrieval for {context.subtask.id!r} was still calling tools after "
-                f"{self._max_turns} turns."
+                f"{self._max_turns} turns. {_gathered(datasets, sources)}"
             )
 
-        if not dataset_csv and not sources:
+        if not datasets and not sources:
             # Every tool call failed, or none was made. Either way the step produced no
             # data, and a summary with nothing behind it is exactly the invented answer
             # the design forbids — better a failed subtask the report can name (§8).
@@ -174,7 +209,7 @@ class DataRetrievalWorker:
         dataset = RetrievedDataset(
             instruction=context.subtask.instruction,
             summary=summary,
-            dataset_csv=dataset_csv,
+            datasets=datasets,
             sources=sources,
         )
         # `to_thread` because the store is synchronous filesystem I/O, and blocking the
@@ -209,15 +244,47 @@ def _source(call: ToolCall, response: ToolResponse) -> RetrievalSource:
     return RetrievalSource(query=str(call.arguments.get("query", "")), result=response.content)
 
 
+def _table(call: ToolCall, response: ToolResponse) -> RetrievedTable:
+    """Pair a `query_csv` call with the rows it returned.
+
+    The arguments are rendered as sorted JSON rather than kept as a mapping: the artifact
+    is read by an agent and a person, and both want to see what was asked for without
+    the field becoming a second schema for #6 to know about.
+    """
+    return RetrievedTable(query=json.dumps(call.arguments, sort_keys=True), csv=response.content)
+
+
+def _gathered(datasets: list[RetrievedTable], sources: list[RetrievalSource]) -> str:
+    """Say what the step had in hand when it stopped short.
+
+    A bound was hit, so the artifact is never written and the work is lost. Naming it in
+    the failure is the difference between "raise the cap" and "debug the agent" (§8).
+    """
+    if not datasets and not sources:
+        return "It had retrieved nothing at that point."
+    return (
+        f"It had retrieved {len(datasets)} table(s) and {len(sources)} search result(s), "
+        f"which are lost with the step."
+    )
+
+
 def _exchange(turn: AssistantTurn, results: tuple[ToolResult, ...]) -> list[ProviderMessage]:
     """The two messages one round of tool use adds to the conversation.
 
-    The assistant's own turn has to be replayed verbatim, tool calls included: the API
-    is stateless, and a `tool_result` whose `tool_use` is missing from the history is
-    rejected outright.
+    The assistant's own turn has to be replayed verbatim: the API is stateless, and a
+    `tool_result` whose `tool_use` is missing from the history is rejected outright.
+    Verbatim means `raw_content` — the turn as the provider returned it, blocks this
+    codebase never decodes included, because the model reasons before calling a tool and
+    the API wants that reasoning back with the call (see `AssistantTurn.raw_content`).
+    `content` and `tool_calls` ride along for the fakes, which have no raw turn to keep.
     """
     return [
-        ProviderMessage(role=MessageRole.ASSISTANT, content=turn.text, tool_calls=turn.tool_calls),
+        ProviderMessage(
+            role=MessageRole.ASSISTANT,
+            content=turn.text,
+            tool_calls=turn.tool_calls,
+            raw_content=turn.raw_content,
+        ),
         ProviderMessage(role=MessageRole.USER, tool_results=results),
     ]
 
@@ -240,5 +307,8 @@ def _briefing(context: SubtaskContext) -> str:
             "Earlier steps already produced: "
             + ", ".join(f"{name} ({pointer})" for name, pointer in sorted(context.inputs.items()))
         )
-    lines += [f"Clarification - {item.question} {item.answer}" for item in context.clarifications]
+    lines += [
+        f"Clarification asked: {item.question}\nThe user answered: {item.answer}"
+        for item in context.clarifications
+    ]
     return "\n".join(lines)

@@ -18,7 +18,7 @@ import asyncio
 import re
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, field_validator
 
 from orchestra.tools.base import ToolCall, ToolResponse, ToolSpec
 
@@ -68,8 +68,8 @@ class SearchParams(BaseModel):
 class CorpusEntry(BaseModel):
     """One background note as it is stored on disk.
 
-    `keywords` are lowercase single tokens; matching is a set intersection against the
-    tokenised query, so the note's own author decides what it answers to.
+    `keywords` are single tokens, lowercased on load; matching is a set intersection
+    against the tokenised query, so the note's own author decides what it answers to.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -77,6 +77,17 @@ class CorpusEntry(BaseModel):
     keywords: list[str] = Field(min_length=1)
     title: str = Field(min_length=1)
     snippet: str = Field(min_length=1)
+
+    @field_validator("keywords")
+    @classmethod
+    def _lowercase(cls, keywords: list[str]) -> list[str]:
+        """Fold keywords to lowercase, because `_rank` matches a lowercased token set.
+
+        Normalised rather than rejected: a corpus entry written `"Margin"` is a typo that
+        would silently never match, and failing the whole tool over it costs the model
+        every other note as well.
+        """
+        return [keyword.lower() for keyword in keywords]
 
 
 # One adapter, built at import: compiling the validator per call would be the cost of
@@ -129,10 +140,12 @@ class SearchTool:
 
         matches = _rank(params.query, entries)[: params.limit]
         if not matches:
-            # NOT an error. A search that looked and found nothing answered the question
-            # correctly; flagging it invites the model to retry the same call, and an
-            # `is_error` result reads to it as "the tool broke", not "no such note".
-            return ToolResponse(content=_nothing_matched(params.query, entries))
+            # NOT an error, but not a result either. A search that looked and found
+            # nothing answered the question correctly; flagging it invites the model to
+            # retry the same call, and an `is_error` result reads to it as "the tool
+            # broke", not "no such note". `is_empty` is what stops a caller counting this
+            # as something retrieved (§6).
+            return ToolResponse(content=_nothing_matched(params.query, entries), is_empty=True)
         return ToolResponse(content=_format(params.query, matches))
 
     async def _load(self) -> list[CorpusEntry]:
@@ -174,14 +187,19 @@ def _rank(query: str, entries: list[CorpusEntry]) -> list[CorpusEntry]:
 
 
 def _format(query: str, matches: list[CorpusEntry]) -> str:
-    """Render matches as text the model can read and quote.
+    """Render matches as text the model can read.
 
-    The provenance line is not decoration: without it the model has read a paragraph
-    about margins with nothing saying it is generic background rather than our numbers.
+    The provenance line is not decoration. The notes are written as prose and carry
+    specifics like "25% to 40%" that are illustrative, not researched, so without it the
+    model has read a paragraph about margins with nothing saying the numbers are neither
+    ours nor sourced — and unsourced figures in the report are the one thing this design
+    forbids. Said here rather than by blunting the notes, which would make the corpus
+    useless as context.
     """
     sections = [
         f"{len(matches)} background note(s) matching {query!r}, from the offline corpus "
-        f"(generic industry context, not this company's figures):"
+        f"(illustrative sample data, not this company's figures and not sourced research "
+        f"— do not quote its numbers as fact):"
     ]
     sections += [
         f"[{position}] {entry.title}\n{entry.snippet}"

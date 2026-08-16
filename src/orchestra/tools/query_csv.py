@@ -189,6 +189,9 @@ def _select(rows: list[list[str]], params: QueryCsvParams, dataset: Path) -> Too
         selected = selected[-params.last_n :]
 
     if not selected:
+        # An error here, unlike `search`'s empty result (which is `is_empty`): this
+        # dataset is fixed and named, so no match means the model asked for something it
+        # does not hold, and the quarters below tell it what to ask for instead.
         return ToolResponse(
             content=f"No rows matched. The dataset covers {_quarters(available)}.", is_error=True
         )

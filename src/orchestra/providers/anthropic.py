@@ -7,7 +7,7 @@ the vendor package, not to this file.
 """
 
 from collections.abc import Sequence
-from typing import Any, Literal, assert_never
+from typing import Any, Literal, assert_never, cast
 
 import anthropic
 from anthropic.types import (
@@ -31,8 +31,11 @@ DEFAULT_MAX_TOKENS = 16_000
 class AnthropicProvider:
     """Talks to the Anthropic Messages API. Constructed by `create_provider` (§3.3).
 
-    Deliberately sends no `temperature`, `top_p`, `top_k` or `thinking` block: the
-    default model rejects all four with a 400.
+    Deliberately sends no `temperature`, `top_p` or `top_k`: the default model rejects
+    all three with a 400. No `thinking` block either, but for a different reason — this
+    model thinks by default and disabling it is what causes trouble here, not what
+    avoids it: with thinking off it can write a tool call into its visible text, where
+    the call silently never runs. The default is the safe setting, so it is left alone.
     """
 
     def __init__(
@@ -152,6 +155,13 @@ def _to_sdk_content(message: ProviderMessage) -> str | list[Any]:
     A plain string for a plain turn — it is what the API documents, what every existing
     `parse_structured` transcript already sends, and one fewer thing to read in a test.
     """
+    # A replayed assistant turn goes back byte-for-byte. Rebuilding it from `content` and
+    # `tool_calls` would drop the blocks this adapter never decodes — including the
+    # thinking the API requires alongside a tool call — so the vendor's own object is
+    # what we send (see `AssistantTurn.raw_content`).
+    if message.raw_content is not None:
+        return cast("list[Any]", message.raw_content)
+
     if not message.tool_calls and not message.tool_results:
         return message.content
 
@@ -200,9 +210,11 @@ def _to_sdk_tool(tool: ToolSpec) -> ToolParam:
 def _from_sdk_response(response: Any) -> AssistantTurn:
     """Decode one reply into our types — the point past which the SDK does not exist (§6).
 
-    Block types other than `text` and `tool_use` are dropped, not an error: the model
-    thinks by default, and a `thinking` block is not part of the conversation the agent
-    loop reasons about.
+    Only `text` and `tool_use` are decoded, because they are all the agent loop reasons
+    about. The rest of the turn is *kept*, not dropped: `raw_content` carries the reply
+    exactly as it arrived so the next request can replay it whole. This model thinks by
+    default, and the API requires a turn's thinking blocks to come back with its tool
+    calls — a turn rebuilt from the two fields below is missing them and is rejected.
     """
     texts: list[str] = []
     calls: list[ToolCall] = []
@@ -212,9 +224,13 @@ def _from_sdk_response(response: Any) -> AssistantTurn:
         elif block.type == "tool_use":
             calls.append(ToolCall(id=block.id, name=block.name, arguments=dict(block.input)))
     return AssistantTurn(
-        text="".join(texts),
+        # Newline-joined: a reply can arrive as several text blocks, and concatenating
+        # them bare runs the last word of one into the first of the next.
+        text="\n".join(texts),
         tool_calls=tuple(calls),
         # Summed, because the loop's budget (§10) pays for both halves and a caller that
         # had to add them up would be re-deriving the same number in every agent.
         usage_tokens=response.usage.input_tokens + response.usage.output_tokens,
+        stop_reason=response.stop_reason or "",
+        raw_content=response.content,
     )
