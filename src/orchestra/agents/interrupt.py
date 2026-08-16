@@ -117,16 +117,23 @@ class InterruptHandler:
         """Has the user asked to interrupt? Consuming — see `core.interrupt.Chat`."""
         return self._chat.requested()
 
-    async def handle(self, state: TaskState) -> None:
+    async def handle(self, state: TaskState) -> frozenset[str]:
         """Run one pause to its end and apply what the user settled on.
+
+        Returns the ids sent back to be run again, for the engine's attempt counters.
+
+        The conversation is bounded by the person at the prompt, not by a cap: every lap
+        needs a line from them, so this is not the model-driven loop §10 requires a
+        ceiling on.
 
         Raises:
             ProviderError: the provider failed; passed through from the adapter.
             asyncio.CancelledError: propagated, never swallowed (§10).
         """
         decision = await self._converse(state)
-        if decision is not None:
-            await self._apply(state, decision)
+        if decision is None:
+            return frozenset()
+        return await self._apply(state, decision)
 
     async def _converse(self, state: TaskState) -> Decision | None:
         """Talk until the user resumes or the orchestrator settles on something to do.
@@ -159,8 +166,9 @@ class InterruptHandler:
                     return decision
         return None
 
-    async def _apply(self, state: TaskState, decision: Decision) -> None:
-        """Commit `decision` to the ledger and publish the plan that is now running.
+    async def _apply(self, state: TaskState, decision: Decision) -> frozenset[str]:
+        """Commit `decision` to the ledger, publish the plan now running, and name what it
+        sent back to be rerun.
 
         Called after the conversation has closed, never during it: publishing while the
         terminal belongs to a prompt would redraw the live region over what the user is
@@ -168,16 +176,19 @@ class InterruptHandler:
         """
         plan = state.plan
         if plan is None or decision.action is InterruptAction.CONTINUE:
-            return
+            return frozenset()
 
+        stale: frozenset[str] = frozenset()
         if decision.plan is not None:
             kept = sum(1 for subtask in plan.subtasks if subtask.status is SubtaskStatus.DONE)
             plan = decision.plan
             state.plan = plan
+            # The replacements are new ids by construction, so none of them carries an
+            # attempt count for the engine to clear.
             message = f"Replanned: {len(plan.subtasks)} subtasks, {kept} already done"
         else:
             stale = _reset(state, plan, decision.restart)
-            message = f"Rerunning {len(stale)} subtasks: {', '.join(stale)}"
+            message = f"Rerunning {len(stale)} subtasks: {', '.join(sorted(stale))}"
 
         # `plan_created`, not a kind of its own: a subscriber cannot draw rows from
         # transitions it has not seen, and this is a new set of rows. Deep-copied for the
@@ -187,9 +198,10 @@ class InterruptHandler:
         )
         state.events.append(event)
         await self._broker.publish_lifecycle(event)
+        return stale
 
 
-def _reset(state: TaskState, plan: Plan, subtask_id: str) -> list[str]:
+def _reset(state: TaskState, plan: Plan, subtask_id: str) -> frozenset[str]:
     """Send `subtask_id` and everything downstream of it back to pending, and say which.
 
     Downstream too: a step's output is its dependents' input, so redoing it leaves
@@ -213,7 +225,7 @@ def _reset(state: TaskState, plan: Plan, subtask_id: str) -> list[str]:
             subtask.status = SubtaskStatus.PENDING
             subtask.output_pointer = None
             state.artifacts.pop(subtask.id, None)
-    return sorted(stale)
+    return frozenset(stale)
 
 
 def _decide(state: TaskState) -> Callable[[InterruptDraft], Decision]:

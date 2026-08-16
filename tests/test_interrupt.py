@@ -18,7 +18,7 @@ from orchestra.agents.interrupt import (
     InterruptHandler,
 )
 from orchestra.agents.planner import SubtaskDraft
-from orchestra.core.errors import ProviderError
+from orchestra.core.errors import ProviderError, TaskFailure
 from orchestra.core.events import Broker
 from orchestra.core.state import (
     AgentRole,
@@ -421,3 +421,58 @@ async def test_a_restarted_step_gets_its_attempts_afresh() -> None:
     assert state.plan is not None
     assert dispatches(worker, "fetch") == 4
     assert state.plan.subtasks[0].status is SubtaskStatus.FAILED
+
+
+@pytest.mark.asyncio
+async def test_a_pause_that_changed_nothing_leaves_the_attempt_counters_alone() -> None:
+    """The other half of the rule above: only a step the user sent back is given a fresh
+    budget. `fetch` fails once, the user pauses and continues, and it still has exactly the
+    one attempt it had left."""
+    state = TaskState(user_request="Chart the quarters.", plan=_plan())
+    worker = ScriptedWorker(fail_ids=frozenset({"fetch"}))
+    chat = ScriptedChat(
+        messages=["how is it going?"], armed=lambda: dispatches(worker, "fetch") == 1
+    )
+    provider = FakeProvider(
+        responses=[InterruptDraft(action=InterruptAction.CONTINUE, reply="First step is retrying.")]
+    )
+    engine = ExecutionEngine(
+        workers=dict.fromkeys(AgentRole, worker),
+        broker=Broker(),
+        subtask_attempts=2,
+        interrupts=InterruptHandler(provider, chat=chat, broker=Broker()),
+    )
+
+    await engine.run(state)
+
+    assert chat.sessions == 1
+    assert dispatches(worker, "fetch") == 2
+
+
+@pytest.mark.asyncio
+async def test_no_pause_is_opened_once_the_step_cap_has_ended_the_run() -> None:
+    """A conversation cannot lift the run's work budget, so offering one would be a chat
+    whose replan nothing would dispatch (§10)."""
+    state = TaskState(
+        user_request="Fetch both.",
+        plan=Plan(
+            subtasks=[
+                Subtask(id="a", role=AgentRole.DATA_RETRIEVAL, instruction="Load one."),
+                Subtask(id="b", role=AgentRole.DATA_RETRIEVAL, instruction="Load the other."),
+            ]
+        ),
+    )
+    worker = ScriptedWorker()
+    chat = ScriptedChat(messages=["replan it"], armed=lambda: worker.contexts != [])
+    engine = ExecutionEngine(
+        workers=dict.fromkeys(AgentRole, worker),
+        broker=Broker(),
+        max_concurrency=1,
+        step_cap=1,
+        interrupts=InterruptHandler(FakeProvider(), chat=chat, broker=Broker()),
+    )
+
+    with pytest.raises(TaskFailure):
+        await engine.run(state)
+
+    assert chat.sessions == 0

@@ -61,9 +61,12 @@ class Interrupter(Protocol):
         """Is a pause waiting to be honoured? Consuming, like `Chat.requested`."""
         ...
 
-    async def handle(self, state: TaskState) -> None:
+    async def handle(self, state: TaskState) -> frozenset[str]:
         """Run one pause to its end, applying whatever the user settled on to `state`.
 
         Called with nothing in flight, so the ledger is settled before it is reshaped.
+
+        Returns the ids of any subtasks sent back to be run again — the caller owns their
+        attempt counters and cannot see from the plan alone which ones changed.
         """
         ...

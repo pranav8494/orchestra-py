@@ -141,21 +141,23 @@ class ExecutionEngine:
         async with asyncio.TaskGroup() as group:
             while True:
                 finished.clear()
-                if interrupts is not None:
+                # Not once `capped`: the run is already ending on a bound no conversation
+                # can lift, and a replan nothing would dispatch is worse than no pause.
+                if interrupts is not None and not capped:
                     # Asked every lap, so a keypress during a long step is not lost; acted
                     # on once the step holding it up has finished.
                     paused = paused or interrupts.pending()
                     if paused and not in_flight:
                         paused = False
-                        await interrupts.handle(state)
+                        restarted = await interrupts.handle(state)
                         if state.plan is not None:
                             plan = state.plan  # a replan hands back a different one
-                        # A step the user sent back starts its attempts afresh. The step
+                        # A step the user sent back starts its attempts afresh — only
+                        # those, so a pause that changed nothing changes nothing. The step
                         # cap is untouched, so the run's total work stays bounded (§10).
-                        for subtask in plan.subtasks:
-                            if subtask.status is SubtaskStatus.PENDING:
-                                attempts.pop(subtask.id, None)
-                                last_error.pop(subtask.id, None)
+                        for subtask_id in restarted:
+                            attempts.pop(subtask_id, None)
+                            last_error.pop(subtask_id, None)
                 if not capped and not paused:
                     for subtask in _ready(plan, in_flight):
                         if dispatched >= self._step_cap:
