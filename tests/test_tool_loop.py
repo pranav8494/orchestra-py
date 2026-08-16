@@ -267,6 +267,12 @@ def test_loop_without_tools_is_a_wiring_bug() -> None:
         _loop(FakeProvider(), [])
 
 
+def test_loop_with_two_tools_sharing_a_name_is_a_wiring_bug() -> None:
+    """The API rejects duplicate tool names, so the run would fail at its first call."""
+    with pytest.raises(ValueError, match="unique names"):
+        _loop(FakeProvider(), [FakeTool(LOOKUP, []), FakeTool(LOOKUP, [])])
+
+
 @pytest.mark.parametrize("bound", ["max_turns", "token_budget"])
 def test_loop_with_a_non_positive_bound_is_a_wiring_bug(bound: str) -> None:
     """Both bounds are checked at construction, like the engine's (§10)."""

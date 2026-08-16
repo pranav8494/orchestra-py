@@ -95,11 +95,16 @@ class ToolLoop:
             token_budget: input plus output tokens one subtask may spend.
 
         Raises:
-            ValueError: an empty toolset or a non-positive bound — a wiring bug, caught at
-                construction like the engine's.
+            ValueError: an empty toolset, a duplicate tool name, or a non-positive bound —
+                a wiring bug, caught at construction like the engine's.
         """
         if not tools:
             raise ValueError("ToolLoop needs at least one tool")
+        names = [tool.info().name for tool in tools]
+        # The API rejects duplicate names, so this is caught here rather than as a
+        # ProviderError on the run's first model call.
+        if len(set(names)) != len(names):
+            raise ValueError(f"ToolLoop needs tools with unique names, got {sorted(names)}")
         if max_turns < 1:
             raise ValueError(f"max_turns must be at least 1, got {max_turns}")
         if token_budget < 1:
