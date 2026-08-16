@@ -16,6 +16,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Protocol
 
+from pydantic import ValidationError
+
 
 @dataclass(frozen=True, slots=True)
 class ToolSpec:
@@ -90,3 +92,20 @@ class BaseTool(Protocol):
                 (§10). It is the only thing that should leave this method.
         """
         ...
+
+
+def format_validation_error(exc: ValidationError) -> str:
+    """Flatten a pydantic error into one line the model can act on.
+
+    Here rather than in each tool: `query_csv`, `search` and `run_python` all render a
+    rejected `arguments` mapping the same way, and the third copy is where §2.2 says the
+    shape has stopped being a coincidence. Beside `BaseTool` because that is the contract
+    it serves — a validation failure is the commonest thing a tool returns as data (§6).
+
+    Not `str(exc)`: pydantic's own rendering echoes the rejected input, which is model
+    output of unbounded size, and adds a docs URL the model cannot follow.
+    """
+    return "; ".join(
+        f"{'.'.join(str(part) for part in error['loc']) or 'arguments'}: {error['msg']}"
+        for error in exc.errors()
+    )
