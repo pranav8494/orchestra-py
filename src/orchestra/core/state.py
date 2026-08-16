@@ -53,6 +53,11 @@ class EventKind(StrEnum):
 
     PLAN_CREATED = "plan_created"
     SUBTASK_STARTED = "subtask_started"
+    # The step is still going to succeed, but not the way it was meant to — a backend
+    # fell back, an output degraded. Not a status: the subtask really does complete, and
+    # a fourth `SubtaskStatus` would make every consumer treat "worked, with a caveat"
+    # as a fourth outcome rather than as a note attached to a normal one.
+    SUBTASK_WARNING = "subtask_warning"
     SUBTASK_COMPLETED = "subtask_completed"
     SUBTASK_FAILED = "subtask_failed"
     RUN_FINISHED = "run_finished"

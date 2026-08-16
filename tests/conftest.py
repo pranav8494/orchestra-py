@@ -17,11 +17,20 @@ from typing import TYPE_CHECKING, cast
 import pytest
 from pydantic import BaseModel
 
-from orchestra.providers.base import Provider, ProviderMessage, StructuredT
+from orchestra.providers.base import AssistantTurn, Provider, ProviderMessage, StructuredT
+from orchestra.tools.base import ToolSpec
 
 # Every setting `Config` reads. Listed once so a new field cannot silently start
 # leaking the developer's shell into the suite.
-_SETTING_ENV_VARS = ("ANTHROPIC_API_KEY", "ANTHROPIC_MODEL", "ARTIFACT_DIR")
+_SETTING_ENV_VARS = (
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_MODEL",
+    "ARTIFACT_DIR",
+    "DATA_DIR",
+    # The one that would actually reach the network: with this exported, the `search`
+    # tool takes its live path and the suite starts making real requests (§12).
+    "TAVILY_API_KEY",
+)
 
 
 @pytest.fixture(autouse=True)
@@ -46,6 +55,15 @@ class ParseCall:
     output_format: type[BaseModel]
 
 
+@dataclass(frozen=True, slots=True)
+class SendCall:
+    """One recorded `send` call."""
+
+    system: str
+    messages: tuple[ProviderMessage, ...]
+    tools: tuple[ToolSpec, ...]
+
+
 @dataclass
 class FakeProvider:
     """A `Provider` that answers from a queue and never opens a socket (§12).
@@ -54,14 +72,21 @@ class FakeProvider:
     output, `None` stands for a refusal or a truncated reply, and an exception is
     raised. Running the queue dry is a test-authoring bug, so it fails loudly rather
     than repeating the last answer.
+
+    `send` has its own queue and its own record, because a test that scripts an agent's
+    tool-use loop cares about the order of *its* turns; interleaving them with the
+    planner's structured calls would couple two unrelated scripts. Both share `blocker`
+    — a cancellation test holds whichever call is in flight.
     """
 
     responses: list[BaseModel | BaseException | None] = field(default_factory=list)
+    turns: list[AssistantTurn | BaseException] = field(default_factory=list)
     model: str = "fake-model"
     # Set to hold every call open until the test releases it — how a cancellation test
     # gets a request in flight to cancel.
     blocker: asyncio.Event | None = None
     calls: list[ParseCall] = field(default_factory=list)
+    send_calls: list[SendCall] = field(default_factory=list)
     closed: bool = False
 
     async def parse_structured(
@@ -82,6 +107,26 @@ class FakeProvider:
             raise answer
         # The queue is heterogeneous by design; the test decides what the call returns.
         return cast("StructuredT | None", answer)
+
+    async def send(
+        self,
+        *,
+        system: str,
+        messages: Sequence[ProviderMessage],
+        tools: Sequence[ToolSpec] = (),
+    ) -> AssistantTurn:
+        """Record the call and answer from the `turns` queue. See `Provider.send`."""
+        self.send_calls.append(SendCall(system, tuple(messages), tuple(tools)))
+        if self.blocker is not None:
+            await self.blocker.wait()
+        if not self.turns:
+            # Loud rather than repeating the last turn: a loop that ran one lap more than
+            # the test scripted is exactly the bug this fake is here to catch.
+            raise AssertionError(f"FakeProvider has no queued turn for send {len(self.send_calls)}")
+        answer = self.turns.pop(0)
+        if isinstance(answer, BaseException):
+            raise answer
+        return answer
 
     async def aclose(self) -> None:
         """Nothing to release; the flag lets a test assert the caller closed it."""
