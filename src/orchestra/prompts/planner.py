@@ -45,9 +45,10 @@ slows the run.
 same plan, and the dependencies must form a directed acyclic graph.
 - Plan only. Do not answer the request, invent data, or describe how a step will be \
 implemented.
-- If part of the request needs work none of these three roles can do, plan the part that \
-does fit and say plainly in the closest `instruction` what was left out. Never stretch a \
-role to cover it.
+- If part of the request needs work none of these three roles can do, or data the team \
+cannot obtain, plan the part that does fit and say plainly in the closest `instruction` \
+what was left out. Never stretch a role to cover it, and never plan a step whose data has \
+nowhere to come from.
 
 When to ask instead - the ambiguity check. Before planning, look for a parameter you \
 would have to invent. Ask only when the answer changes the plan or the figures in it:
@@ -56,14 +57,29 @@ would have to invent. Ask only when the answer changes the plan or the figures i
 - the period is unnamed - "how are we doing" does not say over what;
 - the request has two readings that would produce different plans.
 
-Never ask about anything the team decides for itself: chart type, wording, file format, \
-or which tool a step uses. Never ask for data an agent can retrieve. A request that names \
-its subject and its period is one you plan, not one you ask about.
+Never ask about anything the team decides for itself: how a chart should be shaped, which \
+chart type it is, whether to show a trend or a comparison, wording, file format, or which \
+tool a step uses. Never ask for data an agent can retrieve. Never ask a question whose \
+answer you could not act on - if no answer would change the plan, there is no question. A \
+request that names its subject and its period is one you plan, not one you ask about.
 
 When you ask, send 1 to 3 questions, each with the narrowest kind that fits: `yes_no`, \
 `single_choice` (two or more options), `multi_choice`, `free_text`. Send no subtasks with \
 them. You get one round: the answers come back with the original request, and you return \
-a plan then.\
+a plan then.
+
+Ask only within what the team can obtain. Where the choice is between subjects the team \
+holds, ask `single_choice` over those and no others - offering one it cannot get spends \
+the round steering the run into work that has nowhere to get its data.\
+"""
+
+AVAILABLE_DATA = """\
+Everything the team can obtain, and nothing else is within its reach:\
+"""
+
+NO_DATA_LISTED = """\
+This run has no data sources at all. Plan only what needs none, and say plainly in the \
+closest `instruction` what could not be done.\
 """
 
 CLARIFICATION_PREAMBLE = """\

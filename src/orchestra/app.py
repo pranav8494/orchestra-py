@@ -16,7 +16,7 @@ from pathlib import Path
 from orchestra.agents.aggregator import Aggregator
 from orchestra.agents.engine import ExecutionEngine
 from orchestra.agents.planner import Planner
-from orchestra.agents.toolsets import analytics_tools, data_retrieval_tools
+from orchestra.agents.toolsets import analytics_tools, data_retrieval_tools, retrievable_data
 from orchestra.agents.workers.analytics import AnalyticsWorker
 from orchestra.agents.workers.base import Worker
 from orchestra.agents.workers.data_retrieval import DataRetrievalWorker
@@ -124,6 +124,9 @@ def build_orchestra(config: Config, *, asker: Asker | None = None) -> Orchestra:
     # reassignment. `fromkeys` first so a role added later runs as a stub rather than
     # failing `_check_roles` before the run starts.
     workers: dict[AgentRole, Worker] = dict.fromkeys(AgentRole, EchoWorker(store))
+    # Held, not inlined: the planner is told what these can obtain, so the roster it plans
+    # against is the toolset the retrieval agent actually got (#10).
+    retrieval_tools = data_retrieval_tools(config.data_dir, search_api_key=config.tavily_api_key)
     # The same bounds for both: one budget per subtask, not per role, so `WORKER_MAX_TURNS`
     # means the same thing wherever the operator reads it. Passed by name rather than
     # unpacked from a dict, which mypy would not check against either constructor.
@@ -131,7 +134,7 @@ def build_orchestra(config: Config, *, asker: Asker | None = None) -> Orchestra:
         provider=provider,
         store=store,
         broker=broker,
-        tools=data_retrieval_tools(config.data_dir, search_api_key=config.tavily_api_key),
+        tools=retrieval_tools,
         max_turns=config.worker_max_turns,
         token_budget=config.worker_token_budget,
     )
@@ -151,7 +154,11 @@ def build_orchestra(config: Config, *, asker: Asker | None = None) -> Orchestra:
     return Orchestra(
         # Not in `agents/toolsets.py`: that module says which tools each agent's *model*
         # is shown, and no model is offered this one yet — the planner calls it directly.
-        planner=Planner(provider, ask_tool=None if asker is None else AskUserTool(asker)),
+        planner=Planner(
+            provider,
+            ask_tool=None if asker is None else AskUserTool(asker),
+            retrievable_data=retrievable_data(retrieval_tools),
+        ),
         engine=ExecutionEngine(
             workers=workers,
             broker=broker,

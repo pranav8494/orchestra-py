@@ -107,7 +107,7 @@ async def test_create_plan_sends_the_request_as_a_user_message_not_in_the_prompt
     await Planner(provider).create_plan(TaskState(user_request=REQUEST))
 
     call = provider.calls[0]
-    assert call.system == PLANNER_SYSTEM_PROMPT
+    assert call.system.startswith(PLANNER_SYSTEM_PROMPT)  # plus the data roster, below
     assert REQUEST not in call.system
     assert [message.content for message in call.messages] == [REQUEST]
     assert call.output_format is PlannerDraft
@@ -263,6 +263,45 @@ def test_planner_prompt_states_the_ambiguity_check_and_every_question_kind() -> 
         assert action.value in PLANNER_SYSTEM_PROMPT
     for kind in QuestionKind:
         assert kind.value in PLANNER_SYSTEM_PROMPT
+
+
+# --------------------------------------------------------------------------
+# What the team can obtain, so the planner stops planning for data nobody has (#10).
+# --------------------------------------------------------------------------
+
+ROSTER = "- this company's quarterly revenue, 2024Q1 through 2025Q4 — no share price"
+
+
+@pytest.mark.asyncio
+async def test_create_plan_tells_the_model_what_data_is_within_reach() -> None:
+    """Without it the planner reads `data_retrieval` as able to fetch anything, and plans
+    a run for data no tool holds — three steps, then an empty chart."""
+    provider = FakeProvider(responses=[_financial_plan()])
+
+    await Planner(provider, retrievable_data=ROSTER).create_plan(TaskState(user_request=REQUEST))
+
+    system = provider.calls[0].system
+    assert system.startswith(PLANNER_SYSTEM_PROMPT)  # the roster is added, never a replacement
+    assert ROSTER in system
+    assert "no share price" in system
+
+
+@pytest.mark.asyncio
+async def test_create_plan_says_so_when_no_data_source_was_wired() -> None:
+    """The default is a wiring mistake, so it is stated rather than left to read as
+    omniscience — the failure mode this whole roster exists to remove."""
+    provider = FakeProvider(responses=[_financial_plan()])
+
+    await Planner(provider).create_plan(TaskState(user_request=REQUEST))
+
+    assert "no data sources at all" in provider.calls[0].system
+
+
+def test_planner_prompt_forbids_asking_about_the_shape_of_the_chart() -> None:
+    """A live run asked "a trend over time, or a comparison across categories?" — the
+    team's own decision, and a round spent not narrowing the request."""
+    assert "whether to show a trend or a comparison" in PLANNER_SYSTEM_PROMPT
+    assert "could not act on" in PLANNER_SYSTEM_PROMPT
 
 
 # --------------------------------------------------------------------------

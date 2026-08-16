@@ -271,6 +271,23 @@ async def test_build_orchestra_wires_the_app_from_config_without_touching_the_ne
 
 
 @pytest.mark.asyncio
+async def test_build_orchestra_tells_the_planner_what_the_retrieval_agent_can_obtain(
+    tmp_path: Path,
+) -> None:
+    """The roster is composed from the toolset the retrieval worker was actually given, so
+    the planner cannot plan for a source that agent does not have (#10). Read through the
+    private attribute for the reason the bounds test gives: a roster nothing carries would
+    only show up in a live run that planned three steps and produced nothing."""
+    orchestra = build_orchestra(_config(tmp_path))
+    try:
+        system = orchestra._planner._system
+        assert "revenue" in system and "no share price" in system
+        assert "no data sources at all" not in system
+    finally:
+        await orchestra.aclose()
+
+
+@pytest.mark.asyncio
 async def test_build_orchestra_roots_the_run_in_a_timestamped_subdirectory(
     tmp_path: Path,
 ) -> None:

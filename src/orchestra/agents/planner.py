@@ -34,9 +34,11 @@ from orchestra.core.state import (
     TaskState,
 )
 from orchestra.prompts import (
+    PLANNER_AVAILABLE_DATA,
     PLANNER_CLARIFICATION_PREAMBLE,
     PLANNER_CLARIFY_SPENT,
     PLANNER_CLARIFY_UNANSWERED,
+    PLANNER_NO_DATA_LISTED,
     PLANNER_REFORMAT_INSTRUCTION,
     PLANNER_SYSTEM_PROMPT,
 )
@@ -97,15 +99,27 @@ class PlannerDraft(BaseModel):
 class Planner:
     """Turns a request into a plan. One per run, built in `app.py` with its provider."""
 
-    def __init__(self, provider: Provider, *, ask_tool: BaseTool | None = None) -> None:
+    def __init__(
+        self,
+        provider: Provider,
+        *,
+        ask_tool: BaseTool | None = None,
+        retrievable_data: str = "",
+    ) -> None:
         """Store the provider and, when someone can answer, the tool that asks.
 
         `ask_tool` is `None` for a non-interactive run: the check still runs, but a
         `clarify` reply is rejected back to the model instead of blocking on a prompt
         nobody can answer. Nothing is read from config or the environment here (§6).
+
+        `retrievable_data` is what the team can actually obtain, from
+        `agents/toolsets.retrievable_data`. Without it the planner plans in a vacuum: it
+        reads `data_retrieval` as able to fetch anything, and will both plan for and ask
+        about data no tool holds (#10).
         """
         self._provider = provider
         self._ask_tool = ask_tool
+        self._system = _system_prompt(retrievable_data)
 
     async def create_plan(self, state: TaskState) -> Plan:
         """Plan `state.user_request`, set `state.plan`, append `plan_created`, return it.
@@ -144,7 +158,7 @@ class Planner:
         """
         result, rejection = await parse_validated(
             provider=self._provider,
-            system=PLANNER_SYSTEM_PROMPT,
+            system=self._system,
             messages=_messages(state),
             output_format=PlannerDraft,
             validate=validate,
@@ -184,6 +198,21 @@ class Planner:
             )
         )
         return plan
+
+
+def _system_prompt(retrievable_data: str) -> str:
+    """The planner's instructions with the run's data roster appended.
+
+    Composed once, in `__init__`: the roster is fixed for the run, and §11 keeps runtime
+    formatting out of `prompts/`. The system turn, not a user one — this is what the team
+    can do, not something the user said.
+    """
+    listing = (
+        f"{PLANNER_AVAILABLE_DATA}\n\n{retrievable_data}"
+        if retrievable_data
+        else (PLANNER_NO_DATA_LISTED)
+    )
+    return f"{PLANNER_SYSTEM_PROMPT}\n\n{listing}"
 
 
 def _messages(state: TaskState) -> list[ProviderMessage]:
