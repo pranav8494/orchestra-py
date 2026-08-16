@@ -58,11 +58,9 @@ PROMPT = "Summarize the last 3 quarters' financial trends"
 SUMMARY = "Revenue grew in each of the last three quarters."
 
 if TYPE_CHECKING:
-    # `dashboard` has to satisfy the observer seam `app.run_once(prompt, observer=...)`
-    # takes. Checked by mypy rather than at runtime, and annotated with the alias itself
-    # so narrowing `RunObserver` — back to `AbstractAsyncContextManager[None]`, say,
-    # which the covariant yield type would make reject every real dashboard — fails here
-    # rather than at the call site.
+    # `dashboard` has to satisfy the seam `run_once(prompt, observer=...)` takes.
+    # Annotated with the alias itself, so narrowing `RunObserver` fails here rather than
+    # at the call site.
     _OBSERVER_CHECK: RunObserver = functools.partial(dashboard, mode=RenderMode.LIVE)
 
 
@@ -301,11 +299,9 @@ def test_result_renderable_text_on_a_terminal_is_a_panel_around_the_report() -> 
 def test_result_renderable_panel_folds_a_long_line_instead_of_cropping_it() -> None:
     """Regression: the panel silently deleted the end of a long step line.
 
-    The one place this file asserts on drawn output, and deliberately: the bug was an
-    interaction between the stdout console's `soft_wrap=True` — which means `no_wrap`
-    and `overflow="ignore"` — and a panel's fixed width, so nothing short of rendering
-    through the real console reproduces it. The contract under test is §5's, that the
-    result reaches the reader whole, not any choice of glyph.
+    The one place this file asserts on drawn output, deliberately — the defect was the
+    console's `soft_wrap=True` meeting a panel's fixed width, which nothing short of the
+    real console reproduces. The contract is §5's: the result reaches the reader whole.
     """
     long_id = "fetch_quarterly_financials_by_region"
     pointer = f"artifact:{long_id}.txt"
@@ -347,11 +343,9 @@ def test_result_renderable_quiet_drops_the_trace_and_keeps_the_report() -> None:
 def _pending_tasks() -> list[asyncio.Task[None]]:
     """The dashboard's own live tasks — a leaked consumer shows up here.
 
-    Filtered by name rather than "every task but mine". The broad version made this
-    file's assertions hostage to the whole suite: a provider's `httpx` client collected
-    at the wrong moment schedules its `aclose()` on whatever loop happens to be running,
-    so an unrelated test's garbage could fail a leak check here. `dashboard` names its
-    consumer, which is the thing these tests actually mean.
+    By name, not "every task but mine": an unrelated `httpx` client collected at the
+    wrong moment schedules its `aclose()` on whatever loop is running, which the broad
+    version counted as a leak.
     """
     return [
         task
@@ -490,14 +484,11 @@ async def test_dashboard_body_failure_still_tears_the_consumer_down() -> None:
 async def test_dashboard_cancelled_during_teardown_still_propagates(mode: RenderMode) -> None:
     """Regression: Ctrl-C arriving while teardown awaited the consumer was swallowed.
 
-    Teardown cancels the consumer and waits for it. If the caller is cancelled *while
-    suspended there*, asyncio delivers that by cancelling the future being awaited — the
-    consumer — so the consumer ends up `cancelled()` on both paths and no guard reading
-    its state can tell them apart. The run then returned a `TaskState` for a cancelled
-    run and the CLI exited 0 instead of 130 (§8, §10).
+    Cancelling the caller mid-`await` is delivered by cancelling the awaited future, so
+    the consumer reads `cancelled()` on both paths and no guard on it can tell them
+    apart. The run returned a `TaskState` for a cancelled run and exited 0, not 130.
 
-    Swept across scheduling passes rather than pinned to one: the window is a couple of
-    passes wide and moves with the mode, so the assertion is that *no* pass swallows.
+    Swept across scheduling passes: the window is a couple wide and moves with the mode.
     """
 
     async def run_to_completion() -> str:
@@ -526,10 +517,9 @@ async def test_dashboard_sink_failure_costs_the_diagnostic_not_the_result(
 ) -> None:
     """Regression: a dying renderer replaced the run's result and its exit code.
 
-    `orchestra run ... | head -1` closes stderr under the plain sink, so the write raises
-    `BrokenPipeError`. Teardown re-raised it, and a wholly successful run came back as
-    exit 1 with nothing on stdout. Progress is a diagnostic; §5 does not let it cost the
-    result.
+    `orchestra run ... | head -1` closes stderr, so the sink raises `BrokenPipeError`.
+    Teardown re-raised it and a successful run came back exit 1 with empty stdout.
+    Progress is a diagnostic; §5 does not let it cost the result.
     """
 
     def broken_sink(_event: TaskEvent) -> None:
@@ -578,8 +568,8 @@ async def test_dashboard_sink_failure_does_not_mask_the_body_error(
 
 @pytest.mark.asyncio
 async def test_dashboard_follows_a_real_engine_run_to_every_row_done(tmp_path: Path) -> None:
-    """No fake events: `ExecutionEngine` publishes, the dashboard subscribes, and the
-    view ends up describing the run the engine actually performed."""
+    """No fake events: the engine publishes, the dashboard subscribes, and the view ends
+    up describing the run the engine actually performed."""
     plan = Plan(
         subtasks=[
             Subtask(

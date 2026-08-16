@@ -157,9 +157,8 @@ def _stub_run_once(
 def _requested_mode(observers: list[RunObserver | None]) -> RenderMode:
     """The `RenderMode` baked into the observer the command handed `run_once`.
 
-    The command builds `partial(dashboard, mode=...)`, so the keyword it chose is
-    readable off the partial — asserting on that is §12's "assert on the data handed to
-    the renderer" rather than on what Rich drew.
+    Read off the partial, so the assertion is on the data handed to the renderer rather
+    than on what Rich drew (§12).
     """
     assert len(observers) == 1
     observer = observers[0]
@@ -235,14 +234,12 @@ def test_run_quiet_omits_the_step_lines_and_keeps_the_report(
 
 
 def _force_terminal(monkeypatch: pytest.MonkeyPatch, *, value: bool) -> None:
-    """Pretend stderr is (or is not) a tty. `CliRunner` otherwise always reports a pipe,
-    which would leave the `LIVE` arm — the one the ticket is about — unreachable.
+    """Pretend stderr is (or is not) a tty — `CliRunner` always reports a pipe, which
+    would leave the `LIVE` arm unreachable.
 
-    Rich reads `_force_terminal` first in its `is_terminal` property, so setting it on
-    the *instance* is enough. Patching `is_terminal` on the class would be the obvious
-    move and is wrong: `console` and `err_console` are both `rich.console.Console`, so it
-    flips stdout's tty-ness too, and these tests would then pass just as well against a
-    `_render_mode` that consulted the wrong stream.
+    On the *instance*: patching `is_terminal` on the class flips stdout's tty-ness too,
+    since both consoles are `rich.console.Console`, and these tests would then pass
+    against a `_render_mode` reading the wrong stream.
     """
     monkeypatch.setattr(err_console, "_force_terminal", value, raising=False)
 
@@ -273,9 +270,8 @@ def test_run_with_stdout_redirected_still_draws_live_on_a_tty_stderr(
 ) -> None:
     """`orchestra run x > report.txt`: stdout is a file, stderr is still the terminal.
 
-    The whole reason progress and results are split across two streams (§5) — so the
-    mode has to follow stderr, and the report's framing has to follow stdout. Pins which
-    console each decision reads; without it both could consult the same one.
+    Why the two streams are split (§5) — the mode follows stderr, the framing follows
+    stdout. Pins which console each decision reads.
     """
     observers = _stub_run_once(monkeypatch, _finished_state(SubtaskStatus.DONE))
     _force_terminal(monkeypatch, value=True)  # stderr only; `console` stays a pipe
@@ -304,8 +300,7 @@ def test_run_quiet_asks_for_no_dashboard_at_all(monkeypatch: pytest.MonkeyPatch)
 def test_run_json_never_starts_a_live_region_even_on_a_terminal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A run whose stdout is being parsed is one nobody is watching redraw, and a `Live`
-    region competing with the document is exactly what §5 forbids."""
+    """A run whose stdout is being parsed is one nobody is watching redraw."""
     observers = _stub_run_once(monkeypatch, _finished_state(SubtaskStatus.DONE))
     _force_terminal(monkeypatch, value=True)
 

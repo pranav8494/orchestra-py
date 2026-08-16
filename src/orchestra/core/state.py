@@ -130,21 +130,16 @@ class Plan(BaseModel):
 class TaskEvent(BaseModel):
     """One entry in the event log. Frozen: history is not edited.
 
-    `plan` is the exception to "pointers, not blobs": a dashboard subscribing to the
-    stream has to draw the *pending* rows too, and it cannot learn them from a
-    transition it has not seen yet. So the engine attaches the plan to the one
-    `plan_created` event it publishes — a deep copy, because the engine then mutates
-    every `Subtask.status` in place and a shared reference would let the renderer read
-    live state through an event it was handed as history. Every other event leaves it
-    `None`, and the ledger's own entries never carry one: `ExecutionEngine._emit`
-    appends without it, so `TaskState.events` stays free of plan copies.
+    `plan` is the exception to "pointers, not blobs": a dashboard has to draw the
+    *pending* rows, which no transition it has seen yet can tell it. The engine attaches
+    it to the one `plan_created` event it publishes, deep-copied — the engine mutates
+    `Subtask.status` in place afterwards, and a shared reference would let a subscriber
+    read live state through history. Every other event leaves it `None`, and `_emit`
+    never sets it, so the ledger stays free of plan copies.
 
-    The copy protects subscribers from the *engine*, not from each other: `Plan` and
-    `Subtask` are mutable, and the broker fans one event object out to everyone, so a
-    subscriber that wrote to `event.plan` would be writing to every other subscriber's
-    copy. Nothing does — `cli/render.py` reads it into frozen rows — and with the
-    dashboard as the only subscriber it is unreachable today. Worth knowing before
-    adding a second one.
+    The copy guards against the engine, not against other subscribers: `Plan` is mutable
+    and the broker fans one object out to everyone. Nothing writes to it today; worth
+    knowing before adding a second subscriber.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)

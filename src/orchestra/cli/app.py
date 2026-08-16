@@ -107,9 +107,8 @@ def run(
             # not depend on the format. markup/highlight off for `error_boundary`'s
             # reason — the message can name a bracketed token Rich would eat as a tag.
             err_console.print(state.failure_reason, markup=False, highlight=False)
-        # The result (§5). `is_terminal` is read here and passed down, so `render.py`
-        # decides how to frame the report and this command decides nothing but where the
-        # answer comes from.
+        # The result (§5). `is_terminal` is read here and passed down, so the framing
+        # decision stays in `render.py`.
         console.print(
             result_renderable(state, output=output, quiet=quiet, terminal=console.is_terminal)
         )
@@ -121,10 +120,9 @@ def _render_mode(*, quiet: bool, output: OutputFormat) -> RenderMode:
     """Which dashboard the flags ask for. The one place that policy is decided.
 
     `--quiet` suppresses progress entirely (§5). `--output json` never gets a `Live`
-    region: the document goes to stdout and the region to stderr, but a run whose stdout
-    is being parsed is one nobody is watching redraw, so the scrolling fallback is the
-    honest shape — and it keeps working when the whole invocation is piped. Otherwise a
-    terminal gets the live table and a pipe, a CI log or a recording gets plain lines.
+    region — a run whose stdout is being parsed is one nobody is watching redraw — but
+    keeps the scrolling lines. Otherwise: live table on a terminal, plain lines in a
+    pipe, a CI log or a recording.
     """
     if quiet:
         return RenderMode.NONE

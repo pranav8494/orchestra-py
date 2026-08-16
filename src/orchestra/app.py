@@ -121,17 +121,14 @@ def build_orchestra(config: Config) -> Orchestra:
 
 type RunObserver = Callable[[Broker[TaskEvent]], AbstractAsyncContextManager[object]]
 """Something that watches a run: given the broker, it stays attached for the run's
-duration. The dashboard in `cli/render.py` is one (#11) — it subscribes on enter and
-tears the `Live` region down on exit.
+duration. `cli/render.py`'s dashboard is one (#11).
 
 A parameter rather than an import because the layer rule runs one way (§3.2): `cli/`
-may import `app.py`, so `app.py` may not name the renderer. Anything that satisfies the
-alias — a test's recorder as much as the dashboard — plugs in here.
+may import `app.py`, so `app.py` may not name the renderer.
 
-`[object]`, not `[None]`: `AbstractAsyncContextManager` is covariant in what it yields,
-so pinning it to `None` would reject every observer that yields something — including
-`dashboard`, which hands back its `RunView`. `object` accepts them all, and `run_once`
-discards the value anyway, so nothing here can depend on what it was.
+`[object]`, not `[None]`: the type is covariant in what it yields, so `[None]` would
+reject every observer that yields something — `dashboard` hands back its `RunView`.
+`run_once` discards the value, so nothing here depends on what it was.
 """
 
 

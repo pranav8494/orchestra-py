@@ -2,25 +2,17 @@
 
 **A model, then a drawing of it.** `RunView` is the run as the event stream describes
 it — no Rich, no I/O, no console — and `run_table`/`event_line` are pure functions of
-it. That split is what lets §12's "assert on the data handed to the renderer" be a
-practical instruction rather than an aspiration, and it is why the sinks below contain
-no logic worth testing through Rich's output.
+it. That split is what makes §12's "assert on the data handed to the renderer" practical.
 
 **The renderer never reads state.** Everything it draws arrives as a `TaskEvent`,
-including the pending rows: the engine attaches the plan to `plan_created` precisely so
-a subscriber can draw the steps it has not seen run yet (see `TaskEvent.plan`). Polling
-`TaskState` would race the engine's in-place status writes and re-introduce the shared
-mutable state that copy exists to avoid.
+including the pending rows (see `TaskEvent.plan`). Polling `TaskState` would race the
+engine's in-place status writes.
 
-**Progress is a diagnostic, so all of it goes to stderr** (§5). stdout carries one
-document a script parses; a `Live` region or a progress line on it would corrupt that.
-The only thing this module puts on stdout is the caller's result — and `result_renderable`
-wraps it in a `Panel` *only* on a terminal, because box characters down a pipe are
-exactly the corruption §5 forbids.
+**Progress is a diagnostic, so all of it goes to stderr** (§5). The only thing this
+module puts on stdout is the caller's result, and `result_renderable` frames it in a
+`Panel` only on a terminal — box characters down a pipe are the corruption §5 forbids.
 
-**Three modes, chosen by the caller.** `LIVE` for a terminal, `PLAIN` for a pipe, CI or a
-recording, `NONE` for `--quiet` and `--output json`. Which one applies is `cli/app.py`'s
-decision — this module holds no policy about flags.
+The mode is `cli/app.py`'s decision; this module holds no policy about flags.
 """
 
 import asyncio
@@ -122,13 +114,10 @@ class RunView:
         """Fold one event into the view.
 
         Tolerant by design: an event naming a subtask no row exists for is **ignored**,
-        not raised on and not turned into a new row. The renderer is not a validator —
-        the engine is the authority on what the plan contains, and the case that reaches
-        here is a subscriber that attached after `plan_created` (or, once replanning
-        lands in #3, one holding the previous plan). Inventing a row would put a step in
-        the table whose role and position nothing in the stream states; crashing would
-        take the dashboard down over a frame. The headline still moves, so a late
-        subscriber shows the run's progress rather than a frozen screen.
+        never raised on and never turned into a row. The renderer is not a validator, and
+        the case that reaches here is a subscriber that attached after `plan_created`.
+        Inventing a row would state a role and position nothing in the stream gave;
+        crashing would lose the dashboard over one frame. The headline still moves.
 
         Args:
             event: the next lifecycle event off the broker.
@@ -243,14 +232,11 @@ def result_renderable(
         # `Text`, for the same reason `run_table` uses it: a report quoting a bracketed
         # token must reach the reader with the token in it.
         #
-        # `no_wrap`/`overflow` are set explicitly rather than inherited, and that is
-        # load-bearing: the stdout console is built `soft_wrap=True` so a long result
-        # line survives a pipe unbroken, but soft wrapping means `no_wrap` and
-        # `overflow="ignore"`, and inside a panel — which *is* a fixed width — that
-        # stops being "don't wrap" and becomes "crop". A step line naming a long
-        # artifact then reached the reader with the end of the pointer silently
-        # deleted. Stating both here overrides the console's defaults for this
-        # renderable only, so the pipe keeps its unbroken lines and the panel folds.
+        # `no_wrap`/`overflow` are stated, not inherited. The stdout console is
+        # `soft_wrap=True` so long lines survive a pipe, but that means
+        # `overflow="ignore"`, which inside a panel's fixed width crops instead — a step
+        # line naming a long artifact lost the end of its pointer. Overriding here leaves
+        # the piped shape alone.
         return Panel(
             Text(text, no_wrap=False, overflow="fold"),
             title="Report",
@@ -270,13 +256,11 @@ async def dashboard(broker: Broker[TaskEvent], *, mode: RenderMode) -> AsyncIter
 
     **Recorded decision (issue #11, first comment): the subscription's lifetime is the
     consumer's lifetime.** `broker.subscribe()` is entered *inside* the consuming task,
-    never out here, so any way the consumer stops — cancellation, a bug, teardown —
-    detaches the queue on the same unwind. The alternative was evicting timed-out
-    subscribers inside `Broker`, and we deliberately did not take it: a renderer that
-    stopped draining but stayed attached costs the engine `lifecycle_timeout` (5 s) on
-    *every* later lifecycle event, ~2 per subtask, which turns a ten-step run into two
-    minutes of stalling. Keeping the two lifetimes identical makes that state
-    unreachable without touching the broker's contract for every other subscriber.
+    so any way the consumer stops detaches the queue on the same unwind. The alternative
+    — evicting timed-out subscribers in `Broker` — was declined: a renderer that stopped
+    draining but stayed attached costs the engine 5 s per later lifecycle event, and
+    tying the lifetimes together makes that unreachable without changing `Broker` for
+    every other subscriber.
 
     Args:
         broker: the run's event stream.
@@ -286,9 +270,8 @@ async def dashboard(broker: Broker[TaskEvent], *, mode: RenderMode) -> AsyncIter
         The view the events are folded into. Empty and never updated under `NONE`.
 
     Raises:
-        asyncio.CancelledError: the caller was cancelled. The consumer is cancelled and
-            awaited first, so the `Live` region is always exited — an un-exited one
-            corrupts the user's shell (§8) — and the error is then re-raised (§10).
+        asyncio.CancelledError: the caller was cancelled. The consumer is torn down
+            first, so the `Live` region is always exited (§8), then re-raised (§10).
     """
     view = RunView()
 
@@ -307,11 +290,9 @@ async def dashboard(broker: Broker[TaskEvent], *, mode: RenderMode) -> AsyncIter
         _consume(broker, view, mode, subscribed), name=DASHBOARD_TASK_NAME
     )
     try:
-        # Raced against the consumer rather than awaited outright: a consumer that died
-        # before subscribing would otherwise leave this waiting for an event nobody will
-        # ever set, hanging the run before it starts. Nothing on that path can raise
-        # today — subscribing appends to a list — but the cost of being wrong is a hang,
-        # and the guard is one call.
+        # Raced against the consumer, not awaited outright: a consumer that died before
+        # subscribing would leave this waiting forever, hanging the run before it starts.
+        # Unreachable today, but the cost of being wrong is a hang and the guard is a line.
         waiter = asyncio.ensure_future(subscribed.wait())
         try:
             await asyncio.wait({waiter, consumer}, return_when=asyncio.FIRST_COMPLETED)
@@ -320,28 +301,17 @@ async def dashboard(broker: Broker[TaskEvent], *, mode: RenderMode) -> AsyncIter
         yield view
     finally:
         consumer.cancel()
-        # `asyncio.wait`, never `await consumer`. Awaiting the task directly conflates
-        # two different cancellations and re-raises a third thing:
-        #
-        #   * Ours. `await consumer` raises the `CancelledError` we just asked for, and
-        #     telling it apart from a real one is not possible from the consumer's state:
-        #     when the caller is cancelled *while suspended here*, asyncio delivers that
-        #     by cancelling the future being awaited — the consumer — so the consumer ends
-        #     up `cancelled()` either way. A guard on `consumer.cancelled()` therefore
-        #     reads a genuine Ctrl-C as its own teardown and swallows it, and the run
-        #     exits 0 instead of 130 (§8, §10).
-        #   * The consumer's own failure. `await` re-raises it, so a broken *diagnostic*
-        #     stream — `BrokenPipeError` from `orchestra run ... | head -1` — would
-        #     replace the run's result on stdout and its exit code, or mask the error the
-        #     body was already raising. Progress must never cost the result (§5).
-        #
-        # `asyncio.wait` raises only if *we* are cancelled, which is exactly the one case
-        # that must propagate. The consumer's outcome is then read deliberately below.
+        # `asyncio.wait`, never `await consumer`, which re-raises the consumer's outcome
+        # and so gets both cases wrong. A caller cancelled *while suspended here* is
+        # delivered by cancelling the awaited future, so the consumer reads `cancelled()`
+        # either way and a guard on it swallows a real Ctrl-C — exit 0, not 130 (§8, §10).
+        # And a consumer that died on a broken stderr would replace the run's result (§5).
+        # `asyncio.wait` raises only for our own cancellation, the one case that must
+        # propagate; the consumer's outcome is read deliberately below.
         await asyncio.wait({consumer})
         if not consumer.cancelled() and (failure := consumer.exception()) is not None:
-            # Reported, not swallowed (§8) — but on a best-effort basis: the usual reason
-            # the renderer died is that this very stream is gone, and a second write
-            # would raise from the teardown all over again.
+            # Reported, not swallowed (§8), but best-effort: the usual reason the renderer
+            # died is that this stream is gone, and a second write would raise again.
             with suppress(OSError):
                 err_console.print(
                     f"The dashboard stopped: {failure}", markup=False, highlight=False
@@ -385,14 +355,12 @@ async def _pump(
 ) -> None:
     """Fold every event into `view` and hand it to `draw`, until cancelled.
 
-    Runs past `run_finished` rather than returning on it: the observer's job is to stay
-    attached for the run, and detaching early would mean a late event — a replan's, or a
-    second run's — arriving with nobody subscribed.
+    Runs past `run_finished` rather than stopping there: detaching early would leave a
+    late event — a replan's, or a second run's — with nobody subscribed.
 
-    The cancellation arm drains what is already queued before re-raising. Teardown
-    normally lands one scheduling pass after the engine's `run_finished`, and a last
-    frame reading "running" describes a run that is over. Both `get_nowait` and `draw`
-    are synchronous, so this cleanup has no await to be interrupted at.
+    The cancellation arm drains what is already queued first, since teardown lands a pass
+    after `run_finished` and a last frame reading "running" describes a finished run.
+    `get_nowait` and `draw` are both sync, so the drain has no await to be cut at.
     """
     try:
         while True:
