@@ -4,8 +4,8 @@ Nothing below this module builds a provider, a store, a broker or a worker — t
 handed one. That is what lets a test run the whole application against `FakeProvider`
 without patching anything, and what keeps `cli/` free of business logic (§4).
 
-Phase B replaces the stub role by role (#5-#7). Data Retrieval is real; Analytics and
-Visualization still echo. Nothing else in the application changed when the first one
+Phase B replaces the stub role by role (#5-#7). Data Retrieval and Analytics are real;
+Visualization still echoes. Nothing else in the application changed when either one
 landed, which is the property the mapping in `build_orchestra` exists to have.
 """
 
@@ -15,7 +15,8 @@ from contextlib import AbstractAsyncContextManager, AsyncExitStack
 from orchestra.agents.aggregator import Aggregator
 from orchestra.agents.engine import ExecutionEngine
 from orchestra.agents.planner import Planner
-from orchestra.agents.toolsets import data_retrieval_tools
+from orchestra.agents.toolsets import analytics_tools, data_retrieval_tools
+from orchestra.agents.workers.analytics import AnalyticsWorker
 from orchestra.agents.workers.base import Worker
 from orchestra.agents.workers.data_retrieval import DataRetrievalWorker
 from orchestra.agents.workers.stub import EchoWorker
@@ -118,6 +119,9 @@ def build_orchestra(config: Config) -> Orchestra:
         store=store,
         broker=broker,
         tools=data_retrieval_tools(config.data_dir, search_api_key=config.tavily_api_key),
+    )
+    workers[AgentRole.ANALYTICS] = AnalyticsWorker(
+        provider=provider, store=store, broker=broker, tools=analytics_tools(store)
     )
     return Orchestra(
         planner=Planner(provider),
