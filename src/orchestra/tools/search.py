@@ -31,7 +31,12 @@ from pydantic import (
     field_validator,
 )
 
-from orchestra.tools.base import ToolCall, ToolResponse, ToolSpec
+from orchestra.tools.base import (
+    ToolCall,
+    ToolResponse,
+    ToolSpec,
+    format_validation_error,
+)
 
 TOOL_NAME = "search"
 
@@ -212,7 +217,8 @@ class SearchTool:
             params = SearchParams.model_validate(call.arguments)
         except ValidationError as exc:
             return ToolResponse(
-                content=f"Invalid arguments for {TOOL_NAME}: {_problems(exc)}", is_error=True
+                content=f"Invalid arguments for {TOOL_NAME}: {format_validation_error(exc)}",
+                is_error=True,
             )
 
         warning = ""
@@ -251,7 +257,7 @@ class SearchTool:
             # Covers both a syntax error and a well-formed file of the wrong shape:
             # `validate_json` reports each as a validation error against `CorpusEntry`.
             return ToolResponse(
-                content=f"{notice}The corpus at {self._corpus} is malformed: {_problems(exc)}",
+                content=f"{notice}The corpus at {self._corpus} is malformed: {format_validation_error(exc)}",
                 is_error=True,
                 warning=warning,
             )
@@ -311,7 +317,9 @@ class SearchTool:
             # BaseException that passes straight through (§10).
             raise _LiveSearchError(f"{type(exc).__name__}") from exc
         except ValidationError as exc:
-            raise _LiveSearchError(f"unexpected response shape ({_problems(exc)})") from exc
+            raise _LiveSearchError(
+                f"unexpected response shape ({format_validation_error(exc)})"
+            ) from exc
 
         return [
             SearchResult(title=item.title or item.url, snippet=item.content, source=item.url)
@@ -398,15 +406,4 @@ def _nothing_matched(query: str, entries: list[CorpusEntry]) -> str:
             *(f"- {entry.title}" for entry in entries),
             "Try one of those topics, or use `query_csv` for this company's own figures.",
         ]
-    )
-
-
-def _problems(exc: ValidationError) -> str:
-    """Flatten a pydantic error into one line the model can act on.
-
-    Deliberately duplicated from `query_csv.py` (§2.3) — see the note there.
-    """
-    return "; ".join(
-        f"{'.'.join(str(part) for part in error['loc']) or 'arguments'}: {error['msg']}"
-        for error in exc.errors()
     )
