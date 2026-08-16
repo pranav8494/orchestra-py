@@ -1,20 +1,17 @@
 """Turning a finished run into the string stdout gets, separate from rendering (§3.3).
 
-Formatting and rendering are split deliberately: this module returns a string and knows
-nothing about Rich or terminals, so both shapes are testable without a console. `cli/app.py`
-picks the stream (§5); everything about *what* each `--output` mode says is here.
+This module returns a string and knows nothing about Rich or terminals, so both shapes
+are testable without a console. `cli/app.py` picks the stream (§5); what each `--output`
+mode *says* is here.
 
-**The JSON document is a published contract, so it is not the ledger.** `TaskState` carries
-the event log, `current_step`, and whatever the engine needs next quarter; dumping it would
-turn every internal field into a promise to whoever pipes us into `jq`, and every ledger
-change into a breaking one. The view models below restate only the fields the contract
-covers. They mirror `core.state` field for field on purpose — §2.3's case for duplication
-across a layer boundary, where independence outranks DRY. When the two must differ, that
-divergence is the point.
+**The JSON document is a published contract, so it is not the ledger.** Dumping
+`TaskState` would make its event log and engine bookkeeping a promise to whoever pipes us
+into `jq`, and every ledger change a breaking one. The view models below restate only the
+contract's fields — §2.3's duplication across a layer boundary, where independence
+outranks DRY.
 
-**Nothing here raises.** `app.py` always writes a report before the CLI formats, but the run
-that most needs printing is the one that went wrong, so an absent plan or an absent report
-is rendered as the fact it is rather than treated as impossible.
+**Nothing here raises.** The run that most needs printing is the one that went wrong, so
+an absent plan or report is rendered as the fact it is.
 """
 
 from enum import StrEnum
@@ -23,14 +20,14 @@ from pydantic import BaseModel, ConfigDict
 
 from orchestra.core.state import AgentRole, ArtifactPointer, SubtaskStatus, TaskState
 
-# The line stdout gets when there is nothing to report — never an empty document, because
-# a command that printed nothing at all is indistinguishable from one that crashed.
+# The line stdout gets when there is nothing to report: a command that printed nothing at
+# all is indistinguishable from one that crashed.
 NO_REPORT = "No report was produced for this run."
 
 
 class OutputFormat(StrEnum):
-    """The `--output` modes. An enum over a closed set of strings (§7), which is also what
-    Typer reads the choices and the default out of."""
+    """The `--output` modes. A closed set, so an enum (§7) — and Typer reads the choices
+    and the default straight off it."""
 
     TEXT = "text"
     JSON = "json"
@@ -96,11 +93,9 @@ def format_result(state: TaskState, *, output: OutputFormat, quiet: bool = False
     Args:
         state: the run's ledger, after the aggregator has written its report.
         output: which of the two documented shapes to produce.
-        quiet: drop the per-subtask trace from the text shape. The report itself is never
-            dropped: §5 lets `--quiet` suppress progress, never the result or the exit
-            code, and the step lines *are* progress — the trace of how the run got here,
-            kept in the transcript once it has finished. The report is the result.
-            Ignored for JSON, whose shape is a contract and does not vary with a flag.
+        quiet: drop the per-subtask trace from the text shape. Never the report: §5 lets
+            `--quiet` suppress progress, never the result, and the step lines are the
+            progress. Ignored for JSON, whose shape does not vary with a flag.
 
     Returns:
         The document, without a trailing newline.
@@ -113,8 +108,7 @@ def format_result(state: TaskState, *, output: OutputFormat, quiet: bool = False
 def _text(state: TaskState, *, quiet: bool) -> str:
     """The human shape: the report, then the trace, blank line between blocks.
 
-    A block with nothing in it is omitted whole rather than printed as a heading with
-    nothing under it — "Key figures:" followed by silence reads as a bug.
+    An empty block is omitted whole — "Key figures:" followed by silence reads as a bug.
     """
     report = state.final_result
     if report is None:
@@ -145,8 +139,8 @@ def _text(state: TaskState, *, quiet: bool) -> str:
 def _steps(state: TaskState) -> str:
     """One line per subtask: status, id, and the artifact it produced.
 
-    The run's progress record. Column widths are fixed rather than fitted to the ids so
-    the block stays greppable and diffable between runs.
+    The run's progress record. Fixed column widths, not fitted to the ids, so the block
+    stays greppable and diffable between runs.
     """
     if state.plan is None:
         return ""

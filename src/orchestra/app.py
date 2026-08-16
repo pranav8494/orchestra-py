@@ -60,15 +60,14 @@ class Orchestra:
             prompt: the user's plain-language request.
 
         Returns:
-            The ledger, with `final_result` set — whether every subtask succeeded, some
-            failed, or the run stopped short. A run that ends early still has artifacts
-            on disk, and unreported artifacts are the same as no artifacts. The caller
-            reads `failed` to decide the exit code (§8) and `failure_reason` for why.
+            The ledger, with `final_result` set, whether the run completed, partly
+            failed, or stopped short. The caller reads `failed` for the exit code (§8)
+            and `failure_reason` for why.
 
         Raises:
-            TaskFailure: planning failed, so there is no plan and nothing to report on.
-                An execution failure does *not* reach here — see below.
-            ProviderError: the provider failed after retries, planning or synthesising.
+            TaskFailure: planning failed — no plan, so nothing to report on. An
+                execution failure does *not* reach here.
+            ProviderError: the provider failed while planning or synthesising.
             asyncio.CancelledError: the run was cancelled; propagated (§10).
         """
         state = TaskState(user_request=prompt)
@@ -76,14 +75,10 @@ class Orchestra:
         try:
             await self._engine.run(state)
         except TaskFailure as exc:
-            # The run-ending failures: the step cap, or a role with no worker. Recorded
-            # rather than raised, so the aggregator still reports what did finish and the
-            # CLI still prints it — the alternative is exit 5 with a silent stdout and
-            # artifacts nobody is told about. `CancelledError` is not an `Exception`, so
-            # a cancelled run never lands here; it unwinds untouched (§10).
+            # The step cap, or a role with no worker. Recorded rather than raised, so the
+            # report still names the artifacts on disk instead of exiting 5 in silence.
+            # `CancelledError` is not an `Exception`, so a cancelled run unwinds untouched.
             state.failure_reason = str(exc)
-        # Always: a report is the run's result, and the caller may not assume one exists
-        # only on the happy path.
         await self._aggregator.write_report(state)
         return state
 
@@ -114,8 +109,7 @@ def build_orchestra(config: Config) -> Orchestra:
     return Orchestra(
         planner=Planner(provider),
         engine=ExecutionEngine(workers=workers, broker=broker),
-        # The same store the workers write to: the aggregator resolves the pointers they
-        # minted, and a second instance over another root would find nothing.
+        # The workers' own store: the aggregator resolves the pointers they minted.
         aggregator=Aggregator(provider, store),
         provider=provider,
         broker=broker,
@@ -136,7 +130,7 @@ async def run_once(prompt: str) -> TaskState:
 
     Raises:
         OrchestraError: configuration or planning failed. A run that started and then
-            stopped short returns its ledger instead — see `Orchestra.run_task`.
+            stopped short returns its ledger instead.
     """
     orchestra = build_orchestra(load_config())
     try:

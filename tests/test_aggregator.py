@@ -289,9 +289,9 @@ async def test_write_report_raises_when_an_artifact_the_ledger_claims_is_gone(
 ) -> None:
     """The store's one error path, reached through the previews.
 
-    A ledger pointing at a payload the run can no longer read has lost data, so the run
-    ends on the taxonomy's `TaskFailure` (§8) rather than reporting over the hole — and
-    it ends before the provider call is paid for.
+    A ledger pointing at a payload it can no longer read has lost data, so the run ends
+    on `TaskFailure` (§8) rather than reporting over the hole — and before paying for
+    the provider call.
     """
     state = _finished_run(store)
     store.path_for(state.artifacts["analyse"]).unlink()
@@ -309,9 +309,8 @@ async def test_write_report_raises_when_an_artifact_the_ledger_claims_is_gone(
 async def test_write_report_bounds_how_many_previews_it_reads_at_once(
     store: ArtifactStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """§10: never unbounded fan-out. These reads run on the default thread pool that
-    every other `to_thread` in the process shares, so the bound belongs here and not to
-    however many subtasks the plan happened to contain."""
+    """§10: never unbounded fan-out. The reads share the process-wide thread pool, so the
+    bound belongs here rather than to however many subtasks the plan contained."""
     plan = Plan(
         subtasks=[
             Subtask(id=f"step_{index}", role=AgentRole.ANALYTICS, instruction="Do the thing")

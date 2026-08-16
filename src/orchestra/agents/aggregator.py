@@ -1,23 +1,17 @@
 """The synthesis pass: every completed artifact in, one `FinalReport` out.
 
-**Previews, never payloads.** The ledger holds pointers (§6), and this is the one agent
-that has to look behind them. It looks through `ArtifactStore.preview`, so a chart's HTML
-and a hundred-thousand-row CSV each cost a few hundred characters of prompt. A report
-built from raw payloads would be the largest request the run makes, and the one most
-likely to be truncated.
+**Previews, never payloads.** The one agent that looks behind a pointer, and it looks
+through `ArtifactStore.preview` — a chart's HTML costs a few hundred characters of
+prompt, not the file.
 
-**Why a draft model.** `ReportDraft`/`FigureDraft` are the schema the model fills in;
-`core.state.FinalReport` is what the ledger keeps. They differ deliberately: a draft
-figure's `source` is a plain `str`, because a model can emit anything there, and the
-conversion between the two is where that string is checked against the artifacts this
-run actually produced (§7). The chart is not in the draft at all — it is a fact the
-ledger already holds, so asking the model for it would only create a way to get it wrong.
+**Why a draft model.** `ReportDraft` is what the model fills in, `FinalReport` what the
+ledger keeps. A draft figure's `source` is a plain `str` because a model can emit
+anything; converting between the two is where it is checked against this run's artifacts
+(§7). The chart is not in the draft — the ledger already knows it.
 
-**Why one call and no retry.** The artifacts are already on disk and paid for. A refusal,
-a truncated reply, or a set of figures that cite nothing real must not cost the user the
-run, so this falls back to a report built from the ledger alone — what each step
-produced, and no invented numbers — rather than retrying or raising. Partial results beat
-no results (§8, §10). The same path serves a run with no completed subtasks at all.
+**Why one call and no retry.** The artifacts are already paid for, so a refusal or a set
+of figures citing nothing real degrades to a ledger-only report rather than raising
+(§8, §10). The same path serves a run with nothing completed.
 """
 
 import asyncio
@@ -37,20 +31,17 @@ from orchestra.core.state import (
 from orchestra.prompts import AGGREGATOR_SYSTEM_PROMPT
 from orchestra.providers.base import MessageRole, Provider, ProviderMessage
 
-# How many artifacts may be previewed at once. Bounded here rather than left to the size
-# of the plan (§10): the reads run on the default thread pool, which every other
-# `to_thread` in the process shares, and the plan's size is the engine's business.
+# How many artifacts may be previewed at once (§10). The reads share the process-wide
+# thread pool, so the bound is stated here rather than left to the plan's size.
 MAX_PREVIEW_READS = 4
 
-# One completed subtask and the artifact it produced — paired at the filter so the rest
-# of the module never has to re-ask whether the pointer is there.
+# One completed subtask and the artifact it produced, paired at the filter.
 _Completed = tuple[Subtask, ArtifactPointer]
 
 
 class FigureDraft(BaseModel):
     """One key figure as the model writes it — `source` unvalidated by design."""
 
-    # extra="forbid" so a field the model invents is a visible failure, not a silent drop.
     model_config = ConfigDict(extra="forbid")
 
     label: str = Field(min_length=1, description="What the figure measures, in a few words.")
@@ -102,8 +93,8 @@ class Aggregator:
         """Synthesise the run's artifacts, record the report in `state`, and return it.
 
         Args:
-            state: the run's ledger, after execution. On return `state.final_result` is
-                set — always, including when the model refused and when nothing completed.
+            state: the run's ledger, after execution. `state.final_result` is always set
+                on return, including when the model refused and when nothing completed.
 
         Returns:
             The report, the same object as `state.final_result`.
@@ -111,10 +102,8 @@ class Aggregator:
         Raises:
             TaskFailure: an artifact the ledger claims to hold is gone from the store, so
                 the run has lost data (§8). Raised by the store, passed through here.
-            ProviderError: the provider itself failed; raised at the adapter and passed
-                through here untouched. The report is not worth a retried outage.
-            asyncio.CancelledError: the caller cancelled the run; propagated, never
-                swallowed (§10).
+            ProviderError: the provider failed; a report is not worth a retried outage.
+            asyncio.CancelledError: propagated, never swallowed (§10).
         """
         completed = _completed(state)
         # From the ledger, not the model: the chart is a fact the run already recorded.
@@ -133,9 +122,9 @@ class Aggregator:
         """Ask the model for one report and validate what comes back.
 
         Returns:
-            The report, or `None` when the model gave nothing usable — a refusal, a reply
-            truncated before the JSON closed, or figures that cite no artifact of this
-            run. All three mean the same thing to the caller: fall back to the ledger.
+            The report, or `None` when the model gave nothing usable — a refusal, a
+            truncated reply, or figures citing no artifact of this run. All three mean
+            the same to the caller: fall back to the ledger.
         """
         briefing = await self._briefing(state.user_request, completed)
         draft = await self._provider.parse_structured(
@@ -146,10 +135,9 @@ class Aggregator:
         if draft is None:
             return None
 
-        # Plain input validation at the trust boundary (§7), not the guardrail framework
-        # #9 will add: a figure is kept only if its source is an artifact this run
-        # produced. The set comes from the ledger, so the survivors are valid pointers by
-        # construction and `KeyFigure` cannot reject them.
+        # Validation at the trust boundary (§7), not the guardrail framework #9 will add:
+        # a figure survives only if its source is an artifact this run produced. The set
+        # comes from the ledger, so survivors are valid pointers by construction.
         produced = set(state.artifacts.values())
         figures = [
             KeyFigure(label=figure.label, value=figure.value, source=figure.source)
@@ -157,8 +145,7 @@ class Aggregator:
             if figure.source in produced
         ]
         if draft.key_figures and not figures:
-            # Every number it cited traces to nothing. The summary is built from the same
-            # reading of the same artifacts, so it is not more trustworthy than they were.
+            # Every number it cited traces to nothing, so its summary is no better read.
             return None
 
         return FinalReport(
@@ -170,12 +157,11 @@ class Aggregator:
     async def _briefing(self, user_request: str, completed: list[_Completed]) -> str:
         """Build the user turn: the request, then one section per completed subtask.
 
-        Formatting lives here rather than in `prompts/` (§11), and the request and the
-        previews stay out of the system prompt — both are untrusted text.
+        Formatting lives here, not in `prompts/` (§11), and both the request and the
+        previews stay out of the system prompt — untrusted text.
         """
-        # `to_thread` because the store is synchronous filesystem I/O (§10), gathered
-        # because the reads are independent, semaphore-bounded because §10 wants the
-        # bound stated rather than inherited from whatever the plan happened to contain.
+        # `to_thread` because the store is blocking I/O, gathered because the reads are
+        # independent, bounded because §10 wants the bound stated.
         reads = asyncio.Semaphore(MAX_PREVIEW_READS)
 
         async def read(pointer: ArtifactPointer) -> str:
@@ -203,8 +189,7 @@ class Aggregator:
 def _completed(state: TaskState) -> list[_Completed]:
     """The subtasks that finished with something to show, in plan order.
 
-    A subtask can be `DONE` with no pointer only if a worker returned nothing; there is
-    no artifact to preview, so it is not part of the synthesis.
+    A `DONE` subtask with no pointer produced nothing to preview.
     """
     if state.plan is None:
         return []
@@ -218,8 +203,7 @@ def _completed(state: TaskState) -> list[_Completed]:
 def _chart_pointer(completed: list[_Completed]) -> ArtifactPointer | None:
     """The chart the report points at: the last completed visualization, or nothing.
 
-    Last rather than first because a plan that draws twice draws the summarising chart
-    last — and one reference is the report's contract, not a gallery.
+    Last rather than first: a plan that draws twice draws the summarising chart last.
     """
     charts = [pointer for subtask, pointer in completed if subtask.role is AgentRole.VISUALIZATION]
     return charts[-1] if charts else None
@@ -228,11 +212,11 @@ def _chart_pointer(completed: list[_Completed]) -> ArtifactPointer | None:
 def _ledger_report(
     user_request: str, completed: list[_Completed], chart: ArtifactPointer | None
 ) -> FinalReport:
-    """Build a report from the ledger alone, with no model involved.
+    """Build a report from the ledger alone, no model involved.
 
-    The degraded path: it states what the run produced and stops there. No key figures —
-    reading a number out of an artifact is the model's job, and a deterministic guess at
-    one would be the invention the whole design forbids.
+    The degraded path: it states what the run produced and stops. No key figures —
+    reading a number out of an artifact is the model's job, and guessing one is the
+    invention this design forbids.
     """
     if not completed:
         summary = f"No subtask produced a result, so this run has no answer to: {user_request}"

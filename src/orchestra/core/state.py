@@ -153,9 +153,8 @@ class SubtaskContext(BaseModel):
 class KeyFigure(BaseModel):
     """One number the report states, and the artifact it was read from.
 
-    `source` is a pointer rather than free text because an unsourced figure is a claim
-    nobody can check: the aggregator drops a figure whose source is not an artifact this
-    run produced, and the type is what makes that check possible.
+    `source` is a pointer, not free text: an unsourced figure is a claim nobody can
+    check, and the type is what lets the aggregator drop one this run never produced.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -168,8 +167,8 @@ class KeyFigure(BaseModel):
 class FinalReport(BaseModel):
     """The run's answer: what happened, the numbers behind it, and the chart to open.
 
-    Frozen, like `TaskEvent`: a report is written once, at the end, and read by the CLI.
-    Holds a pointer for the chart, never the chart — same reason as everywhere else here.
+    Frozen, like `TaskEvent` — written once, at the end. A pointer for the chart, never
+    the chart.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -194,9 +193,8 @@ class TaskState(BaseModel):
     clarifications: list[Clarification] = Field(default_factory=list)
     final_result: FinalReport | None = None
     # Why the run stopped short, when it did. `app.py` records the engine's run-ending
-    # failures here — the step cap, a role with no worker — instead of letting them
-    # abort the command, so the aggregator can still report the artifacts already on
-    # disk and the CLI can still print them alongside the reason.
+    # failures here rather than letting them abort the command, so the report can still
+    # name the artifacts already on disk.
     failure_reason: str | None = None
 
     @property
@@ -212,10 +210,10 @@ class TaskState(BaseModel):
 
     @property
     def failed(self) -> bool:
-        """Did this run fall short — either as a whole, or in one of its steps?
+        """Did this run fall short — as a whole, or in one of its steps?
 
-        The single question the CLI asks of a finished run, so the command body maps a
-        result to an exit code without holding a domain conditional of its own (§4).
+        The single question the CLI asks, so the command body maps a result to an exit
+        code without holding a domain conditional of its own (§4).
         """
         return bool(self.failure_reason or self.failed_subtasks)
 

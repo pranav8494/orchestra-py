@@ -98,13 +98,10 @@ def run(
         # re-raises KeyboardInterrupt here; the boundary maps it to 130 (§8).
         state = asyncio.run(run_once(prompt))
         if state.failure_reason is not None:
-            # Why the run stopped short is a diagnostic, so stderr (§5, §8) — and an error
-            # rather than progress, so `--quiet` does not suppress it. Printed in JSON mode
-            # too, where the document already carries it: stdout is for the script, stderr
-            # for the person watching, and which stream says what must not depend on -o.
-            # markup/highlight off for the reason `error_boundary` turns them off — the
-            # message can name a bracketed token ("roles: [<AgentRole...>]") and Rich would
-            # read that as a style tag and delete it.
+            # A diagnostic, so stderr (§5, §8) — and an error rather than progress, so
+            # `--quiet` keeps it. Printed under `-o json` too: which stream says what must
+            # not depend on the format. markup/highlight off for `error_boundary`'s
+            # reason — the message can name a bracketed token Rich would eat as a tag.
             err_console.print(state.failure_reason, markup=False, highlight=False)
         console.print(format_result(state, output=output, quiet=quiet))  # the result (§5)
         # A run that fell short still prints its report; only the code says it failed.
