@@ -10,7 +10,7 @@ from typing import TextIO, cast
 
 import pytest
 
-from orchestra.cli.prompt import ConsoleAsker, match_choices, question_text
+from orchestra.cli.prompt import ConsoleAsker, match_choices, question_text, resolve_choice
 from orchestra.core.question import Question, QuestionKind
 
 CHOICES = ["Q1", "Q2", "Q3"]
@@ -46,24 +46,65 @@ def test_question_text_description_becomes_a_second_line() -> None:
     assert text == "Which years?\nThe report covers one period."
 
 
-def test_question_text_multi_choice_lists_its_options() -> None:
-    """Rich draws the options for `single_choice` but not for a free-text field, so
-    `multi_choice` would otherwise be an unanswerable question."""
+def test_question_text_multi_choice_says_several_are_allowed() -> None:
+    """The one thing the lettered menu does not say by itself."""
     text = question_text(
         Question(kind=QuestionKind.MULTI_CHOICE, text="Which quarters?", choices=CHOICES)
     )
 
-    assert "Q1, Q2, Q3" in text
     assert "commas" in text
 
 
-def test_question_text_single_choice_leaves_the_options_to_rich() -> None:
-    """Listing them here as well would print them twice."""
-    text = question_text(
-        Question(kind=QuestionKind.SINGLE_CHOICE, text="Which quarter?", choices=CHOICES)
-    )
+@pytest.mark.parametrize("kind", [QuestionKind.SINGLE_CHOICE, QuestionKind.MULTI_CHOICE])
+def test_question_text_letters_every_option_on_its_own_line(kind: QuestionKind) -> None:
+    """Rich's inline `[Q1/Q2/Q3]` is only typeable when the options are one word. A live
+    run rejected "all", "all three" and "2024" against options like "All three (revenue,
+    costs, and profit)" — the letter is what the user actually types."""
+    text = question_text(Question(kind=kind, text="Which quarter?", choices=CHOICES))
 
-    assert text == "Which quarter?"
+    assert text.startswith("Which quarter?\n")
+    for line, (letter, choice) in zip(
+        text.splitlines()[1:], zip("ABC", CHOICES, strict=True), strict=False
+    ):
+        assert line == f"  {letter}. {choice}"
+
+
+@pytest.mark.parametrize(
+    ("kind", "tail"),
+    [
+        (QuestionKind.SINGLE_CHOICE, "Answer A-C"),
+        (QuestionKind.MULTI_CHOICE, "Answer A-C, or several separated by commas"),
+    ],
+)
+def test_question_text_ends_on_a_line_for_the_answer(kind: QuestionKind, tail: str) -> None:
+    """Rich appends its ": " to the last line, so without this the caret sits after an
+    option and that option reads as the question."""
+    text = question_text(Question(kind=kind, text="Which quarter?", choices=CHOICES))
+
+    assert text.endswith(f"\n{tail}")
+
+
+def test_resolve_choice_takes_the_letter_beside_the_option() -> None:
+    """The point of the menu: "B" is what a user types when the option is a sentence."""
+    assert resolve_choice("b", CHOICES) == "Q2"
+    assert resolve_choice(" C ", CHOICES) == "Q3"
+
+
+def test_resolve_choice_still_takes_the_option_text() -> None:
+    assert resolve_choice("q3", CHOICES) == "Q3"
+
+
+def test_resolve_choice_prefers_the_option_over_the_letter_that_collides() -> None:
+    """Options spelled "A" and "B" answer to themselves, not to each other's letters."""
+    assert resolve_choice("B", ["A", "B"]) == "B"
+
+
+def test_resolve_choice_returns_nothing_for_an_entry_that_names_neither() -> None:
+    assert resolve_choice("Q9", CHOICES) == ""
+
+
+def test_match_choices_takes_letters_and_texts_together() -> None:
+    assert match_choices("A, Q3", CHOICES) == "Q1, Q3"
 
 
 def test_match_choices_exact_entries_return_the_choices() -> None:
@@ -123,6 +164,16 @@ async def test_console_asker_single_choice_returns_the_question_spelling() -> No
 
 
 @pytest.mark.asyncio
+async def test_console_asker_single_choice_takes_the_letter() -> None:
+    """End to end through the real Rich prompt: a letter is accepted first time and comes
+    back as the option, so a sentence-long option costs one keystroke."""
+    long_options = ["Revenue", "Costs", "All three (revenue, costs, and profit)"]
+    question = Question(kind=QuestionKind.SINGLE_CHOICE, text="Which metric?", choices=long_options)
+
+    assert await ConsoleAsker(io.StringIO("c\n")).ask(question) == long_options[2]
+
+
+@pytest.mark.asyncio
 async def test_console_asker_single_choice_reasks_after_an_invalid_option() -> None:
     """Rich owns the re-ask; this pins that we let it, rather than returning the junk."""
     question = Question(kind=QuestionKind.SINGLE_CHOICE, text="Which quarter?", choices=CHOICES)
@@ -135,6 +186,13 @@ async def test_console_asker_multi_choice_returns_the_matched_choices() -> None:
     question = Question(kind=QuestionKind.MULTI_CHOICE, text="Which quarters?", choices=CHOICES)
 
     assert await ConsoleAsker(io.StringIO("q3, q1\n")).ask(question) == "Q3, Q1"
+
+
+@pytest.mark.asyncio
+async def test_console_asker_multi_choice_takes_letters() -> None:
+    question = Question(kind=QuestionKind.MULTI_CHOICE, text="Which quarters?", choices=CHOICES)
+
+    assert await ConsoleAsker(io.StringIO("a, c\n")).ask(question) == "Q1, Q3"
 
 
 @pytest.mark.asyncio

@@ -19,6 +19,10 @@ MAX_QUESTIONS = 3
 # meant `yes_no`.
 MIN_CHOICES = 2
 
+# Above this the list stops being a menu someone can read at a prompt. Also what lets the
+# renderer letter every option (A, B, C...) without running out of alphabet.
+MAX_CHOICES = 8
+
 
 class QuestionKind(StrEnum):
     """How the answer is collected. A closed set, so an enum (§7)."""
@@ -56,8 +60,10 @@ class Question(BaseModel):
     choices: list[str] = Field(
         default_factory=list,
         description=(
-            "The options, for single_choice and multi_choice only. At least two, short, "
-            "and mutually exclusive. Empty for every other kind."
+            f"The options, for single_choice and multi_choice only. Between {MIN_CHOICES} "
+            f"and {MAX_CHOICES}, mutually exclusive, and short — the user picks one by "
+            "letter, and a long option is one they have to read twice. Empty for every "
+            "other kind."
         ),
     )
 
@@ -67,6 +73,8 @@ class Question(BaseModel):
         rendered, and choices on a free-text one would be silently dropped."""
         if self.kind.needs_choices and len(self.choices) < MIN_CHOICES:
             raise ValueError(f"{self.kind} needs at least {MIN_CHOICES} choices")
+        if len(self.choices) > MAX_CHOICES:
+            raise ValueError(f"{self.kind} takes at most {MAX_CHOICES} choices")
         if not self.kind.needs_choices and self.choices:
             raise ValueError(f"{self.kind} takes no choices")
         duplicates = sorted({choice for choice in self.choices if self.choices.count(choice) > 1})

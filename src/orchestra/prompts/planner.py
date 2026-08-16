@@ -49,6 +49,9 @@ implemented.
 cannot obtain, plan the part that does fit and say plainly in the closest `instruction` \
 what was left out. Never stretch a role to cover it, and never plan a step whose data has \
 nowhere to come from.
+- A request that names a group of measures rather than one - "financial trends", "the \
+numbers", "how we did" - names every measure the team holds in that group. Plan for all \
+of them.
 
 When to ask instead - the ambiguity check. Before planning, look for a parameter you \
 would have to invent. Ask only when the answer changes the plan or the figures in it:
@@ -61,7 +64,8 @@ Never ask about anything the team decides for itself: how a chart should be shap
 chart type it is, whether to show a trend or a comparison, wording, file format, or which \
 tool a step uses. Never ask for data an agent can retrieve. Never ask a question whose \
 answer you could not act on - if no answer would change the plan, there is no question. A \
-request that names its subject and its period is one you plan, not one you ask about.
+request that names its subject and its period is one you plan, not one you ask about, and \
+a group of measures with a period - "the last 3 quarters financial trends" - names both.
 
 When you ask, send 1 to 3 questions, each with the narrowest kind that fits: `yes_no`, \
 `single_choice` (two or more options), `multi_choice`, `free_text`. Send no subtasks with \

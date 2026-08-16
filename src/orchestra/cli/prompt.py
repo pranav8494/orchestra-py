@@ -9,6 +9,7 @@
 """
 
 from collections.abc import Sequence
+from string import ascii_uppercase
 from typing import TextIO
 
 from rich.prompt import Confirm, Prompt
@@ -22,48 +23,78 @@ from orchestra.core.question import Question, QuestionKind
 DECLINED = ""
 
 
-def question_text(question: Question) -> str:
-    """The whole prompt as plain text: the question, its context, and the options Rich
-    will not draw itself.
+def choice_letters(choices: Sequence[str]) -> list[str]:
+    """`["A", "B", ...]`, one per option. Bounded by `Question`'s `MAX_CHOICES`."""
+    return list(ascii_uppercase[: len(choices)])
 
-    Rich draws the choices for `single_choice` and the y/n for `yes_no`; `multi_choice` is
-    a free-text field, so its options only appear if this puts them there.
+
+def question_text(question: Question) -> str:
+    """The whole prompt as plain text: the question, its context, and its options lettered
+    one per line.
+
+    Lettered and stacked rather than left to Rich's inline `[Revenue/Costs/...]`, which is
+    only an answer someone can type when the options are one word. A live run had a user
+    rejected three times for "all", "all three" and "2024" against options like "All three
+    (revenue, costs, and profit)".
     """
     lines = [question.text]
     if question.description:
         lines.append(question.description)
-    if question.kind is QuestionKind.MULTI_CHOICE:
-        lines.append(f"Options: {', '.join(question.choices)} — separate several with commas")
+    letters = choice_letters(question.choices)
+    lines.extend(
+        f"  {letter}. {choice}" for letter, choice in zip(letters, question.choices, strict=True)
+    )
+    if letters:
+        # A line of its own, because Rich appends its ": " to the last one: without this
+        # the caret sits after an option, which reads as though that option is the question.
+        span = f"{letters[0]}-{letters[-1]}"
+        lines.append(
+            f"Answer {span}, or several separated by commas"
+            if question.kind is QuestionKind.MULTI_CHOICE
+            else f"Answer {span}"
+        )
     return "\n".join(lines)
 
 
 def question_prompt(question: Question) -> Text:
-    """`question_text` as Rich `Text`, with everything below the first line dimmed.
+    """`question_text` as Rich `Text`, with the context line dimmed.
 
     Constructed, never `Text.from_markup`: the question is model output, and a `[q1]` in
     it would otherwise be eaten as a style tag or raise mid-prompt (§7 — untrusted input).
+    Only the description dims; the options are what the user is reading.
     """
-    body = question_text(question)
-    prompt = Text(body)
-    context_at = body.find("\n")
-    if context_at != -1:
-        prompt.stylize("dim", context_at)
+    prompt = Text(question_text(question))
+    if question.description:
+        context_at = len(question.text) + 1
+        prompt.stylize("dim", context_at, context_at + len(question.description))
     return prompt
 
 
+def resolve_choice(answer: str, choices: Sequence[str]) -> str:
+    """The option `answer` names — its own text or the letter beside it — or `""`.
+
+    Both, because either is a reasonable thing to type in front of a lettered menu. The
+    option's own spelling wins over the letter, so a question whose options are literally
+    "A" and "B" still answers to them.
+    """
+    entry = answer.strip()
+    for choice in choices:
+        if entry.lower() == choice.lower():
+            return choice
+    letters = choice_letters(choices)
+    return choices[letters.index(entry.upper())] if entry.upper() in letters else DECLINED
+
+
 def match_choices(answer: str, choices: Sequence[str]) -> str:
-    """Map a comma-separated answer onto `choices`, case-insensitively.
+    """Map a comma-separated answer onto `choices`, by letter or by text.
 
     Returns the matched options in the question's own spelling, in the order entered, so
     the planner reads back strings it wrote. Unmatched entries are dropped; an answer that
     matched nothing falls back to itself — someone who typed a fifth option meant it, and
     "" would be recorded as a decline.
     """
-    canonical = {choice.lower(): choice for choice in choices}
     matched = [
-        canonical[entry]
-        for part in answer.split(",")
-        if (entry := part.strip().lower()) in canonical
+        resolved for part in answer.split(",") if (resolved := resolve_choice(part, choices))
     ]
     # Deduplicated: `choices` is unique by the model validator, but "a, a" is not.
     return ", ".join(dict.fromkeys(matched)) if matched else answer.strip()
@@ -121,17 +152,20 @@ class ConsoleAsker:
                 # planner as the user's answer.
                 return "yes" if answer else "no"
             case QuestionKind.SINGLE_CHOICE:
-                # Rich validates and re-asks; `case_sensitive=False` returns the question's
-                # own spelling, so "q2" comes back as "Q2".
-                return Prompt.ask(
+                # Letters *and* texts, so Rich accepts either and still owns the re-ask.
+                # `show_choices=False`: the menu is already in the prompt, and Rich's
+                # inline bracket would repeat it in the form that was hard to type.
+                answer = Prompt.ask(
                     prompt,
                     console=err_console,
-                    choices=list(question.choices),
+                    choices=[*choice_letters(question.choices), *question.choices],
                     case_sensitive=False,
+                    show_choices=False,
                     default=DECLINED,
                     show_default=False,
                     stream=self._stream,
                 )
+                return resolve_choice(answer, question.choices)
             case QuestionKind.MULTI_CHOICE:
                 # Free text rather than repeated prompts: Rich has no multi-select, and one
                 # line the user can review beats N confirmations they cannot revise.
