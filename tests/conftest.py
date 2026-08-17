@@ -6,6 +6,9 @@ no test module reaching into another's internals (§3.1).
 """
 
 import asyncio
+import os
+import pty
+import sys
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -13,11 +16,15 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, SecretStr
 
+from orchestra import app as app_module
 from orchestra.agents.planner import Planner
 from orchestra.agents.workers.base import Worker
+from orchestra.agents.workers.visualization import ChartDraft
 from orchestra.artifacts import ArtifactStore
+from orchestra.charts import ChartKind, ChartSeries, ChartSpec
+from orchestra.cli.console import err_console
 from orchestra.core.errors import TaskFailure
 from orchestra.core.interrupt import Chat
 from orchestra.core.question import Asker, Question
@@ -52,6 +59,25 @@ _COLOUR_ENV_VARS = ("CLICOLOR", "CLICOLOR_FORCE", "FORCE_COLOR", "NO_COLOR")
 _WAIT_INTERVAL = 0.001
 _WAIT_POLLS = 1000
 
+# ------------------------------------------------------------------------------------
+# The scripted run's fixture values. Shared because every module that drives a whole run
+# asserts on them, and a per-module copy drifts from the script that produced it.
+# ------------------------------------------------------------------------------------
+
+# The executive summary a scripted `ReportDraft` carries.
+REPORT_SUMMARY = "Revenue grew in each of the last three quarters."
+
+# How many rows a scripted `query_csv` call asks for — and so what `count_rows_script`
+# counts and what the report's figure states.
+QUARTERS = 3
+
+# What `count_rows_script` labels its number, so an assertion on the output tracks the
+# script rather than a literal of its own.
+ROWS_COUNTED = "quarters analysed:"
+
+# One category of `chart_draft`'s spec, for the same reason.
+CHART_CATEGORY = "2025Q3"
+
 
 @pytest.fixture(autouse=True)
 def _isolated_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -82,6 +108,82 @@ def store(tmp_path: Path) -> ArtifactStore:
 def tool_call(name: str, call_id: str = "call-1", **arguments: object) -> ToolCall:
     """One tool call as a provider would decode it."""
     return ToolCall(id=call_id, name=name, arguments=arguments)
+
+
+def tool_turn(
+    name: str, *, call_id: str = "call-1", tokens: int = 100, **arguments: object
+) -> AssistantTurn:
+    """A model turn asking for one tool. The lap a scripted `ToolLoop` spends working."""
+    return AssistantTurn(
+        text="", tool_calls=(tool_call(name, call_id, **arguments),), usage_tokens=tokens
+    )
+
+
+def answer_turn(text: str, *, tokens: int = 50) -> AssistantTurn:
+    """A model turn asking for nothing — how `ToolLoop` learns the agent is finished."""
+    return AssistantTurn(text=text, usage_tokens=tokens)
+
+
+def chart_draft() -> ChartDraft:
+    """A drawable chart for a plan's visualization step — two points, so the step completes
+    rather than degrading on thin data."""
+    return ChartDraft(
+        summary="Revenue rose in each quarter.",
+        spec=ChartSpec(
+            title="Quarterly revenue",
+            kind=ChartKind.LINE,
+            x_label="Quarter",
+            y_label="Revenue",
+            categories=[CHART_CATEGORY, "2025Q4"],
+            series=[ChartSeries(name="Revenue", values=[6_340_000.0, 7_015_000.0])],
+        ),
+    )
+
+
+def count_rows_script(dataset: str) -> str:
+    """A script printing how many rows one retrieval artifact holds.
+
+    Run for real in a subprocess, so it is what proves a worker's pointer resolves inside
+    the next one's executor. Stdlib only: a pandas import would cost a second and prove no
+    more. `dataset` is the artifact's filename, which is how the executor stages it.
+    """
+    return (
+        "import json\n"
+        f'data = json.load(open("{dataset}"))\n'
+        'rows = [row for table in data["datasets"] for row in table["csv"].splitlines()[1:] if row]\n'
+        f'print("{ROWS_COUNTED}", len(rows))\n'
+    )
+
+
+def force_terminal(monkeypatch: pytest.MonkeyPatch, *, value: bool) -> None:
+    """Pretend stderr is (or is not) a tty; `CliRunner` always reports a pipe, leaving the
+    `LIVE` arm of `cli/app._render_mode` unreachable.
+
+    Patched on the *instance*: doing it on the class flips stdout's tty-ness too, and a
+    test would then pass against code reading the wrong stream.
+    """
+    monkeypatch.setattr(err_console, "_force_terminal", value, raising=False)
+
+
+@contextmanager
+def fake_terminal(monkeypatch: pytest.MonkeyPatch) -> Iterator[int]:
+    """A pty standing in for stdin and stderr, yielding the end a "user" types into.
+
+    Never the developer's terminal, and closed on the way out (§12).
+
+    `is_terminal` is patched on the *class*, unlike `force_terminal`'s instance patch, so
+    stdout reads as a terminal too. Wanted here — the pty stands in for the whole terminal
+    — but it means a caller cannot also assert on stdout's piped shape.
+    """
+    primary, secondary = pty.openpty()
+    try:
+        with os.fdopen(secondary, "r", closefd=False) as stdin:
+            monkeypatch.setattr(sys, "stdin", stdin)
+            monkeypatch.setattr(type(err_console), "is_terminal", property(lambda _self: True))
+            yield primary
+    finally:
+        os.close(primary)
+        os.close(secondary)
 
 
 async def wait_until(predicate: Callable[[], bool], *, what: str) -> None:
@@ -127,6 +229,11 @@ class FakeProvider:
 
     responses: list[BaseModel | BaseException | None] = field(default_factory=list)
     turns: list[AssistantTurn | BaseException] = field(default_factory=list)
+    # One queue per concurrent branch, keyed by a phrase in the conversation — the
+    # subtask's own instruction, which `build_briefing` puts in the first user turn. A
+    # single FIFO cannot serve a fan-out: two workers interleave on `to_thread`, so a flat
+    # queue hands one branch the other's turn. Empty keeps `turns` as the only queue.
+    turns_by_topic: dict[str, list[AssistantTurn | BaseException]] = field(default_factory=dict)
     model: str = "fake-model"
     # Holds every call open until the test releases it, so a cancellation test has a
     # request in flight to cancel.
@@ -163,18 +270,68 @@ class FakeProvider:
         self.send_calls.append(SendCall(system, tuple(messages), tuple(tools)))
         if self.blocker is not None:
             await self.blocker.wait()
-        if not self.turns:
+        queue = self._queue_for(messages)
+        if not queue:
             # Loud rather than repeating the last turn: a loop running one lap more than
-            # scripted is the bug this fake exists to catch.
+            # scripted is the bug this fake exists to catch. Per queue, so a branch that
+            # ran long is named by the turn it asked for.
             raise AssertionError(f"FakeProvider has no queued turn for send {len(self.send_calls)}")
-        answer = self.turns.pop(0)
+        answer = queue.pop(0)
         if isinstance(answer, BaseException):
             raise answer
         return answer
 
+    def _queue_for(
+        self, messages: Sequence[ProviderMessage]
+    ) -> list[AssistantTurn | BaseException]:
+        """Which queue answers this conversation: the first topic named in it, else `turns`.
+
+        Matched over the whole transcript, not the first message: it grows a turn per lap
+        and the branch is named the same way throughout.
+        """
+        content = "\n".join(message.content for message in messages)
+        for topic, queue in self.turns_by_topic.items():
+            if topic in content:
+                return queue
+        if self.turns_by_topic and not self.turns:
+            # A mistyped topic would otherwise fall through to an empty `turns` and be
+            # reported as a branch that ran long, sending the reader to the wrong script.
+            raise AssertionError(
+                f"FakeProvider has no queue for this conversation: none of "
+                f"{sorted(self.turns_by_topic)} appear in it.\n{content}"
+            )
+        return self.turns
+
     async def aclose(self) -> None:
         """Nothing to release; the flag lets a test assert the caller closed it."""
         self.closed = True
+
+
+type OfflineRun = Callable[[FakeProvider], Path]
+"""Installs a provider behind `run_once` and says where the run will write."""
+
+
+@pytest.fixture
+def offline_run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> OfflineRun:
+    """Let `run_once` load its own config and wire its own services; the vendor adapter is
+    swapped at the provider port, the one seam that keeps this offline (§12).
+
+    The returned callable hands back the `ARTIFACT_DIR` it exported, so a caller asserting
+    on where the run wrote reads it from here rather than rebuilding the path.
+    """
+
+    def install(provider: FakeProvider) -> Path:
+        artifacts = tmp_path / "artifacts"
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+        monkeypatch.setenv("ARTIFACT_DIR", str(artifacts))
+
+        def _create_provider(*, api_key: SecretStr, model: str, max_tokens: int) -> Provider:
+            return provider
+
+        monkeypatch.setattr(app_module, "create_provider", _create_provider)
+        return artifacts
+
+    return install
 
 
 @dataclass
