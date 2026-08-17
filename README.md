@@ -30,7 +30,7 @@ git clone https://github.com/pranav8494/orchestra-py.git && cd orchestra-py
 uv sync                                    # runtime + dev deps, interpreter from .python-version
 cp .env.example .env                       # then set ANTHROPIC_API_KEY=<your-key>
 uv run orchestra run "Summarize the last 3 quarters financial trends and create a chart"
-uv run pytest                              # 622 passed, 6 deselected (live) — offline, no network
+uv run pytest                              # 651 passed, 6 deselected (live) — offline, no network
 ```
 
 `ANTHROPIC_API_KEY` is the only required setting. Everything else has a default; `.env.example`
@@ -48,12 +48,25 @@ it does not get four minutes in before noticing.
 
 ## Example prompts
 
-The agents read `data/`: two CSVs of this company's own figures — quarterly revenue, costs and
-profit, and the same quarters' costs broken down by category, both 2024Q1–2025Q4 — plus a corpus of
-industry notes the `search` tool falls back to offline. `fetch_data` catalogues whatever files are
-in that directory, probing each one's columns at startup, so dropping another file in adds a
-dataset without a code change. That is the whole world they can retrieve, and the planner is given
-that roster up front, so it plans against what the team can actually obtain.
+The agents read `data/`: six files of this company's own figures, 2024Q1–2025Q4, in four formats.
+
+| File | Holds |
+|---|---|
+| `quarterly_financials.csv` | revenue, costs and profit, one row per quarter |
+| `expense_breakdown.csv` | the same quarters' costs by category — salaries, marketing, facilities, equipment |
+| `yearly_performance.csv` | 2024 and 2025 totals, plus headcount, customers and net revenue retention |
+| `product_lines.json` | quarterly revenue split three ways |
+| `project_timeline.md` | the delivery and hiring narrative behind the movements |
+| `Q4 Board Pack (final).csv` | one metric per row — and a filename the artifact store has to repair before it can take a copy |
+
+Alongside them, `search_snippets.json`: the corpus of industry notes the `search` tool falls back to
+offline, and the one file kept out of the catalogue, since listing it under two tools would tell the
+planner there are two sources where there is one. `fetch_data` catalogues whatever else is in that
+directory, probing each file's shape at startup — delimited headers, JSON keys, the first line of
+text — so dropping another file in adds a dataset without a code change. It hands over whole files;
+picking rows and columns out of them is the Analytics agent's job in pandas. That is the whole world
+the team can retrieve, and the planner is given that roster up front, so it plans against what the
+team can actually obtain.
 
 ### 1. Linear — retrieval → analytics → visualization
 
@@ -336,10 +349,10 @@ retry. An exception would unwind the agent loop and deny it that.
 | **CLI** (Typer + Rich) | web UI (FastAPI + React + WebSockets) | Roughly 70% of the budget goes to orchestration and prompts rather than 40%; a terminal dashboard buys live progress at a fraction of the effort, and WebSocket debugging was the biggest risk item. |
 | **Single-process `asyncio.TaskGroup`** | distributed queue or blackboard | Concurrency here is a handful of I/O-bound agents. A queue would add Redis, a worker lifecycle and non-deterministic ordering, and buy nothing at this scale. |
 | **Centralized orchestrator** | peer-to-peer handoffs | One place to enforce retry caps, step budgets and the clarification round. P2P makes A→B→A loops easy and top-level progress hard to show. |
-| **Bundled mock CSVs + offline search corpus** | live data sources | The whole suite runs offline and the demo is reproducible. Live web search is opt-in via `TAVILY_API_KEY`. |
+| **Bundled mock data files + offline search corpus** | live data sources | The whole suite runs offline and the demo is reproducible. Live web search is opt-in via `TAVILY_API_KEY`. |
 | **Plotly HTML + ASCII fallback** | PNG rendering | PNG needs `kaleido`, a ~100 MB dependency, for an artifact the terminal cannot show anyway. The ASCII chart goes in the report; the HTML opens in a browser. |
 | **Pointer-based artifacts** | blobs in state | The ledger is serialised into prompts. Pointers keep context small and make every figure traceable. |
-| **Mock data, real tools** | mocked tools | The CSVs are fixture data, but `fetch_data`, `search` and `run_python` are the real implementations — the failure modes exercised are the real ones. |
+| **Mock data, real tools** | mocked tools | The files in `data/` are fixture data, but `fetch_data`, `search` and `run_python` are the real implementations — the failure modes exercised are the real ones. |
 
 Actual build time exceeded the research doc's 8–10 h estimate. That estimate was the compressed
 path — thinner tests, no separate QA pass. What was spent instead bought the offline end-to-end
