@@ -9,17 +9,15 @@ the two writing tests assert stdout and stderr separately as §5 requires.
 import asyncio
 import io
 import os
-import pty
 import sys
 import termios
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from collections.abc import Callable
 from typing import TextIO, cast
 
 import pytest
 from rich.live import Live
 
-from conftest import wait_until
+from conftest import fake_terminal, wait_until
 from orchestra.cli.chat import (
     BANNER,
     INTERRUPT_KEY,
@@ -27,7 +25,6 @@ from orchestra.cli.chat import (
     RESUMING,
     ConsoleChat,
 )
-from orchestra.cli.console import err_console
 from orchestra.cli.prompt import DECLINED
 from orchestra.cli.render import LiveRegion
 
@@ -273,22 +270,8 @@ def test_live_region_attached_forgets_the_live_on_exit() -> None:
 # --------------------------------------------------------------------------------------
 #
 # Everything above runs the no-terminal path, where `_listen` never touches a descriptor.
-# The keypress is the ticket's first criterion, so it is exercised against a pty of this
-# test's own — never the developer's terminal, and closed on the way out (§12).
-
-
-@contextmanager
-def _fake_terminal(monkeypatch: pytest.MonkeyPatch) -> Iterator[int]:
-    """A pty standing in for stdin and stderr, yielding the end a "user" types into."""
-    primary, secondary = pty.openpty()
-    try:
-        with os.fdopen(secondary, "r", closefd=False) as stdin:
-            monkeypatch.setattr(sys, "stdin", stdin)
-            monkeypatch.setattr(type(err_console), "is_terminal", property(lambda _self: True))
-            yield primary
-    finally:
-        os.close(primary)
-        os.close(secondary)
+# The keypress is the ticket's first criterion, so it is exercised against `conftest`'s
+# `fake_terminal` — a pty of the suite's own, never the developer's (§12).
 
 
 @pytest.mark.asyncio
@@ -301,7 +284,7 @@ async def test_the_interrupt_key_is_seen_and_other_keys_are_not(
     Counting the reads, not polling `requested`: "it has not been pressed" is true before
     the byte arrives as well as after it is ignored, so a poll would pass either way.
     """
-    with _fake_terminal(monkeypatch) as typed:
+    with fake_terminal(monkeypatch) as typed:
         async with ConsoleChat(LiveRegion()) as chat:
             reads: list[None] = []
 
@@ -321,26 +304,50 @@ async def test_the_interrupt_key_is_seen_and_other_keys_are_not(
             assert chat.requested() is True
 
 
+# Only the flags anyone sets are compared — the kernel owns the rest of `lflag`.
+_LINE_FLAGS = {"ECHO": termios.ECHO, "ICANON": termios.ICANON}
+CBREAK = {"ECHO": False, "ICANON": False}
+
+
+def line_modes() -> dict[str, bool]:
+    """stdin's echo and canonical flags, as a shell would find them."""
+    lflag = termios.tcgetattr(sys.stdin.fileno())[3]
+    return {name: bool(lflag & bit) for name, bit in _LINE_FLAGS.items()}
+
+
 @pytest.mark.asyncio
 async def test_the_terminal_is_handed_back_in_the_mode_it_was_found(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """§8: leaving stdin in cbreak leaves the user's shell with no echo. Only the flags
-    anyone sets are compared — the kernel owns the rest of `lflag`."""
-    settings = {"ECHO": termios.ECHO, "ICANON": termios.ICANON}
-
-    def modes(fd: int) -> dict[str, bool]:
-        lflag = termios.tcgetattr(fd)[3]
-        return {name: bool(lflag & bit) for name, bit in settings.items()}
-
-    with _fake_terminal(monkeypatch):
-        before = modes(sys.stdin.fileno())
+    """§8: leaving stdin in cbreak leaves the user's shell with no echo."""
+    with fake_terminal(monkeypatch):
+        before = line_modes()
         async with ConsoleChat(LiveRegion()) as chat:
             chat.requested()  # arms the reader, which is what changes the mode
-            during = modes(sys.stdin.fileno())
-        after = modes(sys.stdin.fileno())
+            during = line_modes()
+        after = line_modes()
 
-    assert during == {"ECHO": False, "ICANON": False}
+    assert during == CBREAK
+    assert after == before
+
+
+@pytest.mark.asyncio
+async def test_the_terminal_is_handed_back_when_an_exception_unwinds_the_chat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The real Ctrl-C arrives with cbreak armed and unwinds *through* `__aexit__` (§8,
+    #16). The test above exits the block normally, so only this one proves the restore
+    happens while an exception is in flight."""
+    with fake_terminal(monkeypatch):
+        before = line_modes()
+        with pytest.raises(KeyboardInterrupt):
+            async with ConsoleChat(LiveRegion()) as chat:
+                chat.requested()
+                armed = line_modes()
+                raise KeyboardInterrupt
+        after = line_modes()
+
+    assert armed == CBREAK  # the mode really was taken before the unwind
     assert after == before
 
 
@@ -349,7 +356,7 @@ async def test_nothing_is_armed_until_the_run_asks(monkeypatch: pytest.MonkeyPat
     """The planner's clarification prompt (#10) reads a line through `input()` while the run
     is still planning. Arming at construction would clear `ECHO` across it and the user
     would type the answer blind."""
-    with _fake_terminal(monkeypatch):
+    with fake_terminal(monkeypatch):
         echoing = bool(termios.tcgetattr(sys.stdin.fileno())[3] & termios.ECHO)
         async with ConsoleChat(LiveRegion()):
             still_echoing = bool(termios.tcgetattr(sys.stdin.fileno())[3] & termios.ECHO)
@@ -363,7 +370,7 @@ async def test_a_second_press_before_the_chat_opens_does_not_queue_another(
 ) -> None:
     """Someone whose first `i` appears to do nothing presses again. Both are spent on the
     pause they opened, or they would be thrown back into a second chat on resuming."""
-    with _fake_terminal(monkeypatch) as typed:
+    with fake_terminal(monkeypatch) as typed:
         async with ConsoleChat(LiveRegion()) as chat:
             chat.requested()
             os.write(typed, INTERRUPT_KEY.encode() * 2)
