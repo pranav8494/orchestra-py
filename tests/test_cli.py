@@ -8,6 +8,7 @@ pads help output to the console width — the contract is the text, not the rend
 `test_end_to_end.py`.
 """
 
+import io
 import json
 import sys
 from functools import partial
@@ -377,6 +378,47 @@ def test_run_with_stdout_redirected_still_draws_live_on_a_tty_stderr(
     # Unframed: stdout is redirected, so a panel's box would land in the file.
     assert SUMMARY in result.stdout
     assert "╭" not in result.stdout
+
+
+class _Stdout(io.StringIO):
+    """A stdout that is, or is not, a terminal. `CliRunner` always supplies a pipe, so the
+    tty arm is unreachable through `invoke` — as with `_Stdin` above."""
+
+    def __init__(self, *, tty: bool) -> None:
+        super().__init__()
+        self._tty = tty
+
+    def isatty(self) -> bool:
+        return self._tty
+
+
+@pytest.mark.parametrize("tty", [False, True])
+def test_run_frames_the_report_only_on_a_real_tty_even_with_colour_forced(
+    monkeypatch: pytest.MonkeyPatch, tty: bool
+) -> None:
+    """#49: `FORCE_COLOR` makes Rich call any stream a terminal. Right for colour, wrong
+    for layout — with it exported, `orchestra run > file` framed the report and left box
+    characters in the file (§5).
+
+    The variable is set here on purpose: `_isolated_env` clears it, which is what kept the
+    suite green while the runtime was exposed (#38). Called directly rather than through
+    `invoke`, because `CliRunner` installs a stdout of its own and the decision under test
+    is the one the command's own `sys.stdout` drives.
+    """
+    monkeypatch.setenv("FORCE_COLOR", "3")
+    _stub_run_once(monkeypatch, _finished_state(SubtaskStatus.DONE))
+    stdout = _Stdout(tty=tty)
+    monkeypatch.setattr(sys, "stdout", stdout)
+
+    with pytest.raises(typer.Exit) as exit_info:
+        cli_app.run(PROMPT)
+
+    assert exit_info.value.exit_code == ExitCode.SUCCESS
+    written = stdout.getvalue()
+    assert SUMMARY in written  # the report itself survives either shape
+    assert ("╭" in written) is tty
+    # Styling still follows the variable — only the framing stopped reading it.
+    assert console.is_terminal is True
 
 
 def test_run_quiet_asks_for_no_dashboard_at_all(monkeypatch: pytest.MonkeyPatch) -> None:

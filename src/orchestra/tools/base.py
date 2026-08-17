@@ -89,7 +89,7 @@ class BaseTool(Protocol):
 def format_validation_error(exc: ValidationError) -> str:
     """Flatten a pydantic error into one line the model can act on.
 
-    Shared by all three tools rather than copied — the third copy is where §2.2 says the
+    Shared by every tool rather than copied — the third copy is where §2.2 says the
     shape stopped being a coincidence. Not `str(exc)`: pydantic echoes the rejected input,
     unbounded model output, and adds a docs URL the model cannot follow.
     """
