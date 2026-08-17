@@ -400,8 +400,9 @@ def result_renderable(
     two answers to one question (§2). JSON is never framed: a `Panel`'s box characters
     would break the first `json.loads` that met them (§5).
 
-    `terminal` is a parameter rather than a `console.is_terminal` read inside, so both
-    arms are testable without a fake console.
+    `terminal` is a parameter rather than a console read inside, so both arms are testable
+    without a fake console. The caller passes stdout's real tty state, not Rich's
+    `is_terminal`: colour may be forced through a pipe, a box drawn around it may not (#49).
     """
     text = format_result(state, output=output, quiet=quiet)
     if output is OutputFormat.TEXT and terminal:

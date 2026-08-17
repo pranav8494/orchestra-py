@@ -19,7 +19,7 @@ import typer
 from orchestra import __version__
 from orchestra.app import RunObserver, run_once
 from orchestra.cli.chat import HINT, ConsoleChat
-from orchestra.cli.console import console, err_console
+from orchestra.cli.console import console, err_console, stdout_is_tty
 from orchestra.cli.format import OutputFormat
 from orchestra.cli.prompt import ConsoleAsker
 from orchestra.cli.render import LiveRegion, RenderMode, dashboard, result_renderable
@@ -107,9 +107,13 @@ def run(
             # Diagnostic, so stderr even under `-o json` and `--quiet` (§5, §8): which
             # stream says what must not depend on the format or the noise level.
             err_console.print(state.failure_reason, markup=False, highlight=False)
-        # `is_terminal` is read here and passed down so framing stays in `render.py`.
+        # The tty state is read here and passed down so framing stays in `render.py`.
+        # `stdout_is_tty()` rather than `console.is_terminal`: the latter says `True` for a
+        # redirect whenever `FORCE_COLOR` is exported, and a `Panel` then puts box
+        # characters in the file (#49). Colour still follows the variable; layout follows
+        # the stream (§5).
         console.print(
-            result_renderable(state, output=output, quiet=quiet, terminal=console.is_terminal)
+            result_renderable(state, output=output, quiet=quiet, terminal=stdout_is_tty())
         )
         # A run that fell short still prints its report; only the code says it failed.
         raise typer.Exit(ExitCode.TASK_FAILURE if state.failed else ExitCode.SUCCESS)
