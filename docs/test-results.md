@@ -1,5 +1,9 @@
 # Test results (#16)
 
+> Recorded at #45. Since then #46 replaced `query_csv` with `fetch_data` and grew `data/` to six
+> files in four formats; the manual checklist below was not re-run against them. The automated
+> suite was, and now reports **651 passed, 6 deselected**.
+
 Automated suite (offline, the four gates):
 
 ```bash
@@ -58,8 +62,8 @@ Run from a real terminal with `ANTHROPIC_API_KEY` set. `$?` is checked after eac
 
 ## Automated results
 
-`uv run pytest` — **622 passed, 6 deselected** (live). Baseline before this ticket was 607.
-`ruff check`, `ruff format --check` and `mypy` (strict, 86 files) all clean.
+`uv run pytest` — **622 passed, 6 deselected** (live) on the day of the pass; baseline before this
+ticket was 607. `ruff check`, `ruff format --check` and `mypy` (strict, 86 files) all clean.
 
 Everything below runs offline against `FakeProvider`: the real planner, workers, tools over
 `data/`, aggregator and Typer command. The provider port is the rule, with two named exceptions —
@@ -100,4 +104,6 @@ stdout, stderr ending in a single `Interrupted.`, the cursor shown again, and no
 | Issue | Summary | Status |
 |---|---|---|
 | [#31](https://github.com/pranav8494/orchestra-py/issues/31) | Non-ASCII on a non-UTF-8 stdout (`PYTHONIOENCODING=ascii`) raises `UnicodeEncodeError`; the whole report is discarded and the run exits 1. The ASCII chart's `█` bars make it deterministic on such a terminal. | Pre-existing, filed, unscheduled |
+| [#33](https://github.com/pranav8494/orchestra-py/issues/33) | Visualization can drop an interior category: a three-quarter request charted Q2 and Q4 with the title still claiming Q2–Q4. Values correct, middle point absent. | Filed, unscheduled |
 | [#36](https://github.com/pranav8494/orchestra-py/issues/36) | The executor's wall clock never reaches `Config`, so an operator cannot raise it for a legitimately slow analysis. Confirmed while testing the timeout: the only seam is the class reference in `agents/toolsets.py`. | Filed, unscheduled |
+| [#40](https://github.com/pranav8494/orchestra-py/issues/40) | Tool output is stored and re-sent whole each turn. `fetch_data` now hands anything over 16 kB, or not text, to the analysis step as a pointer, which bounds the worst case; an inlined file and every `search` result are still replayed in full. | Reduced by #46, not closed |

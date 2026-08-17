@@ -79,6 +79,8 @@ paragraphs, this on single-line tool output. Different axis, kept separate.
 src/orchestra/
   app.py             # composition root — wires every service, ONE place
   config.py          # one typed Config; defaults < file < env < flags
+  artifacts.py       # pointer store; payloads on disk, `artifact:<name>` in state
+  charts.py          # Plotly HTML + ASCII, pure — top level because core/ takes no vendor lib
   cli/
     app.py           # Typer. Parse, delegate, exit code. NO business logic.
     console.py       # THE two Console objects. Constructed nowhere else.
@@ -89,8 +91,7 @@ src/orchestra/
     events.py        # typed Broker[T]
     loop.py          # repetition detector over tool-call signatures
     question.py      # typed clarification request/answer
-    permission.py    # request/grant, auto-approve when non-interactive
-    logging.py       # structured logs -> file/stderr, NEVER stdout
+    interrupt.py     # the pause-and-replan ports; no keyboard reaches core/
     errors.py        # error taxonomy -> exit codes
   providers/         # ONLY place vendor SDKs may be imported
     base.py          # Provider Protocol + factory
@@ -127,15 +128,15 @@ Each module owns one pattern. If you can't name the pattern, the module is in th
 | `app.py` | composition root, constructor injection, no singletons |
 | `core/events.py` | typed broker; lossy for progress, must-deliver for lifecycle (§6) |
 | `core/state.py` | shared typed ledger, pointers not blobs |
+| `artifacts.py` | pointer store; payloads on disk, never in state |
 | `core/loop.py` | tool-call signature window, trips on repetition |
 | `core/question.py` | typed clarification request, blocks until answered |
 | `tools/base.py` | `info()` + `run()`, failures as data |
 | `providers/base.py` | port + factory, SDKs quarantined |
 | `agents/toolsets.py` | toolset composition in one place |
-| `core/permission.py` | request/grant + auto-approve |
+| `core/interrupt.py` | pause-and-replan ports, one per layer that answers them |
 | `config.py` | one typed config, layered, loaded once |
 | `prompts/` | prompt modules + registry |
-| `core/logging.py` | logs off stdout |
 | `cli/format.py` | format switch separate from rendering |
 
 ---
@@ -191,7 +192,7 @@ Hence the strictness.
 
 A new tool, provider, or agent means implementing one of these.
 
-**`tools/base.py` — `BaseTool`** · `info()` + `async run(ctx, call) -> ToolResponse`
+**`tools/base.py` — `BaseTool`** · `info()` + `async run(call) -> ToolResponse`
 - **MUST** return failures as `ToolResponse(is_error=True, ...)`, not raise — an exception unwinds
   the agent loop and denies the model its retry. Raise only for programmer errors.
 - **MUST** write `info()`'s description as a prompt, not a docstring: when to use it, when not, limits.
