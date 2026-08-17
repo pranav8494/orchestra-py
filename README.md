@@ -8,6 +8,13 @@ report whose every number points back at the artifact it came from.
 uv run orchestra run "Summarize the last 3 quarters financial trends and create a chart"
 ```
 
+![One request planned into four subtasks, two retrieval agents running in parallel, and a report whose every figure cites its artifact](docs/demo/demo.gif)
+
+<sub>The fan-out example above, 4× speed. **[Full recording](docs/demo/demo.mov)** — adds the ambiguous
+request that asks before it plans, and a run interrupted mid-execution that replans what is left.
+**[Design walkthrough](docs/presentation/orchestra-deck.html)** — architecture and trade-offs;
+download and open in a browser, GitHub shows HTML as source.</sub>
+
 ## What it does
 
 | Step | What happens |
@@ -17,6 +24,22 @@ uv run orchestra run "Summarize the last 3 quarters financial trends and create 
 | **Report** | Outputs are aggregated into an executive summary, sourced key figures, and a chart. |
 | **Watch** | A Rich dashboard draws the plan, spinners for live agents, and an event log — on stderr, so stdout stays pipeable. |
 | **Interrupt** | Press `i` mid-run to pause, tell the orchestrator something new, and have it replan what is left. |
+
+---
+
+## Design decisions
+
+| Decision | Why | Detail |
+|---|---|---|
+| Centralized orchestrator over a shared typed ledger | One place to enforce retry caps, step budgets and the clarification round. Peer-to-peer handoffs loop; a blackboard is infrastructure. | [Architecture](#architecture) |
+| Three roles, one toolset and one slice of state each | A role that can fetch, compute and draw is not a team. | [Agent roles](#agent-roles-and-prompts) |
+| Results passed as `artifact:<name>` pointers, never blobs | The ledger is serialised into prompts — pointers keep context small and make every figure traceable. | [Artifacts](#artifacts) |
+| Analytics writes and runs real Python — isolated, not sandboxed | Analysis is open-ended; a fixed set of typed helpers cannot answer the question outside it. | [Model-written code](#running-model-written-code) |
+| A mechanism per named failure, not a promise | Hallucination, repetition and runaway loops each get code and a default. | [Guardrails](#guardrails) |
+
+**[Trade-offs made under the 24 h constraint](#trade-offs-made-under-the-24-h-constraint)** ·
+**[How to run and test](#quickstart)** · **[What was not built](#stretch-goals)** ·
+**[Known limitations](#known-limitations)**
 
 ---
 
