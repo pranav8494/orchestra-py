@@ -135,9 +135,10 @@ class Aggregator:
         Last rather than first: a plan that draws twice draws the summarising chart last.
 
         Returns `(None, None)` when no visualization ran, and when its artifact is not a
-        `VisualizationResult` — `EchoWorker` still backs the role and writes plain text,
-        which costs the report its chart, not the run (§8). A `TaskFailure` from the store
-        is raised: `write_report` records it and writes the rest of the report anyway.
+        `VisualizationResult` — the plain text `EchoWorker` would write if the mapping's
+        default ever backed the role, costing the report its chart and not the run (§8). A
+        `TaskFailure` from the store is raised: `write_report` records it and writes the
+        rest of the report anyway.
         """
         receipts = [
             pointer for subtask, pointer in completed if subtask.role is AgentRole.VISUALIZATION
