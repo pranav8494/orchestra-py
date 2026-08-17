@@ -50,8 +50,8 @@ it does not get four minutes in before noticing.
 
 The agents read `data/`: one CSV of this company's quarterly revenue, costs and profit for
 2024Q1–2025Q4, and a corpus of industry notes the `search` tool falls back to offline. That is the
-whole world they can retrieve, and the planner is told so — it will not plan a step whose data has
-nowhere to come from.
+whole world they can retrieve, and the planner is given that roster up front, so it plans against
+what the team can actually obtain.
 
 ### 1. Linear — retrieval → analytics → visualization
 
@@ -59,8 +59,8 @@ nowhere to come from.
 uv run orchestra run "Summarize the last 3 quarters financial trends and create a chart"
 ```
 
-Three steps in sequence. The report cites revenue, cost and profit figures against the artifact the
-analysis script read, and `Chart:` names an HTML file you can open.
+Three steps in sequence. Each figure in the report cites the artifact of the step that produced it,
+and `Chart:` names an HTML file you can open.
 
 ### 2. Fan-out — two retrievals at once
 
@@ -87,21 +87,23 @@ Which metric should the chart show?
 Answer A-B
 ```
 
-Answer once and planning proceeds — there is no second round. The options offered are only measures
-the team can actually retrieve, because the planner is told the roster up front. With stdin piped
-(a script, CI), nobody is at the prompt: the planner is told so and plans against the most
+Answer once and planning proceeds — there is no second round. The options are drawn from the roster,
+so it asks only about subjects the team holds. With stdin piped (a script, CI) nobody is at the
+prompt: a `clarify` reply is rejected back to the model, which then plans against the most
 reasonable reading rather than hanging.
+
+### 4. Role omission — a step that is dropped, not reordered
+
+```bash
+uv run orchestra run "Summarize the revenue trend in one paragraph"
+```
+
+2 steps, **no visualization**. Nothing asks for a chart, so the role does not appear.
 
 ### The planner is dynamic
 
-A three-role pipeline can look dynamic while always emitting the same chain. The three prompts above
-are the proof that it does not — the plan's shape follows the request:
-
-| Request | Plan |
-|---|---|
-| Linear | 3 steps, sequential: retrieval → analytics → visualization |
-| Fan-out | 4–5 steps, two retrievals with no edge between them, reconverging on the comparison |
-| `Summarize the revenue trend in one paragraph` | 2 steps, **no visualization** — the role is dropped, not reordered |
+A three-role pipeline can look dynamic while always emitting the same chain. The four prompts above
+are the proof that it does not — the plan's shape follows the request.
 
 ```bash
 uv run pytest tests/test_planner_scenarios.py                # shapes, offline
@@ -150,8 +152,13 @@ done     chart_trends  artifact:chart_trends.json
 
 Every figure carries the pointer to the artifact it came from. `Chart:` is the absolute path, not
 the pointer, so it opens — and it resolves to the `.html`, while the visualization step's own
-pointer names its `.json` receipt. `--quiet` drops the `Artifacts:`/`Steps:` block — that is
-progress. The report always prints.
+pointer names its `.json` receipt.
+
+| Flag | Effect |
+|---|---|
+| `--quiet` / `-q` | Suppresses live progress and drops the `Artifacts:`/`Steps:` block. The report still prints. |
+| `--output` / `-o` | `text` (default) or `json`. |
+| `--debug` | Prints the traceback on failure. Without it a failure is a message and an exit code, never a stack trace. |
 
 ### `--output json`
 
@@ -177,7 +184,8 @@ nothing to stdout — the human-readable message goes to stderr with exit 3 or 5
 ### Artifacts
 
 Each run writes into its own timestamped subdirectory of `ARTIFACT_DIR`
-(`~/.orchestra/artifacts/2026-08-17T09-14-02Z/`), so two runs never interleave. State carries
+(`~/.orchestra/artifacts/2026-08-17T07-29-39Z/`), so runs a second or more apart never interleave —
+the name is second-granular, so two starting in the same second share one. State carries
 `artifact:<name>` pointers, never blobs — the ledger is serialised into prompts, so payloads stay on
 disk. Datasets and analyses land as `.json`, charts as a standalone `.html` that links Plotly from a
 CDN, so viewing one needs a network connection.
@@ -194,8 +202,9 @@ CDN, so viewing one needs a network connection.
 | 5 | task failure |
 | 130 | SIGINT |
 
-A run that fell short still prints its report; only the code says it failed. Ctrl-C cancels the
-tasks, tears down the live region, restores the terminal, and exits 130 with no traceback.
+A run that fell short still prints its report; only the code says it failed — except under #31
+below. Ctrl-C cancels the tasks, tears down the live region, restores the terminal, and exits 130
+with no traceback.
 
 ---
 
@@ -240,26 +249,42 @@ Centralized orchestrator over a shared typed ledger — pattern A of the
 Layers point inward — `cli/` → `app.py` → `agents/` → `{core/, tools/, providers/}`. `core/` imports
 nothing upward and no vendor SDK, so the whole engine runs behind a different front end unchanged.
 `app.py` is the one composition root; nothing below it constructs a provider, store or worker, which
-is what lets the entire test suite run against a `FakeProvider` without patching. The rules are in
-[CONVENTIONS.md](CONVENTIONS.md).
+is what lets the whole application run against a `FakeProvider` swapped at one seam — the provider
+port. The rules are in [CONVENTIONS.md](CONVENTIONS.md).
 
 ---
 
 ## Agent roles and prompts
 
-Prompts live in `src/orchestra/prompts/`, one module per agent, never inline. The planner's `ROLES`
-block and the engine's `AgentRole` enum are the same three names, asserted by a test.
+Prompts live in `src/orchestra/prompts/`, one module per agent, never inline. The team the
+orchestrator plans against is one block of `prompts/planner.py`, reused verbatim by the mid-run
+replan:
+
+```
+The roles, and only these:
+
+- data_retrieval - finds and loads raw data: files, tables, database rows, search
+results. The only role that may obtain data the team does not already have. Never
+analyses, never draws.
+- analytics - computes over data an earlier subtask retrieved: aggregations, trends,
+comparisons, and the written summary of what the numbers show. Never fetches data,
+never draws.
+- visualization - turns figures an earlier subtask computed into a chart. Never fetches
+data, never computes the figures it plots.
+```
+
+Every `AgentRole` appears in that block, asserted by a test.
 
 | Role | Does | Tools | Prompt |
 |---|---|---|---|
-| **Orchestrator** (planner) | Decomposes the request into a DAG, or asks a clarifying question. Also replans mid-run. | `ask_user` | `prompts/planner.py`, `prompts/interrupt.py` |
+| **Orchestrator** (planner) | Decomposes the request into a DAG, or asks a clarifying question. Also replans mid-run. | `ask_user` — called by the planner, not offered to the model | `prompts/planner.py`, `prompts/interrupt.py` |
 | **data_retrieval** | Finds and loads raw data. The only role that may obtain data the team does not already have. | `query_csv`, `search` | `prompts/data_retrieval.py` |
 | **analytics** | Computes over data an earlier step retrieved — aggregations, trends, comparisons — by writing Python and running it. | `run_python` | `prompts/analytics.py` |
 | **visualization** | Turns computed figures into a Plotly chart plus an ASCII fallback. One structured call, no tool loop. | — | `prompts/visualization.py` |
 | **Aggregator** | Synthesises the finished artifacts into the final report. | — | `prompts/aggregator.py` |
 
-The planner is told what the retrieval tools can actually obtain, so it never plans a step whose
-data has nowhere to come from — and never offers a clarifying choice it cannot satisfy.
+The roster of what the retrieval tools can obtain goes into the same prompt, and into the mid-run
+replan's, so both plan against the data the team actually has.
 
 ---
 
@@ -270,9 +295,9 @@ promise. Defaults shown; the configurable ones are in `.env.example`.
 
 | Failure | Mechanism | Default |
 |---|---|---|
-| **Hallucinated figures** | Every key figure carries the pointer to the artifact the analysis script actually read. Unbacked figures are dropped before the report is written. | — |
+| **Hallucinated figures** | Every key figure carries the pointer to the artifact of the step that produced it. A figure citing anything this run did not produce is dropped before the report is written. | — |
 | **Malformed model output** | Every structured call validates through Pydantic; an unusable reply is retried with the rejection fed back. | 2 retries |
-| **Repetition** | Signature over `(tool, input, output)` in a sliding window; a repeating tool cycle ends the turn. | window 10, 5 repeats |
+| **Repetition** | Signature over `(tool, input, output)` in a sliding window — the same call returning the same result. Hitting the limit fails the subtask, and it is not retried. | window 10, 5 repeats |
 | **Runaway agent** | Per-subtask turn cap and token budget. Both apply: turns catch an agent that keeps calling tools, tokens catch one calling expensive ones. | 6 turns / 60,000 tokens |
 | **Failing step** | Per-subtask attempt cap. A deterministic failure — a bound already hit, a plan whose order is wrong — is not retried; it would cost the same three times. | 3 attempts |
 | **Runaway plan** | Global step budget across all attempts. Exceeding it ends the run with a partial report, never a hang. | 15 steps |
