@@ -30,7 +30,7 @@ git clone https://github.com/pranav8494/orchestra-py.git && cd orchestra-py
 uv sync                                    # runtime + dev deps, interpreter from .python-version
 cp .env.example .env                       # then set ANTHROPIC_API_KEY=<your-key>
 uv run orchestra run "Summarize the last 3 quarters financial trends and create a chart"
-uv run pytest                              # 651 passed, 6 deselected (live) — offline, no network
+uv run pytest                              # 653 passed, 6 deselected (live) — offline, no network
 ```
 
 `ANTHROPIC_API_KEY` is the only required setting. Everything else has a default; `.env.example`
