@@ -1,0 +1,1655 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>orchestra-py — design walkthrough</title>
+<style>
+/* ---------------------------------------------------------------------------
+   Palette. Every colour is declared here in :root (light). The dark block
+   below redefines only these same names — no colour is ever introduced for
+   the first time inside a media query.
+   --------------------------------------------------------------------------- */
+:root {
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+
+  --bg:            #ffffff;
+  --surface:       #f7f8fa;
+  --surface-2:     #eef1f5;
+  --text:          #14181d;
+  --text-2:        #3f4954;
+  --muted:         #6b7683;
+  --border:        #e0e5eb;
+  --border-2:      #c4ccd5;
+
+  --accent:        #1d5fa8;
+  --accent-2:      #123f70;
+  --accent-soft:   #e9f0fa;
+
+  --ok:            #2f6a45;
+  --ok-soft:       #e7f2ec;
+  --warn:          #8a5a12;
+  --warn-soft:     #fbf2e0;
+  --bad:           #9a3231;
+  --bad-soft:      #fbedec;
+
+  --code-bg:       #eef1f5;
+  --code-border:   #dde3ea;
+
+  --quote-bg:      #f5f8fc;
+  --quote-bar:     #1d5fa8;
+
+  --svg-stroke:    #59636f;
+  --svg-stroke-2:  #97a1ac;
+  --svg-box:       #ffffff;
+  --svg-box-2:     #f4f6f9;
+  --svg-band:      #f2f5f9;
+
+  --role-a-fill:   #e6effb;
+  --role-a-line:   #2b6cb0;
+  --role-b-fill:   #e6f1ea;
+  --role-b-line:   #2f6a45;
+  --role-c-fill:   #f1ebf8;
+  --role-c-line:   #67498a;
+
+  --shadow: 0 1px 2px rgba(16,22,30,.05);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg:            #0f1319;
+    --surface:       #161b22;
+    --surface-2:     #1d232c;
+    --text:          #e7ebf0;
+    --text-2:        #b8c2cd;
+    --muted:         #8b96a3;
+    --border:        #2a313b;
+    --border-2:      #3c4551;
+
+    --accent:        #7db4ef;
+    --accent-2:      #a9cdf6;
+    --accent-soft:   #16283b;
+
+    --ok:            #82c89c;
+    --ok-soft:       #16281e;
+    --warn:          #dfb76b;
+    --warn-soft:     #2b2214;
+    --bad:           #ef9d99;
+    --bad-soft:      #2f1a18;
+
+    --code-bg:       #1d232c;
+    --code-border:   #2f3742;
+
+    --quote-bg:      #151d27;
+    --quote-bar:     #7db4ef;
+
+    --svg-stroke:    #9aa5b2;
+    --svg-stroke-2:  #6d7783;
+    --svg-box:       #151a21;
+    --svg-box-2:     #1c222b;
+    --svg-band:      #1a2029;
+
+    --role-a-fill:   #16283b;
+    --role-a-line:   #7db4ef;
+    --role-b-fill:   #16281e;
+    --role-b-line:   #82c89c;
+    --role-c-fill:   #221b30;
+    --role-c-line:   #b39ada;
+
+    --shadow: 0 1px 2px rgba(0,0,0,.4);
+  }
+}
+
+/* --------------------------------------------------------------------------- */
+
+*, *::before, *::after { box-sizing: border-box; }
+
+/* min-height, not height: the page scrolls past the slide to reach the
+   glossary that sits at the bottom of the document. */
+html, body { min-height: 100%; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 15px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+  font-variant-numeric: tabular-nums;
+}
+
+.deck { height: auto; }
+
+/* --- slide frame --- */
+.slide {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  padding: 26px clamp(20px, 3.2vw, 52px) 0;
+  max-width: 1560px;
+  margin: 0 auto;
+}
+.slide[hidden] { display: none; }
+
+.slide-head {
+  flex: 0 0 auto;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 12px;
+  margin-bottom: 16px;
+}
+.kicker {
+  margin: 0 0 4px;
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+.slide-head h2 {
+  margin: 0;
+  font-size: clamp(21px, 2.1vw, 27px);
+  line-height: 1.15;
+  font-weight: 650;
+  letter-spacing: -.01em;
+}
+.slide-head .lede {
+  margin: 8px 0 0;
+  color: var(--text-2);
+  font-size: 14px;
+  max-width: 96ch;
+}
+
+.slide-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 4px 96px 0;
+}
+
+/* --- structure --- */
+h3.sec {
+  margin: 22px 0 8px;
+  font-size: 13px;
+  font-weight: 650;
+  letter-spacing: .045em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+h3.sec:first-child { margin-top: 2px; }
+
+.cols { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 34px; align-items: start; }
+.cols > * { min-width: 0; }
+.col > h3.sec:first-child { margin-top: 2px; }
+
+p { margin: 8px 0; max-width: 92ch; }
+p.tight { margin: 6px 0; }
+.note { color: var(--text-2); font-size: 13.5px; }
+.small { font-size: 13px; color: var(--muted); }
+strong { font-weight: 650; }
+
+hr.rule { border: 0; border-top: 1px solid var(--border); margin: 20px 0 0; }
+
+/* --- code --- */
+code {
+  font-family: var(--mono);
+  font-size: .88em;
+  background: var(--code-bg);
+  border: 1px solid var(--code-border);
+  border-radius: 4px;
+  padding: .08em .34em;
+  white-space: nowrap;
+}
+pre {
+  margin: 8px 0 4px;
+  background: var(--code-bg);
+  border: 1px solid var(--code-border);
+  border-left: 3px solid var(--accent);
+  border-radius: 5px;
+  padding: 10px 13px;
+  overflow-x: auto;
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.4;
+}
+pre code { background: none; border: 0; padding: 0; font-size: inherit; white-space: pre; }
+
+/* --- pull quote: the lines that carry the argument --- */
+blockquote.pull {
+  margin: 14px 0;
+  padding: 12px 18px;
+  background: var(--quote-bg);
+  border-left: 3px solid var(--quote-bar);
+  border-radius: 0 5px 5px 0;
+}
+blockquote.pull p {
+  margin: 0;
+  font-size: 16.5px;
+  line-height: 1.4;
+  color: var(--text);
+  font-weight: 480;
+  max-width: 78ch;
+}
+blockquote.pull p + p { margin-top: 8px; }
+blockquote.pull p.by { font-size: 13px; color: var(--muted); font-weight: 500; }
+blockquote.pull em { font-style: italic; }
+blockquote.pull.brief p { font-size: 15.5px; font-weight: 400; color: var(--text-2); }
+
+/* --- tables --- */
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  line-height: 1.38;
+  margin: 6px 0 4px;
+  font-variant-numeric: tabular-nums;
+}
+caption { caption-side: top; text-align: left; font-size: 12.5px; color: var(--muted); padding-bottom: 4px; }
+th, td {
+  text-align: left;
+  vertical-align: top;
+  padding: 5px 9px 5px 0;
+  border-bottom: 1px solid var(--border);
+}
+th {
+  font-size: 11.5px;
+  font-weight: 650;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border-2);
+  white-space: nowrap;
+}
+tbody tr:last-child td { border-bottom: 0; }
+td.k, th.k { white-space: nowrap; font-weight: 650; }
+td.n { width: 1%; white-space: nowrap; color: var(--muted); font-weight: 650; }
+td.st, th.st { width: 1%; white-space: nowrap; text-align: center; padding-right: 4px; }
+td.st + td { padding-left: 11px; }
+td.sz { white-space: nowrap; color: var(--text-2); }
+table.compact td, table.compact th { padding-top: 4px; padding-bottom: 4px; }
+td code, th code { white-space: normal; }
+
+/* --- status marks: green shipped, amber partial, red gap --- */
+.mark { font-size: 13px; font-weight: 700; line-height: 1; }
+.mark.ok  { color: var(--ok); }
+.mark.wa  { color: var(--warn); }
+.mark.no  { color: var(--bad); }
+.chip {
+  display: inline-block;
+  font-size: 11.5px;
+  font-weight: 650;
+  letter-spacing: .02em;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid;
+}
+.chip.ok { color: var(--ok);   background: var(--ok-soft);   border-color: var(--ok); }
+.chip.wa { color: var(--warn); background: var(--warn-soft); border-color: var(--warn); }
+.chip.no { color: var(--bad);  background: var(--bad-soft);  border-color: var(--bad); }
+.chip.ac { color: var(--accent); background: var(--accent-soft); border-color: var(--accent); }
+
+/* --- callout panels --- */
+.panel {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  padding: 11px 14px;
+  margin: 12px 0;
+  box-shadow: var(--shadow);
+}
+.panel.accent { border-color: var(--accent); background: var(--accent-soft); }
+.panel h4 { margin: 0 0 5px; font-size: 13.5px; font-weight: 650; }
+.panel p:last-child { margin-bottom: 0; }
+.panel p:first-of-type { margin-top: 0; }
+
+.bounds { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 0; padding: 0; list-style: none; }
+.bounds li {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  background: var(--code-bg);
+  border: 1px solid var(--code-border);
+  border-radius: 4px;
+  padding: 3px 8px;
+  white-space: nowrap;
+}
+
+.deflist { margin: 6px 0; }
+.deflist dt { font-weight: 650; font-size: 13.5px; margin-top: 8px; }
+.deflist dd { margin: 2px 0 0; font-size: 13.5px; color: var(--text-2); }
+
+/* --- diagrams --- */
+figure.diagram {
+  margin: 6px 0 4px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+  padding: 14px 14px 10px;
+  overflow-x: auto;
+}
+figure.diagram svg { display: block; width: 100%; height: auto; min-width: 860px; }
+figure.diagram figcaption {
+  margin-top: 9px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  font-size: 13px;
+  color: var(--text-2);
+}
+figure.diagram figcaption b { color: var(--text); font-weight: 650; }
+
+/* SVG paint + type. Nothing is hard-coded black or white: every stroke and
+   fill resolves through a custom property, so both diagrams invert cleanly. */
+.dg { color: var(--svg-stroke); }
+.dg .ln    { fill: none; stroke: currentColor; stroke-width: 1.8; }
+.dg .ln-2  { fill: none; stroke: var(--svg-stroke-2); stroke-width: 1.8; stroke-dasharray: 6 4; }
+.dg .bx    { fill: var(--svg-box); stroke: currentColor; stroke-width: 1.8; }
+.dg .bx-2  { fill: var(--svg-box-2); stroke: currentColor; stroke-width: 1.8; }
+.dg .bx-dash { fill: var(--svg-box-2); stroke: var(--accent); stroke-width: 1.8; stroke-dasharray: 7 4; }
+.dg .bx-bad  { fill: var(--bad-soft); stroke: var(--bad); stroke-width: 1.8; }
+.dg .bx-guard{ fill: var(--accent-soft); stroke: var(--accent); stroke-width: 3; }
+.dg .bx-band { fill: var(--svg-band); stroke: var(--border-2); stroke-width: 1.5; }
+.dg .dia   { fill: var(--svg-box-2); stroke: currentColor; stroke-width: 1.8; }
+.dg .dia-g { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 2.4; }
+.dg .arw   { fill: currentColor; }
+.dg .arw-2 { fill: var(--svg-stroke-2); }
+.dg .arw-a { fill: var(--accent); }
+
+.dg text { font-family: var(--sans); fill: var(--text); font-size: 13.5px; }
+.dg .t   { font-size: 13.5px; }
+.dg .th  { font-size: 15px; font-weight: 650; }
+.dg .tb  { font-size: 13.5px; font-weight: 650; }
+.dg .tm  { font-family: var(--mono); font-size: 13px; }
+.dg .tl  { font-size: 13px; fill: var(--text-2); }
+.dg .tlb { font-size: 13px; font-weight: 650; fill: var(--accent); }
+.dg .tacc { fill: var(--accent); }
+.dg .tbad { fill: var(--bad); }
+.dg .ti  { font-style: italic; }
+.dg .ra text, .dg .rb text, .dg .rc text { font-size: 13.5px; }
+.dg .role-a { fill: var(--role-a-fill); stroke: var(--role-a-line); stroke-width: 1.8; }
+.dg .role-b { fill: var(--role-b-fill); stroke: var(--role-b-line); stroke-width: 1.8; }
+.dg .role-c { fill: var(--role-c-fill); stroke: var(--role-c-line); stroke-width: 1.8; }
+.dg .role-a-txt { fill: var(--role-a-line); font-weight: 650; font-size: 14px; }
+.dg .role-b-txt { fill: var(--role-b-line); font-weight: 650; font-size: 14px; }
+.dg .role-c-txt { fill: var(--role-c-line); font-weight: 650; font-size: 14px; }
+.dg .role-a-box { fill: none; stroke: var(--role-a-line); stroke-width: 1.8; }
+.dg .role-b-box { fill: none; stroke: var(--role-b-line); stroke-width: 1.8; }
+.dg .role-c-box { fill: none; stroke: var(--role-c-line); stroke-width: 1.8; }
+
+/* --- nav chrome --- */
+.nav {
+  position: fixed;
+  right: clamp(14px, 2vw, 30px);
+  bottom: 16px;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--surface);
+  border: 1px solid var(--border-2);
+  border-radius: 999px;
+  padding: 4px 6px;
+  box-shadow: 0 2px 10px rgba(16,22,30,.10);
+}
+.nav button {
+  appearance: none;
+  font: inherit;
+  font-size: 15px;
+  line-height: 1;
+  color: var(--text);
+  background: transparent;
+  border: 0;
+  border-radius: 999px;
+  width: 30px;
+  height: 28px;
+  cursor: pointer;
+}
+.nav button:hover:not(:disabled) { background: var(--surface-2); }
+.nav button:disabled { color: var(--muted); cursor: default; opacity: .5; }
+.nav .count {
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-2);
+  min-width: 42px;
+  text-align: center;
+  letter-spacing: .02em;
+}
+.nav .rail { display: flex; gap: 4px; padding-left: 6px; margin-left: 2px; border-left: 1px solid var(--border); }
+.nav .rail a {
+  width: 9px; height: 9px; border-radius: 50%;
+  background: var(--border-2);
+  align-self: center;
+  text-indent: -9999px;
+  overflow: hidden;
+  display: block;
+}
+.nav .rail a[aria-current="true"] { background: var(--accent); }
+
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+
+.vh {
+  position: absolute; width: 1px; height: 1px; padding: 0;
+  margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+
+@media (max-width: 1040px) {
+  .cols { grid-template-columns: 1fr; gap: 0 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; animation: none !important; }
+}
+
+/* ---------------------------------------------------------------------------
+   Glossary. Sits at the bottom of the document, below the deck, so it is
+   reachable from any slide by scrolling on or by the nav link.
+   --------------------------------------------------------------------------- */
+.glossary {
+  border-top: 1px solid var(--border-2);
+  background: var(--surface);
+  padding: 30px clamp(20px, 3.2vw, 52px) 104px; /* clears the fixed nav pill */
+  scroll-margin-top: 0;
+}
+.glossary-inner { max-width: 1560px; margin: 0 auto; }
+.glossary h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 650;
+  letter-spacing: .045em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.glossary .gloss-lede {
+  margin: 6px 0 20px;
+  font-size: 13.5px;
+  color: var(--text-2);
+  max-width: 92ch;
+}
+.glossary h3 {
+  margin: 24px 0 10px;
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--accent);
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 6px;
+}
+.glossary h3:first-of-type { margin-top: 4px; }
+
+/* Two-up on wide screens; the dl itself stays a clean term/definition pair. */
+.gloss-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 48px;
+  max-width: 1200px;
+}
+.gloss-grid dl { margin: 0; }
+.gloss-grid div {
+  display: grid;
+  grid-template-columns: 92px 1fr;
+  gap: 0 14px;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--border);
+  align-items: baseline;
+}
+.gloss-grid dt {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+  letter-spacing: -.01em;
+}
+.gloss-grid dd {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-2);
+  line-height: 1.42;
+}
+.gloss-grid dd b { color: var(--text); font-weight: 600; }
+.gloss-grid code { font-size: .86em; }
+
+.nav .gloss-link {
+  font-size: 11.5px;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  font-weight: 600;
+  color: var(--text-2);
+  text-decoration: none;
+  padding: 0 8px 0 8px;
+  margin-left: 4px;
+  border-left: 1px solid var(--border);
+  white-space: nowrap;
+}
+.nav .gloss-link:hover { color: var(--accent); }
+
+@media (max-width: 900px) {
+  .gloss-grid { grid-template-columns: 1fr; }
+}
+@media (max-width: 620px) {
+  .gloss-grid div { grid-template-columns: 78px 1fr; }
+  .nav .gloss-link { display: none; }
+}
+
+/* ---------------------------------------------------------------------------
+   Print / PDF. Every slide starts a new page, is fully expanded, nav hidden.
+   --------------------------------------------------------------------------- */
+@media print {
+  :root {
+    --bg: #ffffff; --surface: #fafbfc; --surface-2: #f2f4f7;
+    --text: #101418; --text-2: #333c46; --muted: #5b6672;
+    --border: #d7dde4; --border-2: #b9c2cc;
+    --code-bg: #f3f5f8; --code-border: #dde3ea;
+    --quote-bg: #f5f8fc; --svg-box: #ffffff; --svg-box-2: #f5f7fa; --svg-band: #f2f5f9;
+    --shadow: none;
+  }
+  html, body { height: auto; background: #fff; }
+  .nav { display: none !important; }
+  .deck { height: auto; }
+  .slide,
+  .slide[hidden] {
+    display: block !important;
+    height: auto;
+    max-width: none;
+    overflow: visible;
+    padding: 0 0 12mm;
+    break-after: page;
+    page-break-after: always;
+  }
+  .slide:last-child { break-after: auto; page-break-after: auto; }
+  .slide-body { overflow: visible !important; height: auto; min-height: 0; padding-bottom: 0; }
+  .slide-head { break-after: avoid; page-break-after: avoid; }
+  figure.diagram { overflow: visible; break-inside: avoid; page-break-inside: avoid; }
+  /* Bound the diagram so a whole one fits on a single sheet rather than
+     straddling a page break. Both viewBoxes are near square, so width == height. */
+  figure.diagram svg { min-width: 0; max-width: 160mm; margin: 0 auto; }
+  table { break-inside: auto; }
+  tr, blockquote.pull, .panel { break-inside: avoid; page-break-inside: avoid; }
+  /* The glossary is the final sheet, fully expanded. */
+  .glossary {
+    break-before: page;
+    page-break-before: always;
+    background: #fff;
+    padding: 0;
+    border-top: 0;
+  }
+  .gloss-grid { grid-template-columns: 1fr 1fr; }
+  .gloss-grid div { break-inside: avoid; page-break-inside: avoid; }
+  .glossary h3 { break-after: avoid; page-break-after: avoid; }
+  @page { margin: 12mm; }
+}
+</style>
+</head>
+<body>
+
+<div class="deck" id="deck">
+
+<!-- ==================================================================== 1 -->
+<section class="slide" id="s1" aria-roledescription="slide" aria-labelledby="h1">
+  <header class="slide-head">
+    <p class="kicker">Challenge 1 — Multi-Agent Task Solver</p>
+    <h2 id="h1">The brief, and what shipped</h2>
+  </header>
+  <div class="slide-body">
+
+    <blockquote class="pull brief">
+      <p>Accept a high-level business request in plain language — e.g. <em>“Summarize the last 3
+      quarters’ financial trends and create a chart”</em> — then use multiple specialized AI agents to
+      break down the task, execute subtasks, and return a final structured result.</p>
+      <p class="by">Solo. 24 hours.</p>
+    </blockquote>
+
+    <h3 class="sec">Core requirements — all five</h3>
+    <table class="compact">
+      <thead>
+        <tr><th class="n">#</th><th>Required</th><th>Shipped as</th><th class="st"><span class="vh">Status</span></th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="n">1</td>
+          <td class="k">Input — business request in text</td>
+          <td><code>orchestra run "&lt;request&gt;"</code></td>
+          <td class="st"><span class="mark ok" role="img" aria-label="shipped">✓</span></td>
+        </tr>
+        <tr>
+          <td class="n">2</td>
+          <td class="k">Planning — system decides which agents and what each does</td>
+          <td>One planner call → a validated DAG. Plan shape follows the request</td>
+          <td class="st"><span class="mark ok" role="img" aria-label="shipped">✓</span></td>
+        </tr>
+        <tr>
+          <td class="n">3</td>
+          <td class="k">Execution — agents complete tasks and share results</td>
+          <td>3 specialized workers, real tools, concurrent under one <code>TaskGroup</code></td>
+          <td class="st"><span class="mark ok" role="img" aria-label="shipped">✓</span></td>
+        </tr>
+        <tr>
+          <td class="n">4</td>
+          <td class="k">Aggregation — combine into a final answer</td>
+          <td>Aggregator → executive summary, sourced figures, chart</td>
+          <td class="st"><span class="mark ok" role="img" aria-label="shipped">✓</span></td>
+        </tr>
+        <tr>
+          <td class="n">5</td>
+          <td class="k">Visibility — progress per agent</td>
+          <td>Rich dashboard on stderr, driven by an event broker</td>
+          <td class="st"><span class="mark ok" role="img" aria-label="shipped">✓</span></td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="cols">
+      <div class="col">
+        <h3 class="sec">Expectations</h3>
+        <table class="compact">
+          <thead><tr><th>Expected</th><th>Shipped as</th><th class="st"><span class="vh">Status</span></th></tr></thead>
+          <tbody>
+            <tr>
+              <td class="k">Clear role definitions (specialized prompts)</td>
+              <td><code>prompts/</code>, one module per agent, never inline</td>
+              <td class="st"><span class="mark ok" role="img" aria-label="shipped">✓</span></td>
+            </tr>
+            <tr>
+              <td class="k">Context sharing between agents</td>
+              <td>Typed ledger; each worker gets only its slice</td>
+              <td class="st"><span class="mark ok" role="img" aria-label="shipped">✓</span></td>
+            </tr>
+            <tr>
+              <td class="k">Tool usage (Python executor, search API)</td>
+              <td><code>run_python</code> (subprocess), <code>search</code> (Tavily + offline corpus),
+                  <code>fetch_data</code></td>
+              <td class="st"><span class="mark ok" role="img" aria-label="shipped">✓</span></td>
+            </tr>
+            <tr>
+              <td class="k">Avoid hallucination and repetition</td>
+              <td>Pointer-backed figures; repetition detector; turn/token/step budgets</td>
+              <td class="st"><span class="mark ok" role="img" aria-label="shipped">✓</span></td>
+            </tr>
+            <tr>
+              <td class="k"><strong>High marks</strong> — handle ambiguity by asking clarifying questions</td>
+              <td>Planner returns <code>clarify</code> instead of a plan. One round, ≤3 questions</td>
+              <td class="st"><span class="mark ok" role="img" aria-label="shipped">✓</span></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="col">
+        <h3 class="sec">Stretch goals</h3>
+        <table class="compact">
+          <thead><tr><th>Goal</th><th class="st"><span class="vh">Status</span></th><th>Note</th></tr></thead>
+          <tbody>
+            <tr>
+              <td class="k">Live conversation mid-execution</td>
+              <td class="st"><span class="mark ok" role="img" aria-label="shipped">✓</span></td>
+              <td>Press <code>i</code> — run pauses between steps, orchestrator replans what is left</td>
+            </tr>
+            <tr>
+              <td class="k">Multi-turn refinement after output</td>
+              <td class="st"><span class="mark no" role="img" aria-label="not shipped">✗</span></td>
+              <td>Timeboxed and cut. Filed as <code>#13</code></td>
+            </tr>
+          </tbody>
+        </table>
+
+        <div class="panel accent">
+          <h4>Bottom line</h4>
+          <p class="tight">All five core requirements, every expectation including the high-marks one,
+          and one of two stretch goals. <strong>651 tests, offline.</strong></p>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</section>
+
+<!-- ==================================================================== 2 -->
+<section class="slide" id="s2" hidden aria-roledescription="slide" aria-labelledby="h2t">
+  <header class="slide-head">
+    <p class="kicker">Architecture</p>
+    <h2 id="h2t">Architecture, and why this shape</h2>
+  </header>
+  <div class="slide-body">
+
+    <figure class="diagram">
+      <svg class="dg" viewBox="0 0 1240 1200" role="img" aria-labelledby="d1t d1d">
+        <title id="d1t">High-level architecture of orchestra-py</title>
+        <desc id="d1d">A user request enters a planner, which either asks the user a clarifying
+          question or emits a validated DAG. The execution engine dispatches three specialized
+          workers — data retrieval, analytics and visualization — under one task group. Each worker
+          writes a blob to the artifact store and returns a pointer. Only pointers reach the typed
+          ledger, which feeds an event broker and finally the aggregator, which drops any figure whose
+          source pointer this run did not mint.</desc>
+
+        <defs>
+          <marker id="d1arw" viewBox="0 0 10 10" refX="9.5" refY="5"
+                  markerWidth="11" markerHeight="11" markerUnits="userSpaceOnUse" orient="auto">
+            <path class="arw" d="M0,0 L10,5 L0,10 Z"/>
+          </marker>
+          <marker id="d1arw2" viewBox="0 0 10 10" refX="9.5" refY="5"
+                  markerWidth="11" markerHeight="11" markerUnits="userSpaceOnUse" orient="auto">
+            <path class="arw-2" d="M0,0 L10,5 L0,10 Z"/>
+          </marker>
+        </defs>
+
+        <!-- request -->
+        <rect class="bx-2" x="380" y="12" width="320" height="36" rx="18"/>
+        <text class="t" x="540" y="35" text-anchor="middle">user request (plain language)</text>
+        <path class="ln" d="M540,48 V66" marker-end="url(#d1arw)"/>
+
+        <!-- planner -->
+        <rect class="bx" x="360" y="70" width="360" height="80" rx="6"/>
+        <text class="th" x="540" y="96"  text-anchor="middle">Planner (orchestrator)</text>
+        <text class="tm" x="540" y="120" text-anchor="middle">action: plan | clarify</text>
+        <text class="tl" x="540" y="140" text-anchor="middle">one provider call</text>
+
+        <!-- provider port callout -->
+        <rect class="bx-dash" x="790" y="88" width="440" height="142" rx="7"/>
+        <text class="th tacc" x="1010" y="118" text-anchor="middle">the provider port</text>
+        <text class="t"  x="1010" y="146" text-anchor="middle">one Protocol — every model call</text>
+        <text class="tm" x="1010" y="170" text-anchor="middle">Anthropic  ⇄  FakeProvider</text>
+        <text class="t"  x="1010" y="196" text-anchor="middle">no patching, so 651 tests run offline</text>
+        <path class="ln-2" d="M786,120 H726"/>
+
+        <!-- clarify branch -->
+        <path class="ln" d="M420,150 V170 H180 V184" marker-end="url(#d1arw)"/>
+        <text class="tl" x="300" y="164" text-anchor="middle">action=clarify</text>
+        <rect class="bx" x="60" y="186" width="240" height="76" rx="6"/>
+        <text class="tb" x="180" y="210" text-anchor="middle">ask the user (stderr)</text>
+        <text class="t"  x="180" y="232" text-anchor="middle">≤1 round, ≤3 questions</text>
+        <text class="tm" x="180" y="252" text-anchor="middle">→ state.clarifications</text>
+        <path class="ln" d="M180,262 V292 H652" marker-end="url(#d1arw)"/>
+
+        <!-- plan branch -->
+        <path class="ln" d="M660,150 V296" marker-end="url(#d1arw)"/>
+        <text class="tl" x="672" y="190" text-anchor="start">action=plan</text>
+
+        <rect class="bx" x="360" y="300" width="360" height="72" rx="6"/>
+        <text class="th" x="540" y="326" text-anchor="middle">Plan — DAG of Subtask</text>
+        <text class="tm" x="540" y="348" text-anchor="middle">id · role · instruction</text>
+        <text class="tm" x="540" y="366" text-anchor="middle">inputs[] · depends_on[]</text>
+        <path class="ln" d="M540,372 V392" marker-end="url(#d1arw)"/>
+
+        <!-- engine -->
+        <rect class="bx-2" x="120" y="396" width="840" height="104" rx="7"/>
+        <text class="th" x="540" y="422" text-anchor="middle">Execution engine</text>
+        <text class="t"  x="540" y="446" text-anchor="middle">ready set → Semaphore(4) → one asyncio.TaskGroup</text>
+        <text class="t"  x="540" y="466" text-anchor="middle">completion-driven rescan, not wave-by-wave</text>
+        <text class="t"  x="540" y="488" text-anchor="middle">step cap 15 · 3 attempts / subtask</text>
+
+        <!-- interrupt -->
+        <rect class="bx" x="1000" y="408" width="230" height="94" rx="6"/>
+        <text class="tb" x="1115" y="432" text-anchor="middle">Interrupt handler</text>
+        <text class="t"  x="1115" y="454" text-anchor="middle">press i between steps</text>
+        <text class="tm" x="1115" y="476" text-anchor="middle">replan · restart_step</text>
+        <text class="tm" x="1115" y="496" text-anchor="middle">clarify · continue</text>
+        <path class="ln" d="M996,450 H966" marker-end="url(#d1arw)"/>
+
+        <!-- dispatch to workers -->
+        <path class="ln" d="M250,500 V526" marker-end="url(#d1arw)"/>
+        <path class="ln" d="M540,500 V526" marker-end="url(#d1arw)"/>
+        <path class="ln" d="M830,500 V526" marker-end="url(#d1arw)"/>
+
+        <!-- worker 1: data retrieval -->
+        <g class="ra">
+          <rect class="role-a-box" x="120" y="530" width="260" height="130" rx="6"/>
+          <path class="role-a" d="M120,536 a6,6 0 0 1 6,-6 h248 a6,6 0 0 1 6,6 v26 h-260 Z"/>
+          <text class="role-a-txt" x="250" y="552" text-anchor="middle">data retrieval</text>
+          <text class="tm" x="250" y="588" text-anchor="middle">fetch_data · search</text>
+          <text class="t"  x="250" y="612" text-anchor="middle">tool loop</text>
+          <text class="t"  x="250" y="636" text-anchor="middle">6 turns / 60k tokens</text>
+        </g>
+        <!-- worker 2: analytics -->
+        <g class="rb">
+          <rect class="role-b-box" x="410" y="530" width="260" height="130" rx="6"/>
+          <path class="role-b" d="M410,536 a6,6 0 0 1 6,-6 h248 a6,6 0 0 1 6,6 v26 h-260 Z"/>
+          <text class="role-b-txt" x="540" y="552" text-anchor="middle">analytics</text>
+          <text class="tm" x="540" y="588" text-anchor="middle">run_python</text>
+          <text class="t"  x="540" y="612" text-anchor="middle">subprocess · 15 s clock</text>
+          <text class="t"  x="540" y="636" text-anchor="middle">scrubbed env, no net</text>
+        </g>
+        <!-- worker 3: visualization -->
+        <g class="rc">
+          <rect class="role-c-box" x="700" y="530" width="260" height="130" rx="6"/>
+          <path class="role-c" d="M700,536 a6,6 0 0 1 6,-6 h248 a6,6 0 0 1 6,6 v26 h-260 Z"/>
+          <text class="role-c-txt" x="830" y="552" text-anchor="middle">visualization</text>
+          <text class="t"  x="830" y="588" text-anchor="middle">no tools — one</text>
+          <text class="t"  x="830" y="612" text-anchor="middle">structured call</text>
+          <text class="t"  x="830" y="636" text-anchor="middle">Plotly HTML + ASCII</text>
+        </g>
+
+        <!-- converge: pointers out -->
+        <path class="ln" d="M250,660 V686"/>
+        <path class="ln" d="M540,660 V686"/>
+        <path class="ln" d="M830,660 V686"/>
+        <path class="ln" d="M250,686 H830"/>
+        <path class="ln" d="M540,686 V726" marker-end="url(#d1arw)"/>
+        <text class="tl" x="556" y="704" text-anchor="start">writes blob to disk,</text>
+        <text class="tm tl" x="556" y="722" text-anchor="start">returns artifact:&lt;name&gt;</text>
+
+        <!-- artifact store -->
+        <rect class="bx" x="340" y="730" width="400" height="74" rx="6"/>
+        <text class="tb" x="540" y="754" text-anchor="middle">ArtifactStore</text>
+        <text class="tm" x="540" y="776" text-anchor="middle">~/.orchestra/artifacts/&lt;run&gt;/</text>
+        <text class="t"  x="540" y="796" text-anchor="middle">one dir per run · .json · .csv · .html</text>
+        <path class="ln" d="M540,804 V830" marker-end="url(#d1arw)"/>
+        <text class="tlb" x="556" y="822" text-anchor="start">pointers only</text>
+
+        <!-- ledger -->
+        <rect class="bx-2" x="280" y="834" width="520" height="96" rx="6"/>
+        <text class="th" x="540" y="858" text-anchor="middle">TaskState — the typed ledger</text>
+        <text class="tm" x="540" y="880" text-anchor="middle">plan · artifacts{id → pointer}</text>
+        <text class="tm" x="540" y="900" text-anchor="middle">events[] · clarifications[]</text>
+        <text class="tm" x="540" y="920" text-anchor="middle">current_step · failure_reason</text>
+
+        <!-- broker -->
+        <rect class="bx" x="860" y="850" width="300" height="64" rx="6"/>
+        <text class="tb" x="1010" y="876" text-anchor="middle">Broker — pub/sub</text>
+        <text class="t"  x="1010" y="900" text-anchor="middle">→ Rich dashboard (stderr)</text>
+        <path class="ln" d="M804,880 H856" marker-end="url(#d1arw)"/>
+        <text class="tl" x="830" y="870" text-anchor="middle">events</text>
+
+        <path class="ln" d="M540,930 V956" marker-end="url(#d1arw)"/>
+
+        <!-- aggregator: the guard -->
+        <rect class="bx-guard" x="300" y="960" width="520" height="86" rx="7"/>
+        <text class="th" x="560" y="988"  text-anchor="middle">Aggregator → FinalReport</text>
+        <text class="t"  x="560" y="1012" text-anchor="middle">drops any figure whose source pointer</text>
+        <text class="t"  x="560" y="1034" text-anchor="middle">this run did not mint</text>
+        <path class="ln" d="M540,1046 V1072" marker-end="url(#d1arw)"/>
+
+        <rect class="bx-2" x="400" y="1076" width="280" height="36" rx="18"/>
+        <text class="t" x="540" y="1099" text-anchor="middle">stdout — text | json</text>
+
+        <!-- layer rule footer band -->
+        <rect class="bx-band" x="40" y="1122" width="1160" height="60" rx="6"/>
+        <text class="tm" x="620" y="1148" text-anchor="middle">cli/ → app.py → agents/ → { core/, tools/, providers/ }</text>
+        <text class="tl" x="620" y="1170" text-anchor="middle">core/ imports nothing upward and no vendor SDK · app.py is the single composition root</text>
+      </svg>
+      <figcaption><b>Diagram 1.</b> One orchestrator, three specialized workers, and a typed ledger
+      that only ever holds pointers — which is what makes every figure in the report citable.</figcaption>
+    </figure>
+
+    <div class="cols">
+      <div class="col">
+        <h3 class="sec">Pattern choice</h3>
+        <p class="tight note">Four patterns evaluated. This is
+          <strong>A — centralized orchestrator over a typed shared ledger.</strong></p>
+        <table class="compact">
+          <thead><tr><th>Rejected</th><th>Why not</th></tr></thead>
+          <tbody>
+            <tr><td class="k"><strong>B</strong> — peer-to-peer handoffs</td>
+                <td>A→B→A loops are easy to write, hard to detect. No natural place to draw top-level progress</td></tr>
+            <tr><td class="k"><strong>C</strong> — blackboard</td>
+                <td>Needs Redis or a database. Non-deterministic ordering. Infrastructure for a problem we don’t have</td></tr>
+            <tr><td class="k"><strong>D</strong> — hierarchical sub-teams</td>
+                <td>Prompt-chaining latency for three roles</td></tr>
+          </tbody>
+        </table>
+        <dl class="deflist">
+          <dt>Why A</dt>
+          <dd>One place to enforce the retry cap, the step budget, the clarification round and the
+              figure-sourcing rule.</dd>
+          <dt>What it costs</dt>
+          <dd>The planner is a single point of failure. One bad plan, one bad run. No peer correction —
+              the only recovery is a human pressing <code>i</code>.</dd>
+        </dl>
+      </div>
+
+      <div class="col">
+        <h3 class="sec">Three decisions that carry the design</h3>
+        <table class="compact">
+          <thead><tr><th>Decision</th><th>Reason</th></tr></thead>
+          <tbody>
+            <tr>
+              <td class="k"><strong>Ledger is typed, not a dict</strong></td>
+              <td>It sits on three trust boundaries: model output flows in, it is serialised into
+                  prompts, the CLI reads it for the exit code. <code>Plan</code> runs Kahn’s algorithm
+                  in a validator — a cycle the model invented is rejected at construction, not found
+                  later as a deadlock</td>
+            </tr>
+            <tr>
+              <td class="k"><strong>Artifacts are pointers, never blobs</strong></td>
+              <td>State is serialised into a prompt every step; an inlined payload is billed on every
+                  later call. And the pointer doubles as the citation</td>
+            </tr>
+            <tr>
+              <td class="k"><strong>The provider is a port</strong></td>
+              <td>One <code>Protocol</code>. The whole app runs against <code>FakeProvider</code> with
+                  no patching — which is why 651 tests cross the real CLI boundary offline</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h3 class="sec">The guard that makes the output trustworthy</h3>
+        <p class="tight note"><code>state.backed_figures()</code> keeps only figures whose source is an
+          artifact <strong>this run produced.</strong> Anything else is dropped before the report is
+          written.</p>
+        <blockquote class="pull">
+          <p>A figure citing an artifact nobody wrote is invention, whichever agent states it.</p>
+        </blockquote>
+        <p class="tight small">Layer rule, enforced at commit time:
+          <code>cli/ → app.py → agents/ → {core/, tools/, providers/}</code>.
+          <code>core/</code> imports nothing upward and no vendor SDK.</p>
+      </div>
+    </div>
+
+  </div>
+</section>
+
+<!-- ==================================================================== 3 -->
+<section class="slide" id="s3" hidden aria-roledescription="slide" aria-labelledby="h3t">
+  <header class="slide-head">
+    <p class="kicker">Execution</p>
+    <h2 id="h3t">One prompt, end to end</h2>
+  </header>
+  <div class="slide-body">
+
+    <pre><code>uv run orchestra run "Summarize the last 3 quarters financial trends and create a chart"</code></pre>
+
+    <figure class="diagram">
+      <svg class="dg" viewBox="0 0 1250 1250" role="img" aria-labelledby="d2t d2d">
+        <title id="d2t">End-to-end flow for one prompt</title>
+        <desc id="d2d">Flow chart. Config load and API-key check gate the run, then the data directory
+          is catalogued into a roster and one planner call runs. A decision splits clarify from plan;
+          the clarify path checks whether stdin is a TTY, asks at most three questions on stderr, and
+          re-asks the planner once — piped input never hangs. The plan is validated, then a
+          completion-driven engine loop dispatches subtasks under a semaphore of four, showing two
+          concurrent data-retrieval subtasks, retries capped at three attempts, and a step cap of
+          fifteen. On exit, the aggregator’s report passes through a provenance filter that drops any
+          key figure whose source is not a pointer this run minted, before rendering and the exit
+          code.</desc>
+
+        <defs>
+          <marker id="d2arw" viewBox="0 0 10 10" refX="9.5" refY="5"
+                  markerWidth="11" markerHeight="11" markerUnits="userSpaceOnUse" orient="auto">
+            <path class="arw" d="M0,0 L10,5 L0,10 Z"/>
+          </marker>
+          <marker id="d2arwa" viewBox="0 0 10 10" refX="9.5" refY="5"
+                  markerWidth="12" markerHeight="12" markerUnits="userSpaceOnUse" orient="auto">
+            <path class="arw-a" d="M0,0 L10,5 L0,10 Z"/>
+          </marker>
+          <marker id="d2arw2" viewBox="0 0 10 10" refX="9.5" refY="5"
+                  markerWidth="11" markerHeight="11" markerUnits="userSpaceOnUse" orient="auto">
+            <path class="arw-2" d="M0,0 L10,5 L0,10 Z"/>
+          </marker>
+        </defs>
+
+        <!-- ============ band 1: intake, left to right ============ -->
+        <rect class="bx-2" x="20" y="110" width="230" height="64" rx="10"/>
+        <text class="tb" x="135" y="136" text-anchor="middle">START</text>
+        <text class="tm" x="135" y="160" text-anchor="middle">orchestra run "&lt;prompt&gt;"</text>
+        <path class="ln" d="M250,142 H284" marker-end="url(#d2arw)"/>
+
+        <rect class="bx" x="290" y="108" width="230" height="68" rx="6"/>
+        <text class="tb" x="405" y="134" text-anchor="middle">Load config</text>
+        <text class="tm" x="405" y="158" text-anchor="middle">validate ANTHROPIC_API_KEY</text>
+        <path class="ln" d="M520,142 H554" marker-end="url(#d2arw)"/>
+
+        <!-- decision 1 -->
+        <path class="dia" d="M554,142 L650,96 L746,142 L650,188 Z"/>
+        <text class="t" x="650" y="147" text-anchor="middle">API key missing?</text>
+        <path class="ln" d="M650,96 V76" marker-end="url(#d2arw)"/>
+        <text class="tl" x="660" y="90" text-anchor="start">yes</text>
+        <rect class="bx-bad" x="560" y="10" width="190" height="64" rx="6"/>
+        <text class="tb tbad" x="655" y="34" text-anchor="middle">exit 3</text>
+        <text class="tl" x="655" y="54" text-anchor="middle">names the variable</text>
+        <text class="tl" x="655" y="70" text-anchor="middle">and the fix</text>
+        <path class="ln" d="M746,142 H780" marker-end="url(#d2arw)"/>
+        <text class="tl" x="763" y="134" text-anchor="middle">no</text>
+
+        <rect class="bx" x="786" y="96" width="244" height="92" rx="6"/>
+        <text class="tb" x="908" y="122" text-anchor="middle">Catalogue data/</text>
+        <text class="t"  x="908" y="146" text-anchor="middle">headers · JSON keys · first line</text>
+        <text class="t"  x="908" y="168" text-anchor="middle">→ roster of obtainable data</text>
+        <path class="ln" d="M1030,142 H1062" marker-end="url(#d2arw)"/>
+
+        <rect class="bx" x="1066" y="108" width="174" height="68" rx="6"/>
+        <text class="tb" x="1153" y="134" text-anchor="middle">Planner call</text>
+        <text class="t"  x="1153" y="158" text-anchor="middle">request + roster</text>
+        <path class="ln" d="M1153,176 V218" marker-end="url(#d2arw)"/>
+
+        <!-- ============ band 2: clarification, the first guarded exit ============ -->
+        <path class="dia-g" d="M1069,266 L1153,222 L1237,266 L1153,310 Z"/>
+        <text class="tb" x="1153" y="271" text-anchor="middle">action?</text>
+
+        <path class="ln" d="M1069,266 H950 V306" marker-end="url(#d2arw)"/>
+        <text class="tlb" x="1004" y="258" text-anchor="middle">clarify</text>
+
+        <path class="dia-g" d="M854,356 L950,310 L1046,356 L950,402 Z"/>
+        <text class="t" x="950" y="361" text-anchor="middle">stdin a TTY?</text>
+
+        <path class="ln" d="M854,356 H706" marker-end="url(#d2arw)"/>
+        <text class="tl" x="780" y="348" text-anchor="middle">yes</text>
+
+        <rect class="bx" x="430" y="310" width="272" height="94" rx="6"/>
+        <text class="tb" x="566" y="334" text-anchor="middle">Ask ≤3 questions on stderr</text>
+        <text class="tm" x="566" y="358" text-anchor="middle">answer → state.clarifications</text>
+        <text class="tl" x="566" y="380" text-anchor="middle">≤1 round — the ledger makes</text>
+        <text class="tl" x="566" y="398" text-anchor="middle">a second round unreachable</text>
+
+        <path class="ln" d="M950,402 V424" marker-end="url(#d2arw)"/>
+        <text class="tl" x="960" y="418" text-anchor="start">no</text>
+        <rect class="bx" x="790" y="428" width="320" height="94" rx="6"/>
+        <text class="tb" x="950" y="452" text-anchor="middle">piped / CI — no prompt</text>
+        <text class="tl" x="950" y="474" text-anchor="middle">the reply is rejected back to the</text>
+        <text class="tl" x="950" y="492" text-anchor="middle">model, which plans against the</text>
+        <text class="tl" x="950" y="510" text-anchor="middle">most reasonable reading. Never hangs</text>
+
+        <!-- shared re-ask rail back to the planner -->
+        <path class="ln" d="M430,356 H410"/>
+        <path class="ln" d="M790,470 H410"/>
+        <path class="ln" d="M410,470 V196 H1100 V176" marker-end="url(#d2arw)"/>
+        <text class="tlb" x="700" y="213" text-anchor="middle">re-ask the planner — at most one round</text>
+
+        <!-- plan exit into the engine loop -->
+        <path class="ln" d="M1153,310 V545 H216 V614" marker-end="url(#d2arw)"/>
+        <text class="tlb" x="1163" y="340" text-anchor="start">plan</text>
+
+        <!-- ============ event rail ============ -->
+        <path class="ln-2" d="M48,580 V960"/>
+        <path class="ln-2" d="M48,650 H66"/>
+        <path class="ln-2" d="M48,790 H66"/>
+        <path class="ln-2" d="M48,900 H66"/>
+        <text class="tl" x="40" y="770" text-anchor="middle" transform="rotate(-90 40 770)">every transition → TaskEvent → Broker → stderr dashboard</text>
+
+        <!-- ============ band 3: engine loop ============ -->
+        <rect class="bx-dash" x="70" y="566" width="1130" height="414" rx="9"/>
+        <text class="tb tacc" x="84" y="590" text-anchor="start">Engine loop — completion-driven rescan, not wave-by-wave</text>
+
+        <rect class="bx" x="100" y="618" width="230" height="62" rx="6"/>
+        <text class="tb" x="215" y="644" text-anchor="middle">ready set</text>
+        <text class="tm" x="215" y="666" text-anchor="middle">depends_on all done</text>
+        <path class="ln" d="M330,650 H362" marker-end="url(#d2arw)"/>
+
+        <!-- interrupt decision -->
+        <path class="dia" d="M366,650 L462,606 L558,650 L462,694 Z"/>
+        <text class="t" x="462" y="655" text-anchor="middle">interrupt (i)?</text>
+        <path class="ln" d="M462,694 V718" marker-end="url(#d2arw)"/>
+        <text class="tl" x="472" y="712" text-anchor="start">yes</text>
+        <rect class="bx" x="350" y="722" width="230" height="76" rx="6"/>
+        <text class="tl" x="465" y="744" text-anchor="middle">settle in-flight, then</text>
+        <text class="tm" x="465" y="766" text-anchor="middle">replan · restart_step</text>
+        <text class="tm" x="465" y="788" text-anchor="middle">clarify · continue</text>
+        <path class="ln" d="M350,760 H180 V684" marker-end="url(#d2arw)"/>
+
+        <path class="ln" d="M558,650 H594" marker-end="url(#d2arw)"/>
+        <text class="tl" x="576" y="642" text-anchor="middle">no</text>
+
+        <rect class="bx" x="598" y="618" width="240" height="62" rx="6"/>
+        <text class="tb" x="718" y="644" text-anchor="middle">acquire Semaphore(4)</text>
+        <text class="tm" x="718" y="666" text-anchor="middle">dispatch → subtask_started</text>
+
+        <!-- fan-out: two data_retrieval subtasks, no edge between them -->
+        <path class="ln" d="M838,650 H866"/>
+        <path class="ln" d="M866,650 V626 H890" marker-end="url(#d2arw)"/>
+        <path class="ln" d="M866,650 V732 H890" marker-end="url(#d2arw)"/>
+
+        <g class="ra">
+          <rect class="role-a-box" x="896" y="592" width="264" height="74" rx="6"/>
+          <text class="role-a-txt" x="1028" y="614" text-anchor="middle">data_retrieval #1</text>
+          <text class="t"  x="1028" y="636" text-anchor="middle">tool loop · 6 turns / 60k tokens</text>
+          <text class="tl" x="1028" y="656" text-anchor="middle">repetition: window 10, trip 5</text>
+        </g>
+        <g class="ra">
+          <rect class="role-a-box" x="896" y="696" width="264" height="74" rx="6"/>
+          <text class="role-a-txt" x="1028" y="718" text-anchor="middle">data_retrieval #2</text>
+          <text class="t"  x="1028" y="740" text-anchor="middle">no edge between them —</text>
+          <text class="tl" x="1028" y="760" text-anchor="middle">runs concurrently</text>
+        </g>
+
+        <path class="ln" d="M1160,626 H1186 V865 H1176" marker-end="url(#d2arw)"/>
+        <path class="ln" d="M1160,732 H1186"/>
+
+        <rect class="bx" x="900" y="830" width="272" height="70" rx="6"/>
+        <text class="tm" x="1036" y="857" text-anchor="middle">artifacts[subtask_id] = pointer</text>
+        <text class="tm" x="1036" y="881" text-anchor="middle">emit subtask_completed</text>
+        <path class="ln" d="M900,865 H866" marker-end="url(#d2arw)"/>
+
+        <!-- failed? -->
+        <path class="dia" d="M678,865 L770,821 L862,865 L770,909 Z"/>
+        <text class="t" x="770" y="870" text-anchor="middle">failed?</text>
+        <path class="ln" d="M770,821 V800" marker-end="url(#d2arw)"/>
+        <text class="tl" x="780" y="814" text-anchor="start">yes</text>
+        <rect class="bx" x="598" y="722" width="232" height="76" rx="6"/>
+        <text class="tb" x="714" y="744" text-anchor="middle">attempts &lt; 3 &amp; retryable?</text>
+        <text class="tl" x="714" y="766" text-anchor="middle">→ retry, else FAILED</text>
+        <text class="tl" x="714" y="786" text-anchor="middle">dependents never ready</text>
+        <path class="ln" d="M660,722 V684" marker-end="url(#d2arw)"/>
+        <text class="tl" x="668" y="708" text-anchor="start">re-dispatch</text>
+
+        <path class="ln" d="M678,865 H644" marker-end="url(#d2arw)"/>
+        <text class="tl" x="661" y="857" text-anchor="middle">no</text>
+
+        <!-- step cap -->
+        <path class="dia" d="M450,865 L546,821 L642,865 L546,909 Z"/>
+        <text class="t" x="546" y="870" text-anchor="middle">step cap 15 hit?</text>
+        <path class="ln" d="M450,865 H414" marker-end="url(#d2arw)"/>
+        <text class="tl" x="432" y="857" text-anchor="middle">no</text>
+
+        <!-- any left? -->
+        <path class="dia" d="M196,865 L300,821 L404,865 L300,909 Z"/>
+        <text class="t" x="300" y="870" text-anchor="middle">any subtask left?</text>
+        <path class="ln" d="M300,821 V706 H250 V684" marker-end="url(#d2arw)"/>
+        <text class="tl" x="196" y="730" text-anchor="start">yes — rescan</text>
+
+        <text class="tl ti" x="1190" y="950" text-anchor="end">second subtask_started lands before either subtask_completed</text>
+
+        <!-- exits from the loop -->
+        <path class="ln" d="M546,909 V1020 H306" marker-end="url(#d2arw)"/>
+        <text class="tl" x="556" y="938" text-anchor="start">yes — end the run, partial report</text>
+        <path class="ln" d="M300,909 V1064" marker-end="url(#d2arw)"/>
+        <text class="tl" x="310" y="1000" text-anchor="start">no</text>
+
+        <!-- ============ band 4: aggregate, the second guarded exit, out ============ -->
+        <rect class="bx" x="150" y="1068" width="300" height="94" rx="6"/>
+        <text class="tb" x="300" y="1092" text-anchor="middle">Aggregator</text>
+        <text class="t"  x="300" y="1114" text-anchor="middle">reads the finished artifacts →</text>
+        <text class="tm" x="300" y="1136" text-anchor="middle">FinalReport(executive_summary,</text>
+        <text class="tm" x="300" y="1155" text-anchor="middle">key_figures[], chart, chart_ascii)</text>
+        <path class="ln" d="M450,1114 H484" marker-end="url(#d2arwa)"/>
+
+        <rect class="bx-guard" x="490" y="1054" width="410" height="122" rx="8"/>
+        <text class="th tacc" x="695" y="1084" text-anchor="middle">Provenance filter</text>
+        <text class="t" x="695" y="1110" text-anchor="middle">every KeyFigure.source must be a pointer</text>
+        <text class="t" x="695" y="1132" text-anchor="middle">this run minted — anything else is dropped</text>
+        <text class="t" x="695" y="1154" text-anchor="middle">before the report is written</text>
+        <path class="ln" d="M900,1114 H934" marker-end="url(#d2arwa)"/>
+
+        <rect class="bx" x="940" y="1076" width="240" height="78" rx="6"/>
+        <text class="tb" x="1060" y="1100" text-anchor="middle">Render</text>
+        <text class="t"  x="1060" y="1122" text-anchor="middle">text (Rich panel) | json</text>
+        <text class="tm" x="1060" y="1144" text-anchor="middle">cli/format.py</text>
+        <path class="ln" d="M1060,1154 V1182" marker-end="url(#d2arw)"/>
+
+        <rect class="bx-2" x="700" y="1186" width="530" height="40" rx="20"/>
+        <text class="tm" x="965" y="1211" text-anchor="middle">exit 0 success · 4 provider · 5 task failure · 130 SIGINT</text>
+      </svg>
+      <figcaption><b>Diagram 2.</b> Two guarded exits bracket the run — the clarification round on the
+      way in, the provenance filter on the way out; everything between them is bounded and
+      restartable.</figcaption>
+    </figure>
+
+    <div class="cols">
+      <div class="col">
+        <h3 class="sec">Walkthrough</h3>
+        <table class="compact">
+          <thead><tr><th>Step</th><th>What happens</th></tr></thead>
+          <tbody>
+            <tr><td class="k"><strong>1. Catalogue</strong></td>
+                <td><code>data/</code> is probed at startup — headers, JSON keys, first line of text.
+                    Produces the roster of what the team can actually obtain</td></tr>
+            <tr><td class="k"><strong>2. Plan</strong></td>
+                <td>One call. Request + roster in. Out comes either a DAG or a clarifying question</td></tr>
+            <tr><td class="k"><strong>3. Ambiguity</strong></td>
+                <td>“Make a chart of performance” names no measure → <code>clarify</code>, offering only
+                    measures a file holds. One round, enforced by the ledger, not a counter. Piped stdin
+                    gets no prompt — it plans against the most reasonable reading rather than hanging</td></tr>
+            <tr><td class="k"><strong>4. Execute</strong></td>
+                <td>Ready set → semaphore(4) → one <code>TaskGroup</code>. Completion-driven: the
+                    scheduler rescans on every completion, so no step waits for its level’s slowest</td></tr>
+            <tr><td class="k"><strong>5. Work</strong></td>
+                <td>Each worker gets its subtask, its declared inputs as pointers, and nothing else. It
+                    writes its payload to disk and returns <code>artifact:&lt;name&gt;</code></td></tr>
+            <tr><td class="k"><strong>6. Aggregate</strong></td>
+                <td>Report synthesised from artifact previews. Unsourced figures dropped</td></tr>
+            <tr><td class="k"><strong>7. Out</strong></td>
+                <td>Report on <strong>stdout</strong>; dashboard on <strong>stderr</strong>, so the
+                    output stays pipeable. Exit code says what happened</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="col">
+        <h3 class="sec">The plan shape follows the request</h3>
+        <table class="compact">
+          <thead><tr><th>Prompt</th><th>Plan</th></tr></thead>
+          <tbody>
+            <tr><td class="k">“…trends and create a chart”</td>
+                <td>3 steps, sequential</td></tr>
+            <tr><td class="k">“…against industry benchmarks and chart the trend”</td>
+                <td>4–5 steps, <strong>two retrievals with no edge between them</strong> — they run
+                    concurrently</td></tr>
+            <tr><td class="k">“Summarize the revenue trend in one paragraph”</td>
+                <td>2 steps, <strong>no chart</strong> — nothing asked for one</td></tr>
+            <tr><td class="k">“Make a chart of performance”</td>
+                <td><strong>No plan.</strong> It asks first</td></tr>
+          </tbody>
+        </table>
+        <p class="tight note">Asserted offline on plan shape, and live against the real model. The
+          fan-out overlap is asserted on the event stream: the second <code>subtask_started</code>
+          lands before either <code>subtask_completed</code>.</p>
+
+        <h3 class="sec">Bounds, all defaults</h3>
+        <ul class="bounds">
+          <li>6 turns</li>
+          <li>60,000 tokens per subtask</li>
+          <li>3 attempts per step</li>
+          <li>15 steps per run</li>
+          <li>4 concurrent</li>
+          <li>1 clarification round</li>
+          <li>repetition trips at 5 repeats in a window of 10</li>
+        </ul>
+      </div>
+    </div>
+
+  </div>
+</section>
+
+<!-- ==================================================================== 4 -->
+<section class="slide" id="s4" hidden aria-roledescription="slide" aria-labelledby="h4t">
+  <header class="slide-head">
+    <p class="kicker">Failure modes</p>
+    <h2 id="h4t">What breaks, and what it takes to fix</h2>
+    <p class="lede">Ordered by what I would fix first. All four filed issues, plus two found by the
+      live pass.</p>
+  </header>
+  <div class="slide-body">
+
+    <table class="compact">
+      <thead>
+        <tr><th class="k">ID</th><th>What’s wrong</th><th>Fix</th><th>Size</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="k"><strong>#36</strong></td>
+          <td>The three knobs an operator most needs — step cap, executor clock, provider timeout —
+              never reach <code>Config</code>. <code>build_orchestra</code> passes
+              <code>max_concurrency</code> and <code>subtask_attempts</code> and stops there</td>
+          <td>3 fields, 3 wires</td>
+          <td class="sz">One sitting</td>
+        </tr>
+        <tr>
+          <td class="k"><strong>D1</strong></td>
+          <td><strong>A figure can cite an artifact holding only some of its numbers.</strong> The
+              report stated <code>"$5.76M → $7.02M (+21.8%)"</code> sourced to the retrieval artifact.
+              The revenues are in it; the <code>+21.8%</code> was computed by the analytics step. The
+              guard checks the pointer names a run artifact — not that the artifact contains the
+              number</td>
+          <td>Verify the value appears in the cited payload, or require a compound figure to cite the
+              downstream artifact</td>
+          <td class="sz">Small</td>
+        </tr>
+        <tr>
+          <td class="k"><strong>#40</strong></td>
+          <td>Tool output is stored and re-sent whole every turn. Only <code>run_python</code> is
+              capped. <code>search</code> snippets have no cap at all</td>
+          <td>Cap in the tool loop; elide stale results past N turns</td>
+          <td class="sz">Small, real behavioural risk</td>
+        </tr>
+        <tr>
+          <td class="k"><strong>#33</strong></td>
+          <td>Visualization drops interior categories — a three-quarter request charted Q2 and Q4,
+              title still claiming Q2–Q4. Root cause: the worker charts from an
+              <strong>800-char preview</strong> and re-types every value as model output</td>
+          <td>Feed it the artifact whole; assert value count equals category count before rendering</td>
+          <td class="sz">Moderate</td>
+        </tr>
+        <tr>
+          <td class="k"><strong>#31</strong></td>
+          <td>On a non-UTF-8 stdout the ASCII chart’s <code>█</code> raises
+              <code>UnicodeEncodeError</code> — the finished report is discarded, exit 1</td>
+          <td>Pick the glyph from <code>console.encoding</code>; encode with
+              <code>errors="replace"</code></td>
+          <td class="sz">Small</td>
+        </tr>
+        <tr>
+          <td class="k"><strong>O1</strong></td>
+          <td><code>FORCE_COLOR</code> makes a redirected stdout look like a terminal, so a pipe gets a
+              framed report</td>
+          <td>Gate framing on <code>isatty()</code>, not Rich’s detection</td>
+          <td class="sz">One line</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <blockquote class="pull">
+      <p><strong>D1 is the one that matters.</strong> It is the claim the README leads with, and only
+      the live pass caught it — the offline suite was always going to be green.</p>
+    </blockquote>
+
+    <div class="cols">
+      <div class="col">
+        <h3 class="sec">Which points at the real gap</h3>
+        <p class="tight note">Three things get called “testing”. Two are covered.</p>
+        <table class="compact">
+          <thead><tr><th>Question</th><th>Covered by</th><th class="st"><span class="vh">Status</span></th></tr></thead>
+          <tbody>
+            <tr>
+              <td class="k"><strong>Does it run?</strong></td>
+              <td>651 offline tests — plan shapes, retries, budgets, exit codes, terminal restore</td>
+              <td class="st"><span class="mark ok" role="img" aria-label="covered">✓</span></td>
+            </tr>
+            <tr>
+              <td class="k"><strong>Is it traceable?</strong></td>
+              <td>The pointer guard</td>
+              <td class="st"><span class="chip wa">D1</span></td>
+            </tr>
+            <tr>
+              <td class="k"><strong>Is it right?</strong></td>
+              <td>—</td>
+              <td class="st"><span class="mark no" role="img" aria-label="not covered">✗</span></td>
+            </tr>
+          </tbody>
+        </table>
+        <p class="tight note">The offline suite scripts a fake provider to produce a known answer, then
+          checks the plumbing carried it through. <strong>It cannot fail because a model reasoned badly
+          — no model reasoned.</strong></p>
+      </div>
+
+      <div class="col">
+        <h3 class="sec">The lightweight fix: grade the JSON, in tiers</h3>
+        <p class="tight note"><code>-o json</code> is already a published contract, so the system is
+          machine-gradeable today. A golden set of hand-derived question/answer pairs over the same
+          bundled corpus, run nightly:</p>
+        <table class="compact">
+          <thead><tr><th class="n">Tier</th><th>Asserts</th><th>Cost</th></tr></thead>
+          <tbody>
+            <tr><td class="n">1</td><td>The number, within tolerance</td><td class="sz">free</td></tr>
+            <tr><td class="n">2</td>
+                <td>It cites an artifact <strong>of the right role</strong> — this is the D1 regression
+                    test</td><td class="sz">free</td></tr>
+            <tr><td class="n">3</td>
+                <td>The chart contains every category its title claims —
+                    <strong>the assertion #33 needed</strong></td><td class="sz">free</td></tr>
+            <tr><td class="n">4</td>
+                <td>LLM judge, free text only — binary criteria against a reference answer, never a
+                    1–10 score</td><td class="sz">~1 call</td></tr>
+          </tbody>
+        </table>
+        <p class="tight note"><strong>For questions that reason over documents</strong>
+          (<code>project_timeline.md</code> is prose), grade on two binary measures, not wording:
+          <strong>key-fact recall</strong> — does it contain the milestone, the date, the figure — and a
+          <strong>contradiction check</strong>, which is fatal rather than deducted. Inventing a cause is
+          the exact failure the pointer guard exists to prevent; it must not be averaged away.</p>
+        <p class="tight note">Two archetypes worth building first: the <strong>unanswerable</strong>
+          question, where the correct answer is “the data does not say”, and the
+          <strong>distractor</strong> — “did the 2025 hiring wave drive the Q2 cost increase?” The wave
+          is real, dated <code>2025-07-22</code>, affecting Q3. The plausible answer is wrong on the
+          date. That one separates reading from pattern-matching.</p>
+        <p class="tight small">Non-determinism: run 3, pass on 2 — except provenance and contradiction,
+          which must hold every time.</p>
+      </div>
+    </div>
+
+  </div>
+</section>
+
+<!-- ==================================================================== 5 -->
+<section class="slide" id="s5" hidden aria-roledescription="slide" aria-labelledby="h5t">
+  <header class="slide-head">
+    <p class="kicker">Scale</p>
+    <h2 id="h5t">How it scales, and where it breaks first</h2>
+    <p class="lede"><code>data/</code> is 7 files and 28 kB. Every number here is derived from a
+      constant in the repo, not measured. That is itself a finding.</p>
+  </header>
+  <div class="slide-body">
+
+    <div class="cols">
+      <div class="col">
+        <h3 class="sec">The first thing that breaks is not the data volume</h3>
+        <p class="tight"><strong>It’s the catalogue. At 13 files.</strong></p>
+        <p class="tight note"><code>MAX_LISTED_DATASETS = 12</code>. The catalogue is composed into two
+          places — the retrieval tool’s description and the planner’s roster. Past 12 it emits
+          <em>“…and 3 more not listed here”</em>.</p>
+        <p class="tight note">The 13th file exists and would fetch fine. But its name appears in
+          <strong>no prompt</strong>, and the unknown-name error is capped identically, so the model
+          cannot discover it by failing either.</p>
+        <p class="tight note">The roster closes with the clause that stops the model inventing data:
+          <em>“nothing beyond those files and their own columns.”</em> At 13 files <strong>that clause
+          becomes actively wrong.</strong> It tells the planner that data we hold does not exist.</p>
+        <blockquote class="pull">
+          <p>The failure isn’t a stack trace. It’s a well-worded refusal to answer a question we had
+          the data for.</p>
+        </blockquote>
+        <div class="panel">
+          <h4>Fix <span class="chip ac">Moderate</span></h4>
+          <p class="tight">Search the catalogue instead of reciting it — <code>find_dataset(query)</code>.
+            One tool, one extra turn, and the anti-invention clause has to be re-derived from the search
+            result.</p>
+        </div>
+      </div>
+
+      <div class="col">
+        <h3 class="sec">Then, in order</h3>
+        <table class="compact">
+          <thead><tr><th>Trigger</th><th>Breaks</th><th>Why</th></tr></thead>
+          <tbody>
+            <tr><td class="k">~3 files near 16 kB in one subtask</td>
+                <td class="k">The token budget</td>
+                <td>Tool output re-sent whole each turn (#40). 16 kB ≈ 4k tokens; three resident across
+                    a 6-turn loop ≈ the whole 60k budget. The step fails and its results are lost</td></tr>
+            <tr><td class="k">~20–40 data points</td>
+                <td class="k">The chart</td>
+                <td>Charted from an 800-char preview; past that the model fills the gap (#33)</td></tr>
+            <tr><td class="k">2 runs in the same second</td>
+                <td class="k">The audit trail</td>
+                <td>Run directory is second-granular. Nothing is overwritten — the reports stay correct
+                    — but two runs’ artifacts mix</td></tr>
+            <tr><td class="k">~8–10 subtasks</td>
+                <td class="k">The step cap</td>
+                <td>15 counts <strong>every dispatch including retries</strong>, and it isn’t
+                    configurable (#36)</td></tr>
+            <tr><td class="k">Hundreds of MB</td>
+                <td class="k">The 15 s executor clock</td>
+                <td>Each file is copied twice before pandas reads it a third time</td></tr>
+            <tr><td class="k">~10 concurrent runs</td>
+                <td class="k">The box</td>
+                <td>One process per run, no shared token bucket, no cost meter</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <hr class="rule">
+
+    <div class="cols">
+      <div class="col">
+        <h3 class="sec">Three axes, three different failure characters</h3>
+        <table class="compact">
+          <thead><tr><th>Axis</th><th>Character</th></tr></thead>
+          <tbody>
+            <tr><td class="k"><strong>More / bigger files</strong></td>
+                <td><strong>Silent and semantic.</strong> The catalogue break is a confident refusal,
+                    not an error. <em>This is the axis that lies to you</em></td></tr>
+            <tr><td class="k"><strong>More concurrent runs</strong></td>
+                <td><strong>Operational and loud.</strong> No shared state to corrupt — because there
+                    is no shared state, which is also why there’s no backpressure and no resume</td></tr>
+            <tr><td class="k"><strong>Longer plans</strong></td>
+                <td><strong>Structural.</strong> Step 9 has no idea what step 2 concluded unless the
+                    planner drew an edge. In a 3-step plan that’s context hygiene. In a 12-step plan
+                    it’s amnesia. And the DAG is drawn in one call up front — no
+                    re-decomposition</td></tr>
+          </tbody>
+        </table>
+        <p class="tight note"><strong>What doesn’t break:</strong> the aggregator reads file heads, not
+          files — a 10 GB artifact costs what a 1 kB one does. The parts designed to be bounded are
+          bounded.</p>
+        <blockquote class="pull">
+          <p>Everything that breaks, breaks at a prompt boundary. That’s where the scaling debt was
+          put, on purpose.</p>
+        </blockquote>
+      </div>
+
+      <div class="col">
+        <h3 class="sec">The point of view</h3>
+        <dl class="deflist">
+          <dt>Good for</dt>
+          <dd>≤12 datasets, files in kB–MB, plans of 3–10 steps, one operator, and a hard requirement
+              that every number be traceable.</dd>
+          <dt>Would not use for</dt>
+          <dd>Answers that live in a warehouse; untrusted input — <code>run_python</code> is isolation,
+              not a sandbox; anything needing durable resume or run history.</dd>
+        </dl>
+
+        <h3 class="sec">At that N, keep three things and replace one</h3>
+        <table class="compact">
+          <thead><tr><th>Keep</th><th>Replace</th></tr></thead>
+          <tbody>
+            <tr>
+              <td>The validated DAG — porting the engine to a workflow runtime is a port, not a
+                  redesign</td>
+              <td><strong>Retrieval becomes a query, not a file.</strong> The model writes SQL with a
+                  <code>LIMIT</code>; the tool returns a bounded result set plus a pointer to the full
+                  one. Moves the ceiling three orders of magnitude and deletes two breakpoints
+                  outright</td>
+            </tr>
+            <tr>
+              <td>The pointer-and-citation model</td>
+              <td>The ledger becomes durable — one row per transition. Resume, replay and audit come
+                  with it</td>
+            </tr>
+            <tr>
+              <td>The provider port</td>
+              <td><code>run_python</code> becomes a container per call. The one place this design cannot
+                  be tuned into safety</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+  </div>
+</section>
+
+</div><!-- /deck -->
+
+<footer class="glossary" id="glossary" aria-labelledby="gloss-h">
+<div class="glossary-inner">
+
+  <h2 id="gloss-h">Glossary</h2>
+  <p class="gloss-lede">Every abbreviation used in this deck, and what it means here specifically.</p>
+
+  <h3>Abbreviations</h3>
+  <div class="gloss-grid">
+    <dl>
+      <div><dt>AI</dt><dd>Artificial intelligence.</dd></div>
+      <div><dt>API</dt><dd>Application programming interface. Here: the model endpoint the agents call, authorised by <code>ANTHROPIC_API_KEY</code>, and the optional search API.</dd></div>
+      <div><dt>ASCII</dt><dd>American Standard Code for Information Interchange — the 128-character text encoding. The <b>ASCII chart</b> is the bar chart drawn in plain text so it can appear inside the terminal report.</dd></div>
+      <div><dt>CI</dt><dd>Continuous integration — the automated build-and-test run on every change. A CI run has no human at the terminal, so it never gets a clarifying question.</dd></div>
+      <div><dt>CLI</dt><dd>Command-line interface. The <code>orchestra run …</code> terminal program, chosen over a web front end to spend the budget on orchestration.</dd></div>
+      <div><dt>DAG</dt><dd>Directed acyclic graph. The plan: subtasks as nodes, dependencies as edges, and no cycles — so a valid execution order always exists. A cycle the model invents is rejected when the plan is constructed.</dd></div>
+      <div><dt>HTML</dt><dd>HyperText Markup Language. Each chart is written as a standalone <code>.html</code> file that opens in a browser.</dd></div>
+      <div><dt>JSON</dt><dd>JavaScript Object Notation. Both the structured output format (<code>-o json</code>) and the on-disk format of most artifacts.</dd></div>
+    </dl>
+    <dl>
+      <div><dt>kB · MB · GB</dt><dd>Kilobyte, megabyte, gigabyte — file sizes. <b>16 kB</b> is the threshold above which a fetched file is passed on as a pointer instead of inline rows.</dd></div>
+      <div><dt>LLM</dt><dd>Large language model. The model that plans, analyses and writes the summary. An <b>LLM judge</b> is a second model call used to grade free text against fixed criteria.</dd></div>
+      <div><dt>SDK</dt><dd>Software development kit — the vendor's client library. Quarantined in <code>providers/</code>, so no other layer imports it.</dd></div>
+      <div><dt>SIGINT</dt><dd>Signal interrupt — the signal sent by Ctrl-C. The run cancels its tasks, restores the terminal and exits <b>130</b>.</dd></div>
+      <div><dt>SQL</dt><dd>Structured Query Language. Not used today; proposed on slide 5 so retrieval returns a bounded result set rather than a whole file.</dd></div>
+      <div><dt>TTY</dt><dd>Teletypewriter, now simply "terminal" — an interactive session with a human at it. Clarifying questions and the <code>i</code> interrupt both require one; piped input has none.</dd></div>
+      <div><dt>UTF-8</dt><dd>Unicode Transformation Format, 8-bit — the default text encoding. On a non-UTF-8 output stream the chart's block characters raise an error, which is issue #31.</dd></div>
+      <div><dt>stdout · stderr</dt><dd>Standard output and standard error, the two text streams a program writes to. The report goes to stdout and the live dashboard to stderr, so the output stays pipeable.</dd></div>
+    </dl>
+  </div>
+
+  <h3>Identifiers</h3>
+  <div class="gloss-grid">
+    <dl>
+      <div><dt>#13 #31 #33<br>#36 #40</dt><dd>Issue numbers in the project's tracker. #13 is the cut stretch goal; the other four are the open defects on slide 4.</dd></div>
+    </dl>
+    <dl>
+      <div><dt>D1 · O1</dt><dd>Defect 1 and observation 1 from the recorded test results. D1 is the figure citing an artifact that holds only some of its numbers; O1 is a redirected output stream being treated as a terminal.</dd></div>
+    </dl>
+  </div>
+
+  <h3>Terms of art</h3>
+  <div class="gloss-grid">
+    <dl>
+      <div><dt>artifact</dt><dd>A payload written to disk by a step — a dataset, an analysis or a chart. Referred to everywhere by an <code>artifact:&lt;name&gt;</code> pointer rather than by its contents.</dd></div>
+      <div><dt>ledger</dt><dd>The single typed state object for a run: the plan, the artifact pointers, the events and the answers to clarifying questions.</dd></div>
+      <div><dt>roster</dt><dd>The list of datasets the retrieval tools can actually obtain, composed into the planner's prompt so it plans only against data the team holds.</dd></div>
+    </dl>
+    <dl>
+      <div><dt>provenance</dt><dd>Whether a stated number can be traced to the artifact that produced it. Distinct from correctness: a number can be correctly sourced and still answer the wrong question.</dd></div>
+      <div><dt>fan-out</dt><dd>Two or more steps with no dependency between them running at the same time.</dd></div>
+      <div><dt>2025Q2<br>Q2 · Q3 · Q4</dt><dd>Fiscal quarter notation — <code>2025Q2</code> is the second quarter of 2025, and a bare <code>Q3</code> means the third quarter of the year under discussion. The bundled figures span 2024Q1 to 2025Q4.</dd></div>
+    </dl>
+  </div>
+
+</div>
+</footer>
+
+<nav class="nav" aria-label="Slide navigation">
+  <button type="button" id="prev" aria-label="Previous slide">&#8592;</button>
+  <span class="count" id="count" role="status" aria-live="polite">1 / 5</span>
+  <button type="button" id="next" aria-label="Next slide">&#8594;</button>
+  <span class="rail" id="rail">
+    <a href="#1">Slide 1</a><a href="#2">Slide 2</a><a href="#3">Slide 3</a><a href="#4">Slide 4</a><a href="#5">Slide 5</a>
+  </span>
+  <a class="gloss-link" href="#glossary">Glossary</a>
+</nav>
+
+<script>
+(function () {
+  "use strict";
+
+  var slides = Array.prototype.slice.call(document.querySelectorAll(".slide"));
+  var total  = slides.length;
+  var prev   = document.getElementById("prev");
+  var next   = document.getElementById("next");
+  var count  = document.getElementById("count");
+  var dots   = Array.prototype.slice.call(document.querySelectorAll("#rail a"));
+  var at     = 1;
+
+  function clamp(n) { return Math.min(total, Math.max(1, n)); }
+
+  function fromHash() {
+    var m = /^#(\d+)$/.exec(location.hash || "");
+    return m ? clamp(parseInt(m[1], 10)) : 1;
+  }
+
+  /* #glossary is an in-page anchor, not a slide. Leave it to the browser. */
+  function isSlideHash() { return /^#\d+$/.test(location.hash || ""); }
+
+  function show(n, pushHash) {
+    at = clamp(n);
+    slides.forEach(function (s, i) {
+      var on = (i === at - 1);
+      if (on) { s.removeAttribute("hidden"); } else { s.setAttribute("hidden", ""); }
+    });
+    count.textContent = at + " / " + total;
+    prev.disabled = (at === 1);
+    next.disabled = (at === total);
+    dots.forEach(function (d, i) { d.setAttribute("aria-current", i === at - 1 ? "true" : "false"); });
+    var body = slides[at - 1].querySelector(".slide-body");
+    if (body) { body.scrollTop = 0; }
+    if (pushHash !== false) {
+      /* A slide change means "show me that slide" — come back up from the glossary. */
+      window.scrollTo(0, 0);
+      if (location.hash !== "#" + at) { history.replaceState(null, "", "#" + at); }
+    }
+  }
+
+  prev.addEventListener("click", function () { show(at - 1); });
+  next.addEventListener("click", function () { show(at + 1); });
+
+  dots.forEach(function (d, i) {
+    d.addEventListener("click", function (e) { e.preventDefault(); show(i + 1); });
+  });
+
+  document.addEventListener("keydown", function (e) {
+    if (e.metaKey || e.ctrlKey || e.altKey) { return; }
+    var k = e.key;
+    if (k === "ArrowRight" || k === "PageDown") { e.preventDefault(); show(at + 1); }
+    else if (k === "ArrowLeft" || k === "PageUp") { e.preventDefault(); show(at - 1); }
+    else if (k === " " || k === "Spacebar") { e.preventDefault(); show(e.shiftKey ? at - 1 : at + 1); }
+    else if (k === "Home") { e.preventDefault(); show(1); }
+    else if (k === "End") { e.preventDefault(); show(total); }
+  });
+
+  window.addEventListener("hashchange", function () {
+    if (isSlideHash()) { show(fromHash(), false); }
+  });
+
+  show(fromHash(), false);
+  /* Opened directly on #glossary: the slide stays at 1 and the browser scrolls. */
+  if ((location.hash || "") === "#glossary") {
+    var g = document.getElementById("glossary");
+    if (g) { g.scrollIntoView(); }
+  }
+})();
+</script>
+
+</body>
+</html>
