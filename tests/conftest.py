@@ -67,9 +67,15 @@ _WAIT_POLLS = 1000
 # The executive summary a scripted `ReportDraft` carries.
 REPORT_SUMMARY = "Revenue grew in each of the last three quarters."
 
-# How many rows a scripted `query_csv` call asks for — and so what `count_rows_script`
-# counts and what the report's figure states.
-QUARTERS = 3
+# Which bundled dataset a scripted `fetch_data` call asks for, by catalogue key, and the
+# file behind it. Here rather than in `agents/toolsets.py`, which no longer names any
+# dataset: only the suite still cares which files are committed.
+FETCHED_DATASET = "quarterly_financials"
+FINANCIALS_CSV = f"{FETCHED_DATASET}.csv"
+
+# How many rows that file holds — `fetch_data` returns it whole, so this is what
+# `count_rows_script` counts and what the report's figure states.
+QUARTERS = 8
 
 # What `count_rows_script` labels its number, so an assertion on the output tracks the
 # script rather than a literal of its own.
@@ -105,13 +111,17 @@ def store(tmp_path: Path) -> ArtifactStore:
     return ArtifactStore(tmp_path / "artifacts")
 
 
-def tool_call(name: str, call_id: str = "call-1", **arguments: object) -> ToolCall:
-    """One tool call as a provider would decode it."""
+def tool_call(name: str, call_id: str = "call-1", /, **arguments: object) -> ToolCall:
+    """One tool call as a provider would decode it.
+
+    Positional-only: `fetch_data`'s own argument is called `name`, and a keyword parameter
+    of that name would make it unpassable.
+    """
     return ToolCall(id=call_id, name=name, arguments=arguments)
 
 
 def tool_turn(
-    name: str, *, call_id: str = "call-1", tokens: int = 100, **arguments: object
+    name: str, /, *, call_id: str = "call-1", tokens: int = 100, **arguments: object
 ) -> AssistantTurn:
     """A model turn asking for one tool. The lap a scripted `ToolLoop` spends working."""
     return AssistantTurn(

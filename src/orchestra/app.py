@@ -132,7 +132,9 @@ def build_orchestra(
     workers: dict[AgentRole, Worker] = dict.fromkeys(AgentRole, EchoWorker(store))
     # Held, not inlined: the planner is told what these can obtain, so the roster it plans
     # against is the toolset the retrieval agent actually got (#10).
-    retrieval_tools = data_retrieval_tools(config.data_dir, search_api_key=config.tavily_api_key)
+    retrieval_tools = data_retrieval_tools(
+        config.data_dir, store, search_api_key=config.tavily_api_key
+    )
     # One roster for both orchestrator calls: what the planner may plan against is what a
     # mid-run replan may plan against (#12).
     roster = retrievable_data(retrieval_tools)

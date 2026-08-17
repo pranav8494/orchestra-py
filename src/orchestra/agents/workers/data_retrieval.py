@@ -1,6 +1,6 @@
 """The first real worker: retrieval over the bundled offline data (#5).
 
-**The model chooses the tool, not the code.** Picking `query_csv` or `search` from the
+**The model chooses the tool, not the code.** Picking `fetch_data` or `search` from the
 instruction here is a keyword matcher wearing an agent's name, and it cannot serve a step
 needing both. Both schemas go to the model; the loop runs what it asks for.
 
@@ -8,12 +8,12 @@ needing both. Both schemas go to the model; the loop runs what it asks for.
 agent that agent: its two tool names, its artifact, and what "retrieved nothing" means.
 
 **One artifact.** `RetrievedDataset` holds rows, search provenance and summary under the
-one pointer `Worker.run` returns, as JSON so #6 reads it with `json.loads`. Rows stay CSV
-text — what the tool returned and what pandas wants.
+one pointer `Worker.run` returns, as JSON so #6 reads it with `json.loads`. Rows stay the
+text the tool returned — what pandas wants; a file too large to inline is carried as its
+artifact pointer instead, for the analysis step to open.
 
-**Every successful query is kept.** `datasets` is a list because the tool advertises a
-`columns` filter: last-one-wins would store half the data under a summary describing all
-of it.
+**Every successful fetch is kept.** `datasets` is a list because a step may need two
+files: last-one-wins would store half the data under a summary describing all of it.
 """
 
 import asyncio
@@ -21,7 +21,7 @@ import json
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from orchestra.agents.toolsets import QUERY_CSV_TOOL, SEARCH_TOOL
+from orchestra.agents.toolsets import FETCH_DATA_TOOL, SEARCH_TOOL
 from orchestra.agents.workers.tool_loop import (
     DEFAULT_MAX_TURNS,
     DEFAULT_TOKEN_BUDGET,
@@ -34,6 +34,7 @@ from orchestra.core.state import ArtifactPointer, SubtaskContext, TaskEvent
 from orchestra.prompts import DATA_RETRIEVAL_SYSTEM_PROMPT
 from orchestra.providers.base import Provider
 from orchestra.tools.base import BaseTool, ToolCall, ToolResponse
+from orchestra.tools.fetch_data import INLINED_KEY, POINTER_KEY
 
 
 class RetrievalSource(BaseModel):
@@ -50,12 +51,17 @@ class RetrievalSource(BaseModel):
 
 
 class RetrievedTable(BaseModel):
-    """One successful `query_csv` call: what was asked for, and the rows it returned."""
+    """One successful `fetch_data` call: what was asked for, and what came back.
+
+    Either `csv` holds the file's own text, or `pointer` alone names it: a file too large
+    to inline is passed on for the analysis step to open (#40).
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     query: str  # the call's arguments, rendered — provenance, like a source's
-    csv: str
+    csv: str = ""
+    pointer: str = ""
 
 
 class RetrievedDataset(BaseModel):
@@ -118,7 +124,7 @@ class DataRetrievalWorker:
         datasets = [
             _table(outcome.call, outcome.response)
             for outcome in result.kept
-            if outcome.call.name == QUERY_CSV_TOOL
+            if outcome.call.name == FETCH_DATA_TOOL
         ]
         sources = [
             _source(outcome.call, outcome.response)
@@ -156,9 +162,16 @@ def _source(call: ToolCall, response: ToolResponse) -> RetrievalSource:
 
 
 def _table(call: ToolCall, response: ToolResponse) -> RetrievedTable:
-    """Pair a `query_csv` call with the rows it returned.
+    """Pair a `fetch_data` call with what it returned: the rows, or a pointer to them.
 
     Arguments render to sorted JSON rather than staying a mapping, so the field does not
-    become a second schema for #6 to know about.
+    become a second schema for #6 to know about. The pointer is read from `metadata`, not
+    parsed out of prose written for the model (§6), and a file that was not inlined leaves
+    `csv` empty rather than storing its summary as if it were rows.
     """
-    return RetrievedTable(query=json.dumps(call.arguments, sort_keys=True), csv=response.content)
+    inlined = response.metadata.get(INLINED_KEY) == "true"
+    return RetrievedTable(
+        query=json.dumps(call.arguments, sort_keys=True),
+        csv=response.content if inlined else "",
+        pointer=response.metadata.get(POINTER_KEY, ""),
+    )

@@ -26,14 +26,21 @@ import pytest_asyncio
 from pydantic import SecretStr
 
 from conftest import tool_call
-from orchestra.tools import query_csv as query_csv_module
+from orchestra.artifacts import ArtifactStore
+from orchestra.tools import fetch_data as fetch_data_module
 from orchestra.tools import search as search_module
 from orchestra.tools.base import BaseTool
-from orchestra.tools.query_csv import QueryCsvTool
+from orchestra.tools.fetch_data import (
+    INLINE_MAX_BYTES,
+    INLINED_KEY,
+    POINTER_KEY,
+    Dataset,
+    FetchDataTool,
+    discover_datasets,
+)
 from orchestra.tools.search import MAX_RESULTS, SearchTool
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
-FINANCIALS = DATA_DIR / "quarterly_financials.csv"
 SNIPPETS = DATA_DIR / "search_snippets.json"
 
 # Ceiling on every wait in this file. Long enough that a loaded machine does not flake,
@@ -69,7 +76,9 @@ class BlockedRead:
     release: threading.Event
     result: object
 
-    def __call__(self, path: Path) -> object:
+    def __call__(self, *args: object) -> object:
+        """`*args`: it stands in for reads of different arities — one path, or a store
+        and a dataset."""
         self.started.set()
         self.release.wait(timeout=TIMEOUT)
         return self.result
@@ -97,8 +106,11 @@ async def blocked_read() -> AsyncIterator[Callable[[object], BlockedRead]]:
 
 
 @pytest.fixture
-def csv_tool() -> QueryCsvTool:
-    return QueryCsvTool(FINANCIALS)
+def bundled(store: ArtifactStore) -> FetchDataTool:
+    """The tool over the committed `data/`, minus the corpus `agents/toolsets.py` hides."""
+    return FetchDataTool(
+        store, [dataset for dataset in discover_datasets(DATA_DIR) if dataset.path != SNIPPETS]
+    )
 
 
 @pytest.fixture
@@ -109,39 +121,68 @@ def search_tool() -> SearchTool:
 if TYPE_CHECKING:
     # Conformance is mypy's job, not `isinstance`'s: `BaseTool` is a plain Protocol, and a
     # runtime check would compare attribute names only (§7).
-    _CSV_IS_A_TOOL: BaseTool = QueryCsvTool(FINANCIALS)
+    _FETCH_IS_A_TOOL: BaseTool = FetchDataTool(ArtifactStore(DATA_DIR), ())
     _SEARCH_IS_A_TOOL: BaseTool = SearchTool(SNIPPETS)
 
 
-# --------------------------------------------------------------------------- query_csv
+# -------------------------------------------------------------------------- fetch_data
 
 
-def test_query_csv_info_advertises_its_params_schema(csv_tool: QueryCsvTool) -> None:
-    """Asserted field by field rather than against `QueryCsvParams.model_json_schema()`,
+def test_fetch_data_info_advertises_its_params_schema(bundled: FetchDataTool) -> None:
+    """Asserted field by field rather than against `FetchDataParams.model_json_schema()`,
     which is the expression `info()` returns — that comparison passes whatever the schema
     says, including nothing."""
-    spec = csv_tool.info()
+    spec = bundled.info()
 
-    assert spec.name == "query_csv"
-    assert set(properties(spec.input_schema)) == {"columns", "quarters", "last_n"}
-    # `extra="forbid"` reaches the model, so the provider rejects an invented `where`
+    assert spec.name == "fetch_data"
+    assert set(properties(spec.input_schema)) == {"name"}
+    # `extra="forbid"` reaches the model, so the provider rejects an invented `columns`
     # client-side as well as `run` does.
     assert spec.input_schema["additionalProperties"] is False
 
 
-def test_query_csv_info_description_routes_general_questions_elsewhere(
-    csv_tool: QueryCsvTool,
+def test_fetch_data_info_names_every_bundled_dataset(bundled: FetchDataTool) -> None:
+    """The description is the only place the model learns what it may ask for."""
+    description = bundled.info().description
+
+    assert "quarterly_financials" in description and "expense_breakdown" in description
+    assert "quarter, revenue, costs, profit" in description
+    # A two-tool agent only stays a two-tool agent if each prompt names the other.
+    assert "search" in description
+
+
+def test_fetch_data_info_is_pure(bundled: FetchDataTool, store: ArtifactStore) -> None:
+    """It runs every turn, so it must not touch disk: the same object, and no artifact."""
+    assert bundled.info() is bundled.info()
+    assert list(store.root.iterdir()) == []
+
+
+def test_fetch_data_provides_names_the_datasets_and_keeps_its_boundary(
+    bundled: FetchDataTool,
 ) -> None:
-    """A two-tool agent only stays a two-tool agent if each prompt names the other."""
-    assert "search" in csv_tool.info().description
+    """The planner plans against this (#10). Without the boundary a request for data
+    nobody holds is planned as three steps that then retrieve nothing."""
+    provides = bundled.info().provides
+
+    assert "expense_breakdown" in provides and "quarter, category, amount" in provides
+    assert "nothing beyond those files" in provides
+
+
+def test_fetch_data_with_an_empty_catalogue_provides_nothing(store: ArtifactStore) -> None:
+    """`retrievable_data` skips a tool that supplies none, so the planner is correctly
+    told the team can fetch nothing — an empty string, not a sentence about no files."""
+    tool = FetchDataTool(store, ())
+
+    assert tool.info().provides == ""
+    assert tool.info().description.strip()  # still a prompt: it has to say why
 
 
 @pytest.mark.asyncio
-async def test_query_csv_no_filters_returns_the_whole_bundled_dataset(
-    csv_tool: QueryCsvTool,
+async def test_fetch_data_returns_a_small_file_whole(
+    bundled: FetchDataTool, store: ArtifactStore
 ) -> None:
     """Exercises the committed dataset: eight quarters, and profit that adds up."""
-    response = await csv_tool.run(tool_call("query_csv"))
+    response = await bundled.run(tool_call("fetch_data", name="quarterly_financials"))
 
     assert not response.is_error
     header, *data = rows(response.content)
@@ -157,159 +198,197 @@ async def test_query_csv_no_filters_returns_the_whole_bundled_dataset(
         "2025Q4",
     ]
     assert all(int(row[3]) == int(row[1]) - int(row[2]) for row in data)
+    # Registered even when inlined, so the analysis step can open the file itself.
+    assert response.metadata[INLINED_KEY] == "true"
+    assert store.get_text(response.metadata[POINTER_KEY]) == response.content
 
 
 @pytest.mark.asyncio
-async def test_query_csv_column_and_quarter_filter_returns_only_those_cells(
-    csv_tool: QueryCsvTool,
+async def test_fetch_data_second_bundled_dataset_reconciles_with_the_first(
+    bundled: FetchDataTool,
 ) -> None:
-    response = await csv_tool.run(
-        tool_call("query_csv", columns=["quarter", "profit"], quarters=["2025Q1"])
-    )
+    """Two datasets is what proves the catalogue: the breakdown sums to the `costs`
+    column it was written against, so a join across both is a real analysis."""
+    expenses = await bundled.run(tool_call("fetch_data", name="expense_breakdown"))
+    financials = await bundled.run(tool_call("fetch_data", name="quarterly_financials"))
+
+    header, *breakdown = rows(expenses.content)
+    assert header == ["quarter", "category", "amount"]
+    costs = {row[0]: int(row[2]) for row in rows(financials.content)[1:]}
+    totals: dict[str, int] = {}
+    for quarter, _category, amount in breakdown:
+        totals[quarter] = totals.get(quarter, 0) + int(amount)
+    assert totals == costs
+
+
+@pytest.mark.asyncio
+async def test_fetch_data_large_file_returns_a_pointer_instead_of_rows(
+    tmp_path: Path, store: ArtifactStore
+) -> None:
+    """#40: a tool result is re-sent every later turn, so past the threshold the file is
+    handed on by pointer and the analysis step opens it."""
+    big = tmp_path / "big.csv"
+    big.write_text("quarter,revenue\n" + "2025Q1,1\n" * INLINE_MAX_BYTES, encoding="utf-8")
+    tool = FetchDataTool(store, discover_datasets(tmp_path))
+
+    response = await tool.run(tool_call("fetch_data", name="big"))
 
     assert not response.is_error
-    assert rows(response.content) == [["quarter", "profit"], ["2025Q1", "915000"]]
+    assert response.metadata[INLINED_KEY] == "false"
+    pointer = response.metadata[POINTER_KEY]
+    # The schema, the pointer and what to do with it — and none of the rows.
+    assert "quarter, revenue" in response.content
+    assert pointer in response.content and "analysis step" in response.content
+    assert "2025Q1,1" not in response.content
+    assert "not UTF-8" not in response.content  # the other reason a file is withheld
+    assert store.get_text(pointer) == big.read_text(encoding="utf-8")
 
 
 @pytest.mark.asyncio
-async def test_query_csv_columns_are_returned_in_the_requested_order(
-    csv_tool: QueryCsvTool,
+async def test_fetch_data_small_binary_file_is_withheld_as_binary_not_as_too_large(
+    tmp_path: Path, store: ArtifactStore
 ) -> None:
-    """The model reads its answer more easily in the shape it asked for."""
-    response = await csv_tool.run(
-        tool_call("query_csv", columns=["profit", "quarter"], quarters=["2024Q1"])
-    )
+    """Regression: both reasons hand over a pointer, but "too large" said of a 12-byte
+    file is a false claim, and the retrieval summary repeats what the tool said into the
+    report. The `.parquet` a real deployment would hold takes this path."""
+    (tmp_path / "readings.parquet").write_bytes(b"PAR1\x00\xff\xfe binary")
+    tool = FetchDataTool(store, discover_datasets(tmp_path))
 
-    assert rows(response.content) == [["profit", "quarter"], ["630000", "2024Q1"]]
+    response = await tool.run(tool_call("fetch_data", name="readings"))
+
+    assert not response.is_error and not response.is_empty
+    assert response.metadata[INLINED_KEY] == "false"
+    assert "not UTF-8 text" in response.content
+    assert "too large" not in response.content and str(INLINE_MAX_BYTES) not in response.content
+    assert store.path_for(response.metadata[POINTER_KEY]).read_bytes() == b"PAR1\x00\xff\xfe binary"
 
 
+@pytest.mark.parametrize("content", ["", "\n  \n"], ids=["zero-byte", "whitespace-only"])
 @pytest.mark.asyncio
-async def test_query_csv_last_n_keeps_the_most_recent_rows(csv_tool: QueryCsvTool) -> None:
-    """The file is oldest-first, so "most recent" is the tail, not the head."""
-    response = await csv_tool.run(tool_call("query_csv", columns=["quarter"], last_n=2))
-
-    assert rows(response.content) == [["quarter"], ["2025Q3"], ["2025Q4"]]
-
-
-@pytest.mark.asyncio
-async def test_query_csv_last_n_larger_than_the_dataset_returns_every_row(
-    csv_tool: QueryCsvTool,
+async def test_fetch_data_empty_file_reports_an_empty_result(
+    tmp_path: Path, store: ArtifactStore, content: str
 ) -> None:
-    """Asking for more than exists is not an error — it is the whole table."""
-    response = await csv_tool.run(tool_call("query_csv", columns=["quarter"], last_n=99))
+    """Regression: an empty file is not a successful fetch of nothing. Empty `content`
+    reads to the model as a broken tool, and the worker would store it as rows the
+    analysis step then hands to `pd.read_csv`, which raises `EmptyDataError`.
+
+    `is_empty`, not `is_error`, as in `search`: the file will be just as empty next time,
+    so there is no retry to invite — but the loop must drop it either way."""
+    (tmp_path / "nothing.csv").write_text(content, encoding="utf-8")
+    tool = FetchDataTool(store, discover_datasets(tmp_path))
+
+    response = await tool.run(tool_call("fetch_data", name="nothing"))
+
+    assert response.is_empty and not response.is_error
+    assert response.content.strip()  # a sentence, not the file's own emptiness
+    assert "empty file" in response.content
+
+
+@pytest.mark.asyncio
+async def test_fetch_data_repairs_a_filename_the_artifact_store_would_refuse(
+    tmp_path: Path, store: ArtifactStore
+) -> None:
+    """Regression: `ARTIFACT_NAME_PATTERN` admits no `&` or `(`, so a catalogue built from
+    raw filenames advertises datasets whose every call dies in `put_file` — the #10 failure
+    the boundary clause exists to prevent. The operator's file works instead."""
+    (tmp_path / "Q3 P&L (final).csv").write_text("quarter,profit\n2025Q3,7\n", encoding="utf-8")
+    datasets = discover_datasets(tmp_path)
+    tool = FetchDataTool(store, datasets)
+
+    # The model still names the file the way the operator did.
+    response = await tool.run(tool_call("fetch_data", name="Q3 P&L (final)"))
 
     assert not response.is_error
-    assert len(rows(response.content)) == 9  # header + 8 quarters
+    assert "2025Q3,7" in response.content
+    # Stored under a repaired name, so the pointer is one the store and `run_python` accept.
+    pointer = response.metadata[POINTER_KEY]
+    assert pointer == "artifact:Q3 P_L _final_.csv"
+    assert store.get_text(pointer) == "quarter,profit\n2025Q3,7\n"
 
 
 @pytest.mark.asyncio
-async def test_query_csv_lowercase_quarter_still_matches(csv_tool: QueryCsvTool) -> None:
-    """`2025q4` meant `2025Q4`; a turn spent correcting that teaches the model nothing."""
-    response = await csv_tool.run(tool_call("query_csv", columns=["quarter"], quarters=["2025q4"]))
+async def test_fetch_data_registers_one_pointer_however_often_it_is_fetched(
+    tmp_path: Path, store: ArtifactStore
+) -> None:
+    """Two fetches of one dataset are one artifact: re-registering would leave `x.csv` and
+    `x-1.csv`, two pointers for one file and two copies of a large one."""
+    (tmp_path / "sales.csv").write_text("quarter,revenue\n2025Q1,1\n", encoding="utf-8")
+    tool = FetchDataTool(store, discover_datasets(tmp_path))
 
-    assert rows(response.content) == [["quarter"], ["2025Q4"]]
+    first = await tool.run(tool_call("fetch_data", name="sales"))
+    second = await tool.run(tool_call("fetch_data", name="sales"))
+
+    assert first.metadata[POINTER_KEY] == second.metadata[POINTER_KEY]
+    assert [path.name for path in store.root.iterdir()] == ["sales.csv"]
 
 
 @pytest.mark.asyncio
-async def test_query_csv_unknown_column_names_the_valid_columns(csv_tool: QueryCsvTool) -> None:
+async def test_fetch_data_unknown_name_lists_the_datasets(bundled: FetchDataTool) -> None:
     """The error is the model's next prompt, so it has to contain the retry (§6)."""
-    response = await csv_tool.run(tool_call("query_csv", columns=["margin"]))
+    response = await bundled.run(tool_call("fetch_data", name="headcount"))
 
     assert response.is_error
-    assert "margin" in response.content
-    assert "quarter, revenue, costs, profit" in response.content
+    assert "headcount" in response.content
+    assert "quarterly_financials" in response.content
 
 
 @pytest.mark.asyncio
-async def test_query_csv_unknown_quarter_names_the_available_quarters(
-    csv_tool: QueryCsvTool,
+async def test_fetch_data_unknown_name_with_no_datasets_says_so(store: ArtifactStore) -> None:
+    """An installed wheel points at nothing; the model is told that, not given a list."""
+    response = await FetchDataTool(store, ()).run(tool_call("fetch_data", name="anything"))
+
+    assert response.is_error
+    assert "no data files" in response.content
+
+
+@pytest.mark.asyncio
+async def test_fetch_data_missing_name_reports_the_validation_message(
+    bundled: FetchDataTool,
 ) -> None:
-    response = await csv_tool.run(tool_call("query_csv", quarters=["2023Q4"]))
+    response = await bundled.run(tool_call("fetch_data"))
 
     assert response.is_error
-    assert "2023Q4" in response.content
-    assert "2024Q1" in response.content and "2025Q4" in response.content
+    assert "name" in response.content
 
 
 @pytest.mark.asyncio
-async def test_query_csv_missing_dataset_file_names_the_path(tmp_path: Path) -> None:
-    """A bad injection surfaces as content, not as an unwound agent loop."""
-    missing = tmp_path / "never-written.csv"
-
-    response = await QueryCsvTool(missing).run(tool_call("query_csv"))
-
-    assert response.is_error
-    assert str(missing) in response.content
-
-
-@pytest.mark.asyncio
-async def test_query_csv_header_only_dataset_reports_an_empty_result(tmp_path: Path) -> None:
-    """An error here and `is_empty` in `search`: the asymmetry is deliberate. This dataset
-    is fixed, so no rows means the model asked for something it does not hold, and a retry
-    against the columns the message names is the right next move."""
-    dataset = tmp_path / "empty.csv"
-    dataset.write_text("quarter,revenue,costs,profit\n", encoding="utf-8")
-
-    response = await QueryCsvTool(dataset).run(tool_call("query_csv"))
-
-    assert response.is_error and not response.is_empty
-    assert "no quarters" in response.content
-
-
-@pytest.mark.asyncio
-async def test_query_csv_dataset_without_a_quarter_column_names_its_columns(
-    tmp_path: Path,
-) -> None:
-    dataset = tmp_path / "wrong-shape.csv"
-    dataset.write_text("period,revenue\n2024-01,10\n", encoding="utf-8")
-
-    response = await QueryCsvTool(dataset).run(tool_call("query_csv"))
-
-    assert response.is_error
-    assert "period, revenue" in response.content
-
-
-@pytest.mark.asyncio
-async def test_query_csv_ragged_dataset_reports_the_line(tmp_path: Path) -> None:
-    """Regression: a short row indexed blind is an IndexError, which §6 forbids."""
-    dataset = tmp_path / "ragged.csv"
-    dataset.write_text("quarter,revenue,costs,profit\n2024Q1,10\n", encoding="utf-8")
-
-    response = await QueryCsvTool(dataset).run(tool_call("query_csv"))
-
-    assert response.is_error
-    assert "line 2" in response.content
-
-
-@pytest.mark.asyncio
-async def test_query_csv_zero_last_n_reports_the_validation_message(
-    csv_tool: QueryCsvTool,
-) -> None:
-    response = await csv_tool.run(tool_call("query_csv", last_n=0))
+async def test_fetch_data_unknown_argument_is_rejected(bundled: FetchDataTool) -> None:
+    """`extra="forbid"`: an invented argument is reported, never silently dropped."""
+    response = await bundled.run(tool_call("fetch_data", name="quarterly_financials", last_n=3))
 
     assert response.is_error
     assert "last_n" in response.content
 
 
 @pytest.mark.asyncio
-async def test_query_csv_unknown_argument_is_rejected(csv_tool: QueryCsvTool) -> None:
-    """`extra="forbid"`: an invented argument is reported, never silently dropped."""
-    response = await csv_tool.run(tool_call("query_csv", where="profit > 0"))
+async def test_fetch_data_file_deleted_after_startup_is_content_not_an_exception(
+    tmp_path: Path, store: ArtifactStore
+) -> None:
+    """The catalogue is probed once; the file can go away afterwards (§6)."""
+    dataset = tmp_path / "gone.csv"
+    dataset.write_text("quarter,revenue\n2025Q1,1\n", encoding="utf-8")
+    tool = FetchDataTool(store, discover_datasets(tmp_path))
+    dataset.unlink()
+
+    response = await tool.run(tool_call("fetch_data", name="gone"))
 
     assert response.is_error
-    assert "where" in response.content
+    assert str(dataset) in response.content
 
 
 @pytest.mark.asyncio
-async def test_query_csv_propagates_cancellation(
-    monkeypatch: pytest.MonkeyPatch, blocked_read: Callable[[object], BlockedRead]
+async def test_fetch_data_propagates_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+    blocked_read: Callable[[object], BlockedRead],
+    store: ArtifactStore,
 ) -> None:
     """§10: `CancelledError` is the only thing that may leave `run`. The read's `except`
     list is what could swallow it — widening to `BaseException`, or to a bare `except`
     (§8), fails this test."""
-    read = blocked_read([["quarter"], ["2024Q1"]])
-    monkeypatch.setattr(query_csv_module, "_read_rows", read)
-    task = asyncio.create_task(QueryCsvTool(FINANCIALS).run(tool_call("query_csv")))
+    read = blocked_read(("artifact:x.csv", "quarter\n2024Q1\n"))
+    monkeypatch.setattr(fetch_data_module, "_fetch", read)
+    tool = FetchDataTool(store, discover_datasets(DATA_DIR))
+    task = asyncio.create_task(tool.run(tool_call("fetch_data", name="quarterly_financials")))
 
     assert await asyncio.to_thread(read.started.wait, TIMEOUT)  # parked inside the try
     task.cancel()
@@ -318,6 +397,132 @@ async def test_query_csv_propagates_cancellation(
     # rather than hanging: the read is released on fixture teardown either way.
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(task, timeout=TIMEOUT)
+
+
+# --------------------------------------------------------------------- discover_datasets
+
+
+def test_discover_datasets_lists_every_file_sorted(tmp_path: Path) -> None:
+    """Sorted, so the roster the planner sees does not depend on directory order."""
+    (tmp_path / "b.csv").write_text("x,y\n1,2\n", encoding="utf-8")
+    (tmp_path / "a.json").write_text('{"k": 1}', encoding="utf-8")
+    (tmp_path / "sub").mkdir()  # directories are not datasets
+    (tmp_path / ".DS_Store").write_text("junk", encoding="utf-8")  # nor is the platform's
+
+    assert [dataset.name for dataset in discover_datasets(tmp_path)] == ["a", "b"]
+
+
+def test_discover_datasets_missing_directory_is_empty_not_an_error(tmp_path: Path) -> None:
+    """Installed as a wheel the default points at nothing; the agent still has `search`."""
+    assert discover_datasets(tmp_path / "never-created") == ()
+
+
+def test_discover_datasets_skips_a_file_it_cannot_probe(tmp_path: Path) -> None:
+    """One bad file must not cost the run its other data."""
+    (tmp_path / "broken.json").write_text("{not json", encoding="utf-8")
+    (tmp_path / "fine.csv").write_text("x\n1\n", encoding="utf-8")
+
+    assert [dataset.name for dataset in discover_datasets(tmp_path)] == ["fine"]
+
+
+@pytest.mark.parametrize(
+    ("filename", "content", "expected"),
+    [
+        ("t.csv", "quarter,revenue\n2025Q1,1\n", "CSV with columns quarter, revenue"),
+        ("t.tsv", "quarter\trevenue\n2025Q1\t1\n", "TSV with columns quarter, revenue"),
+        ("t.json", '[{"a": 1, "b": 2}]', "JSON list of 1 entries, an object with keys a, b each"),
+        ("t.json", '{"a": 1, "b": 2}', "an object with keys a, b"),
+        ("t.jsonl", '{"a": 1}\n{"a": 2}\n', "JSON lines, an object with keys a per line"),
+        ("t.md", "# Title\nbody\n", "beginning '# Title'"),
+        ("t.parquet", "\x00binary", ".parquet file"),
+    ],
+)
+def test_discover_datasets_probes_by_suffix(
+    tmp_path: Path, filename: str, content: str, expected: str
+) -> None:
+    """The summary is what both the model and the planner are told a file holds, so each
+    suffix has to say something more useful than its size."""
+    (tmp_path / filename).write_text(content, encoding="utf-8")
+
+    (dataset,) = discover_datasets(tmp_path)
+    assert expected in dataset.summary
+
+
+def test_discover_datasets_does_not_read_a_large_json_body(tmp_path: Path) -> None:
+    """The probe runs at startup for every file, so it is bounded: past the cap a JSON
+    document is described by size rather than parsed."""
+    body = '{"a": ' + "1" * (fetch_data_module.PROBE_MAX_BYTES + 1) + "}"
+    (tmp_path / "huge.json").write_text(body, encoding="utf-8")
+
+    (dataset,) = discover_datasets(tmp_path)
+    assert "too large to probe" in dataset.summary
+
+
+def test_discover_datasets_keys_a_colliding_stem_on_the_whole_filename(tmp_path: Path) -> None:
+    """Two formats of one export are two datasets. Dropping the second would need a
+    warning this module has nowhere to emit, so the loser keeps its extension instead."""
+    (tmp_path / "sales.csv").write_text("quarter,revenue\n", encoding="utf-8")
+    (tmp_path / "sales.xlsx").write_bytes(b"PK\x03\x04binary")
+
+    assert [dataset.name for dataset in discover_datasets(tmp_path)] == ["sales", "sales.xlsx"]
+
+
+def test_discover_datasets_skips_a_file_whose_name_cannot_be_repaired(tmp_path: Path) -> None:
+    """The other half of the repair: a name with nothing legal left is not offered, rather
+    than listed and then refused by the store on every call."""
+    (tmp_path / "....csv").write_text("x\n", encoding="utf-8")
+    (tmp_path / "fine.csv").write_text("x\n", encoding="utf-8")
+
+    assert [dataset.name for dataset in discover_datasets(tmp_path)] == ["fine"]
+
+
+def test_discover_datasets_reads_no_more_than_the_probe_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A 200 MB export on one line is one `readline`. The bound applies to every branch,
+    not only to the JSON one whose parse made the cost obvious."""
+    monkeypatch.setattr(fetch_data_module, "PROBE_MAX_BYTES", 20)
+    (tmp_path / "wide.txt").write_text("a" * 10_000, encoding="utf-8")
+
+    (dataset,) = discover_datasets(tmp_path)
+    assert "a" * 20 in dataset.summary
+    assert "a" * 21 not in dataset.summary
+
+
+def test_catalogue_caps_the_datasets_it_lists(tmp_path: Path, store: ArtifactStore) -> None:
+    """The catalogue rides in every retrieval turn and every planner call, so its size is
+    this module's to bound rather than the directory's to decide."""
+    for index in range(fetch_data_module.MAX_LISTED_DATASETS + 3):
+        (tmp_path / f"set{index:02d}.csv").write_text("quarter,revenue\n", encoding="utf-8")
+    tool = FetchDataTool(store, discover_datasets(tmp_path))
+
+    provides = tool.info().provides
+    assert provides.count("; ") == fetch_data_module.MAX_LISTED_DATASETS
+    assert "and 3 more not listed here" in provides
+    # And the boundary survives the elision, or the planner loses what stops it (#10).
+    assert "nothing beyond those files" in provides
+
+
+def test_catalogue_elides_a_very_wide_files_column_list(
+    tmp_path: Path, store: ArtifactStore
+) -> None:
+    """One CSV with 300 columns must not spend the prompt every other dataset needs."""
+    (tmp_path / "wide.csv").write_text(
+        ",".join(f"column_{index}" for index in range(300)) + "\n", encoding="utf-8"
+    )
+    tool = FetchDataTool(store, discover_datasets(tmp_path))
+
+    provides = tool.info().provides
+    assert "[elided]" in provides
+    assert len(provides) < fetch_data_module.MAX_SUMMARY_CHARS + 200
+
+
+def test_dataset_is_an_immutable_value_object() -> None:
+    """§7: an internal value object, so a caller cannot re-point one at another file."""
+    dataset = Dataset(name="t", path=Path("t.csv"), summary="CSV", store_name="t.csv")
+
+    with pytest.raises(AttributeError):
+        dataset.path = Path("other.csv")  # type: ignore[misc]
 
 
 # ------------------------------------------------------------------------------ search
@@ -340,7 +545,7 @@ def test_search_info_description_holds_for_either_backend(search_tool: SearchToo
     configured."""
     description = search_tool.info().description
 
-    assert "query_csv" in description
+    assert "fetch_data" in description
     assert "illustrative" in description
     # Neither backend may be promised, because only one of them is ever present.
     assert "NOT reach the internet" not in description

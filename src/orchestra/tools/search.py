@@ -60,13 +60,13 @@ MAX_RESULTS = 10
 _TOKEN = re.compile(r"[a-z0-9']+")
 
 # A prompt (§6). One description covers both backends, so it promises background context
-# rather than live data it may not have. See `query_csv.DESCRIPTION` for why it lives
-# beside the params model instead of in `prompts/` (§11).
+# rather than live data it may not have. Beside the params model instead of in
+# `prompts/` (§11 — one module per *agent*), because it documents these fields.
 DESCRIPTION = (
     "Search for background and industry context: growth benchmarks, typical margin "
     "ranges, what drives a one-quarter cost change, reporting conventions, seasonality, "
     "the macro backdrop. Use it to interpret or contextualise a figure. It does NOT hold "
-    "this company's own revenue, costs or profit — use `query_csv` for those. Results say "
+    "this company's own revenue, costs or profit — use `fetch_data` for those. Results say "
     "where they came from; treat anything marked illustrative as context, not as fact to "
     "quote. Returns the best-matching notes, or a plain message when nothing matches."
 )
@@ -370,7 +370,7 @@ def _nothing_found(query: str) -> str:
     """Say a live search returned nothing. No corpus listing — the web is not a menu."""
     return (
         f"The web search for {query!r} returned no usable results. Try different wording, "
-        f"or use `query_csv` for this company's own figures."
+        f"or use `fetch_data` for this company's own figures."
     )
 
 
@@ -384,6 +384,6 @@ def _nothing_matched(query: str, entries: list[CorpusEntry]) -> str:
         [
             f"Nothing in the offline corpus matched {query!r}. It holds only these notes:",
             *(f"- {entry.title}" for entry in entries),
-            "Try one of those topics, or use `query_csv` for this company's own figures.",
+            "Try one of those topics, or use `fetch_data` for this company's own figures.",
         ]
     )
