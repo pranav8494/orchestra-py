@@ -47,8 +47,9 @@ AMBIGUOUS = "Make a chart of performance"
 
 # Measures no tool holds. A live run offered "stock price" as a metric, took the answer,
 # and planned three steps with nowhere to get the data — the roster exists to stop that,
-# so its absence from the questions is the assertion.
-UNAVAILABLE = ("stock", "share price", "headcount", "traffic")
+# so its absence from the questions is the assertion. "headcount" left the list at #46:
+# `yearly_performance.csv` carries it, so offering it is now correct.
+UNAVAILABLE = ("stock", "share price", "traffic")
 
 
 class AnswersAnything:
