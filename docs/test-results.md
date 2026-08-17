@@ -62,7 +62,10 @@ Run from a real terminal with `ANTHROPIC_API_KEY` set. `$?` is checked after eac
 `ruff check`, `ruff format --check` and `mypy` (strict, 86 files) all clean.
 
 Everything below runs offline against `FakeProvider`: the real planner, workers, tools over
-`data/`, aggregator and Typer command, with only the provider port substituted.
+`data/`, aggregator and Typer command. The provider port is the rule, with two named exceptions —
+the executor's clock, patched at the class reference because no `Config` field carries it (#36),
+and the CLI's asker, because a `CliRunner` stdin is a pipe and the command would otherwise
+correctly decide nobody can be asked.
 
 | AC | Covered by (`tests/test_end_to_end.py` unless noted) | Result |
 |---|---|---|

@@ -17,11 +17,12 @@ import typer
 from typer.testing import CliRunner
 
 import orchestra.cli.app as cli_app
+from conftest import force_terminal
 from orchestra import __version__
 from orchestra.app import RunObserver
 from orchestra.cli.app import app, error_boundary
 from orchestra.cli.chat import HINT, ConsoleChat
-from orchestra.cli.console import console, err_console
+from orchestra.cli.console import console
 from orchestra.cli.prompt import ConsoleAsker
 from orchestra.cli.render import RenderMode
 from orchestra.config import load_config
@@ -254,19 +255,9 @@ def test_run_quiet_omits_the_step_lines_and_keeps_the_report(
 # --------------------------------------------------------------------------
 
 
-def _force_terminal(monkeypatch: pytest.MonkeyPatch, *, value: bool) -> None:
-    """Pretend stderr is (or is not) a tty; `CliRunner` always reports a pipe, leaving the
-    `LIVE` arm unreachable.
-
-    Patched on the *instance*: doing it on the class flips stdout's tty-ness too, and these
-    tests would then pass against a `_render_mode` reading the wrong stream.
-    """
-    monkeypatch.setattr(err_console, "_force_terminal", value, raising=False)
-
-
 class _Stdin:
     """A stdin that is, or is not, a terminal. `CliRunner` always supplies a pipe, so the
-    interactive arm is unreachable through `invoke` — as with `_force_terminal` below."""
+    interactive arm is unreachable through `invoke` — as with `conftest.force_terminal`."""
 
     def __init__(self, *, tty: bool) -> None:
         self._tty = tty
@@ -302,7 +293,7 @@ def test_asker_needs_both_streams_to_be_a_terminal(
     Called directly: `CliRunner` replaces `sys.stdin` inside `invoke`.
     """
     monkeypatch.setattr(sys, "stdin", _Stdin(tty=stdin_tty))
-    _force_terminal(monkeypatch, value=stderr_tty)
+    force_terminal(monkeypatch, value=stderr_tty)
 
     asker = cli_app._asker()
 
@@ -340,7 +331,7 @@ def test_run_on_a_terminal_offers_a_chat_and_says_how_to_reach_it(
     chats: list[Chat | None] = []
     _stub_run_once(monkeypatch, _finished_state(SubtaskStatus.DONE), chats=chats)
     monkeypatch.setattr(cli_app, "_interactive", lambda: True)
-    _force_terminal(monkeypatch, value=True)
+    force_terminal(monkeypatch, value=True)
 
     result = runner.invoke(app, ["run", PROMPT], prog_name=PROG)
 
@@ -352,7 +343,7 @@ def test_run_on_a_terminal_offers_a_chat_and_says_how_to_reach_it(
 
 def test_run_on_a_terminal_asks_for_the_live_dashboard(monkeypatch: pytest.MonkeyPatch) -> None:
     observers = _stub_run_once(monkeypatch, _finished_state(SubtaskStatus.DONE))
-    _force_terminal(monkeypatch, value=True)
+    force_terminal(monkeypatch, value=True)
 
     result = runner.invoke(app, ["run", PROMPT], prog_name=PROG)
 
@@ -363,7 +354,7 @@ def test_run_on_a_terminal_asks_for_the_live_dashboard(monkeypatch: pytest.Monke
 def test_run_piped_falls_back_to_plain_lines(monkeypatch: pytest.MonkeyPatch) -> None:
     """The non-TTY fallback: it has to work piped, in CI, and in a recording."""
     observers = _stub_run_once(monkeypatch, _finished_state(SubtaskStatus.DONE))
-    _force_terminal(monkeypatch, value=False)
+    force_terminal(monkeypatch, value=False)
 
     result = runner.invoke(app, ["run", PROMPT], prog_name=PROG)
 
@@ -377,7 +368,7 @@ def test_run_with_stdout_redirected_still_draws_live_on_a_tty_stderr(
     """`orchestra run x > report.txt`: stdout is a file, stderr is still the terminal. Pins
     which console each decision reads — mode follows stderr, framing follows stdout (§5)."""
     observers = _stub_run_once(monkeypatch, _finished_state(SubtaskStatus.DONE))
-    _force_terminal(monkeypatch, value=True)  # stderr only; `console` stays a pipe
+    force_terminal(monkeypatch, value=True)  # stderr only; `console` stays a pipe
 
     result = runner.invoke(app, ["run", PROMPT], prog_name=PROG)
 
@@ -391,7 +382,7 @@ def test_run_with_stdout_redirected_still_draws_live_on_a_tty_stderr(
 def test_run_quiet_asks_for_no_dashboard_at_all(monkeypatch: pytest.MonkeyPatch) -> None:
     """§5: `--quiet` suppresses progress, including the `Live` region, never the result."""
     observers = _stub_run_once(monkeypatch, _finished_state(SubtaskStatus.DONE))
-    _force_terminal(monkeypatch, value=True)
+    force_terminal(monkeypatch, value=True)
 
     result = runner.invoke(app, ["run", PROMPT, "--quiet"], prog_name=PROG)
 
@@ -405,7 +396,7 @@ def test_run_json_never_starts_a_live_region_even_on_a_terminal(
 ) -> None:
     """A run whose stdout is being parsed is one nobody is watching redraw."""
     observers = _stub_run_once(monkeypatch, _finished_state(SubtaskStatus.DONE))
-    _force_terminal(monkeypatch, value=True)
+    force_terminal(monkeypatch, value=True)
 
     result = runner.invoke(app, ["run", PROMPT, "-o", "json"], prog_name=PROG)
 

@@ -1,17 +1,15 @@
 """The QA scenarios, driven end to end through `run_once` and the CLI over `FakeProvider` (#16).
 
-Every other module tests one part against doubles. This one substitutes the provider port
-and nothing else: the real planner, the real workers, the real tools over the bundled
-`data/`, the real aggregator, and — for the CLI cases — the real Typer command. What is
-scripted is what a model would say; everything under it runs.
+Every other module tests one part against doubles. Here the provider port is the rule:
+the real planner, workers, tools over the bundled `data/`, aggregator and — for the CLI
+cases — the real Typer command all run, and what is scripted is only what a model would
+say. Two tests reach past that rule, each saying why at the seam: the executor's clock,
+which no `Config` field carries (#36), and who answers a clarifying question, which
+`CliRunner` cannot supply because its stdin is a pipe.
 
 The scripts live here rather than in `tests/scenarios.py`, whose contract is the *planner's*
 shape: these are the *workers'* conversations, and they change whenever a tool's schema does.
-
-`FAN_OUT` is the reason `FakeProvider.turns_by_topic` exists — its two retrievals are
-dispatched together and interleave on `asyncio.to_thread`, so one flat queue would hand one
-branch the other's turn. Routing is on the subtask's own instruction, which
-`build_briefing` puts in the first user turn.
+`FAN_OUT` is why `FakeProvider.turns_by_topic` exists; that field carries the reason.
 """
 
 import asyncio
@@ -23,11 +21,18 @@ from typer.testing import CliRunner
 
 import orchestra.cli.app as cli_app
 from conftest import (
+    CHART_CATEGORY,
+    QUARTERS,
+    REPORT_SUMMARY,
+    ROWS_COUNTED,
     FakeProvider,
     OfflineRun,
     ScriptedAsker,
     ScriptedChat,
     answer_turn,
+    chart_draft,
+    count_rows_script,
+    force_terminal,
     tool_turn,
 )
 from orchestra.agents import toolsets
@@ -36,12 +41,9 @@ from orchestra.agents.interrupt import InterruptAction, InterruptDraft
 from orchestra.agents.planner import PlannerAction, PlannerDraft, SubtaskDraft
 from orchestra.agents.structured import DEFAULT_MAX_RETRIES
 from orchestra.agents.toolsets import QUERY_CSV_TOOL, SEARCH_CORPUS, SEARCH_TOOL
-from orchestra.agents.workers.visualization import ChartDraft
 from orchestra.app import run_once
 from orchestra.artifacts import ArtifactStore
-from orchestra.charts import ChartKind, ChartSeries, ChartSpec
 from orchestra.cli.app import app
-from orchestra.cli.console import err_console
 from orchestra.config import default_data_dir
 from orchestra.core.errors import ExitCode
 from orchestra.core.question import Question, QuestionKind
@@ -67,18 +69,12 @@ from scenarios import (
 
 runner = CliRunner()
 
-SUMMARY = "Revenue grew in each of the last three quarters."
-
-# How many rows every scripted `query_csv` call asks for, and so what the analysis scripts
-# must count.
-QUARTERS = 3
-
 # 1 + the retries `agents/structured.py` allows: how many drafts one structured call spends
 # before it gives up. Derived, so raising the ceiling does not silently shorten a script.
 STRUCTURED_ATTEMPTS = 1 + DEFAULT_MAX_RETRIES
 
 # Long enough for a subprocess to start on a loaded CI box, short enough that a run which
-# stopped making progress fails instead of stalling the suite (AC3: never a hang).
+# stopped making progress fails instead of stalling the suite (criterion 3: never a hang).
 BOUND_SECONDS = 60.0
 
 # Fast enough to keep the timeout test cheap, slow enough that the child really starts.
@@ -111,10 +107,6 @@ REPLANNED_STEP = "summarise_growth"
 # empty result, and the branch fails with "finished without retrieving anything".
 SEARCH_QUERY = "industry saas growth benchmarks peer"
 
-# One category of the scripted chart, so an assertion on what the terminal drew tracks the
-# fixture rather than a literal.
-CHART_CATEGORY = "2025Q3"
-
 
 def _file(step: SubtaskDraft) -> str:
     """The artifact a worker writes for `step` — its id, as the store names it."""
@@ -126,23 +118,16 @@ def _pointer(step: SubtaskDraft) -> str:
     return f"{ARTIFACT_PREFIX}{_file(step)}"
 
 
-# Real scripts in a real subprocess: this is what proves one worker's pointer resolves
-# inside the next one's executor. stdlib only — a pandas import would cost a second per
-# case and prove nothing more.
-_COUNT_ROWS = """\
-import json
-data = json.load(open("{dataset}"))
-rows = [row for table in data["datasets"] for row in table["csv"].splitlines()[1:] if row]
-print("quarters analysed:", len(rows))
-"""
+# What the fan-in script labels the second branch's number.
+_NOTES_COUNTED = "benchmark notes:"
 
-_COMPARE = """\
-import json
-ours = json.load(open("{ours}"))
-theirs = json.load(open("{theirs}"))
-rows = [row for table in ours["datasets"] for row in table["csv"].splitlines()[1:] if row]
-print("quarters analysed:", len(rows), "benchmark notes:", len(theirs["sources"]))
-"""
+
+def _compare_script(ours: str, theirs: str) -> str:
+    """`count_rows_script` with the search branch appended, so one script reads both halves
+    of the fan-out — which is what makes the comparison step a fan-in rather than two runs."""
+    return count_rows_script(ours) + (
+        f'theirs = json.load(open("{theirs}"))\nprint("{_NOTES_COUNTED}", len(theirs["sources"]))\n'
+    )
 
 
 def _csv_turns() -> list[AssistantTurn | BaseException]:
@@ -172,26 +157,11 @@ def _python_turns(code: str, inputs: list[str]) -> list[AssistantTurn | BaseExce
     ]
 
 
-def _chart_draft() -> ChartDraft:
-    """A drawable chart — two points, so the step completes rather than degrading."""
-    return ChartDraft(
-        summary="Revenue rose in each quarter.",
-        spec=ChartSpec(
-            title="Quarterly revenue",
-            kind=ChartKind.LINE,
-            x_label="Quarter",
-            y_label="Revenue",
-            categories=[CHART_CATEGORY, "2025Q4"],
-            series=[ChartSeries(name="Revenue", values=[6_340_000.0, 7_015_000.0])],
-        ),
-    )
-
-
 def _report_draft(source: str) -> ReportDraft:
     """A report citing one figure. `source` must be a pointer the run really minted, or
     `Aggregator.validate` rejects the draft and the report degrades."""
     return ReportDraft(
-        executive_summary=SUMMARY,
+        executive_summary=REPORT_SUMMARY,
         key_figures=[FigureDraft(label="Quarters analysed", value=str(QUARTERS), source=source)],
     )
 
@@ -199,12 +169,10 @@ def _report_draft(source: str) -> ReportDraft:
 def _linear_provider() -> FakeProvider:
     """Fetch, analyse, chart — one branch at a time, so one flat queue serves it."""
     return FakeProvider(
-        responses=[LINEAR.draft(), _chart_draft(), _report_draft(_pointer(LINEAR_ANALYSIS))],
+        responses=[LINEAR.draft(), chart_draft(), _report_draft(_pointer(LINEAR_ANALYSIS))],
         turns=[
             *_csv_turns(),
-            *_python_turns(
-                _COUNT_ROWS.format(dataset=_file(LINEAR_FETCH)), [_pointer(LINEAR_FETCH)]
-            ),
+            *_python_turns(count_rows_script(_file(LINEAR_FETCH)), [_pointer(LINEAR_FETCH)]),
         ],
     )
 
@@ -217,12 +185,12 @@ def _fan_out_provider() -> FakeProvider:
     call, so `responses` still holds only the plan, the chart and the report.
     """
     return FakeProvider(
-        responses=[FAN_OUT.draft(), _chart_draft(), _report_draft(_pointer(FAN_OUT_COMPARE))],
+        responses=[FAN_OUT.draft(), chart_draft(), _report_draft(_pointer(FAN_OUT_COMPARE))],
         turns_by_topic={
             FAN_OUT_CSV.instruction: _csv_turns(),
             FAN_OUT_SEARCH.instruction: _search_turns(),
             FAN_OUT_COMPARE.instruction: _python_turns(
-                _COMPARE.format(ours=_file(FAN_OUT_CSV), theirs=_file(FAN_OUT_SEARCH)),
+                _compare_script(_file(FAN_OUT_CSV), _file(FAN_OUT_SEARCH)),
                 [_pointer(FAN_OUT_CSV), _pointer(FAN_OUT_SEARCH)],
             ),
         },
@@ -235,9 +203,7 @@ def _role_omission_provider() -> FakeProvider:
         responses=[ROLE_OMISSION.draft(), _report_draft(_pointer(OMISSION_ANALYSIS))],
         turns=[
             *_csv_turns(),
-            *_python_turns(
-                _COUNT_ROWS.format(dataset=_file(OMISSION_FETCH)), [_pointer(OMISSION_FETCH)]
-            ),
+            *_python_turns(count_rows_script(_file(OMISSION_FETCH)), [_pointer(OMISSION_FETCH)]),
         ],
     )
 
@@ -285,7 +251,7 @@ async def test_scenario_runs_every_step_and_leaves_every_pointer_resolvable(
         state = await run_once(scenario.prompt)
 
     assert state.plan is not None
-    assert_plan_shape(state.plan, scenario.shape)  # the planner's contract still holds (#17)
+    assert_plan_shape(state.plan, scenario.shape)  # the plan reached the engine unchanged
     assert [subtask.status for subtask in state.plan.subtasks] == [SubtaskStatus.DONE] * len(
         state.plan.subtasks
     )
@@ -296,7 +262,7 @@ async def test_scenario_runs_every_step_and_leaves_every_pointer_resolvable(
         assert artifact_path(state.artifact_dir, pointer).is_file()
     report = state.final_result
     assert report is not None
-    assert report.executive_summary == SUMMARY
+    assert report.executive_summary == REPORT_SUMMARY
     # The figure survived the ledger's backing filter, so it cites this run's own artifact.
     assert [figure.source for figure in report.key_figures] == [
         state.artifacts[_step(scenario, AgentRole.ANALYTICS).id]
@@ -341,7 +307,9 @@ async def test_fan_out_starts_both_retrievals_before_either_completes(
     # And both branches' artifacts were staged in the analytics subprocess, which is what
     # makes this a fan-in rather than two runs.
     analysis = json.loads(store.get_text(state.artifacts[FAN_OUT_COMPARE.id]))
-    assert analysis["figures"][0]["value"].strip() == "quarters analysed: 3 benchmark notes: 1"
+    printed = analysis["figures"][0]["value"]
+    assert f"{ROWS_COUNTED} {QUARTERS}" in printed
+    assert f"{_NOTES_COUNTED} 1" in printed  # the one corpus note the query matches
 
 
 # --------------------------------------------------------------------------
@@ -370,7 +338,8 @@ async def test_role_omission_reports_no_chart_and_writes_no_html(
     assert report.chart_ascii is None
     assert state.artifact_dir is not None
     assert [path.name for path in state.artifact_dir.iterdir() if path.suffix == ".html"] == []
-    assert provider.responses == [] and provider.turns == []
+    assert provider.responses == []
+    assert provider.turns == []
 
 
 # --------------------------------------------------------------------------
@@ -402,7 +371,7 @@ def test_cli_run_answers_one_clarifying_question_and_then_completes(
 
     assert result.exit_code == ExitCode.SUCCESS
     assert asker.asked == [question]
-    assert SUMMARY in result.stdout
+    assert REPORT_SUMMARY in result.stdout
 
 
 # --------------------------------------------------------------------------
@@ -468,7 +437,7 @@ async def test_a_malformed_chart_draft_fails_one_step_and_the_run_still_reports(
     assert set(state.artifacts) == {LINEAR_FETCH.id, LINEAR_ANALYSIS.id}
     report = state.final_result
     assert report is not None
-    assert report.executive_summary == SUMMARY
+    assert report.executive_summary == REPORT_SUMMARY
     assert report.chart is None
 
 
@@ -536,24 +505,26 @@ def test_cli_run_interrupted_inside_a_step_exits_130_and_releases_the_terminal(
     """Ctrl-C lands inside a worker, so it unwinds a `TaskGroup` with work in flight: the
     dashboard's `Live` is stopped, the provider released, and the boundary maps it to 130
     with no traceback (§8, §10)."""
+    # Raised from a turn, not delivered as a signal, which `CliRunner` cannot send. The
+    # difference is visible under `-s`: CPython leaves the main task's exception
+    # unretrieved on this path and logs it after the run. A real SIGINT ends the task as
+    # `CancelledError`, which `Runner` retrieves, so it prints nothing.
     provider = FakeProvider(responses=[LINEAR.draft()], turns=[KeyboardInterrupt()])
     offline_run(provider)
-    # Forced, or `_render_mode` picks `PLAIN` for the runner's pipe and no `Live` is opened
-    # — leaving nothing to leave behind (`test_cli.py` gives the same reason).
-    monkeypatch.setattr(err_console, "_force_terminal", True, raising=False)
+    # Forced, or `_render_mode` picks `PLAIN` for the runner's pipe, no `Live` is opened,
+    # and there is nothing left to leave behind.
+    force_terminal(monkeypatch, value=True)
 
     result = runner.invoke(app, ["run", LINEAR.prompt])
 
     assert result.exit_code == ExitCode.INTERRUPTED
     assert result.stdout == ""
-    # `in`, never `==`: asyncio may log an unretrieved task exception onto the real stderr.
+    # `in`, never `==`: the Live region's frames precede it on this stream.
     assert "Interrupted." in result.stderr
     assert "Traceback" not in result.stderr
-    # Rich pops the stack in `Live.stop()`. Read through the private for the reason
-    # `test_app.py`'s bounds test gives: a region still owning the terminal is invisible
-    # until the user's shell has no cursor.
-    assert err_console._live_stack == []
-    assert "\x1b[?25h" in result.stderr  # and the cursor was shown again
+    # The region gave the terminal back: `Live.stop()` shows the cursor it hid, and a
+    # dashboard still owning the screen is invisible until the user's shell has none.
+    assert "\x1b[?25h" in result.stderr
     assert provider.closed
 
 
@@ -591,9 +562,7 @@ async def test_an_interrupt_replans_what_is_left_and_only_the_new_step_runs(
         ],
         turns=[
             *_csv_turns(),
-            *_python_turns(
-                _COUNT_ROWS.format(dataset=_file(LINEAR_FETCH)), [_pointer(LINEAR_FETCH)]
-            ),
+            *_python_turns(count_rows_script(_file(LINEAR_FETCH)), [_pointer(LINEAR_FETCH)]),
         ],
     )
     offline_run(provider)
@@ -636,11 +605,14 @@ def test_cli_run_prints_the_whole_report_on_stdout_and_progress_on_stderr(
     result = runner.invoke(app, ["run", LINEAR.prompt])
 
     assert result.exit_code == ExitCode.SUCCESS
-    assert SUMMARY in result.stdout
+    assert REPORT_SUMMARY in result.stdout
     assert CHART_CATEGORY in result.stdout  # the drawing, not just a pointer to one
+    # Read by fields, never by column: the trace's padding is `cli/format.py`'s to change.
+    rows = [line.split() for line in result.stdout.splitlines()]
     for step in (LINEAR_FETCH, LINEAR_ANALYSIS, LINEAR_CHART):
-        assert f"done     {step.id}" in result.stdout
-    assert SUMMARY not in result.stderr
+        traced = [fields for fields in rows if fields[1:2] == [step.id]]
+        assert traced and traced[0][0] == SubtaskStatus.DONE.value
+    assert REPORT_SUMMARY not in result.stderr
 
 
 def test_cli_run_output_json_emits_exactly_one_document(offline_run: OfflineRun) -> None:
@@ -655,8 +627,11 @@ def test_cli_run_output_json_emits_exactly_one_document(offline_run: OfflineRun)
     document = json.loads(result.stdout)
     assert document["request"] == LINEAR.prompt
     assert document["status"] == "completed"
-    assert document["report"]["executive_summary"] == SUMMARY
+    assert document["report"]["executive_summary"] == REPORT_SUMMARY
     assert [subtask["id"] for subtask in document["subtasks"]] == [
         subtask.id for subtask in LINEAR.draft().subtasks
     ]
+    # The progress went to the other stream, which is what leaves stdout parseable (§5).
+    assert LINEAR_FETCH.id in result.stderr
+    assert REPORT_SUMMARY not in result.stderr
     assert all(subtask["status"] == SubtaskStatus.DONE for subtask in document["subtasks"])

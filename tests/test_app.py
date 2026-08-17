@@ -25,11 +25,17 @@ import pytest
 from pydantic import BaseModel, SecretStr
 
 from conftest import (
+    CHART_CATEGORY,
+    QUARTERS,
+    REPORT_SUMMARY,
+    ROWS_COUNTED,
     FakeProvider,
     OfflineRun,
     ScriptedAsker,
     ScriptedChat,
     answer_turn,
+    chart_draft,
+    count_rows_script,
     tool_turn,
     wait_until,
 )
@@ -43,10 +49,8 @@ from orchestra.agents.workers.analytics import AnalyticsWorker
 from orchestra.agents.workers.base import Worker
 from orchestra.agents.workers.data_retrieval import DataRetrievalWorker
 from orchestra.agents.workers.stub import EchoWorker
-from orchestra.agents.workers.visualization import ChartDraft
 from orchestra.app import RUN_DIR_FORMAT, Orchestra, build_orchestra, run_once
 from orchestra.artifacts import ArtifactStore
-from orchestra.charts import ChartKind, ChartSeries, ChartSpec
 from orchestra.cli.format import OutputFormat, format_result
 from orchestra.config import Config
 from orchestra.core.errors import ProviderError
@@ -65,11 +69,12 @@ from orchestra.providers.base import AssistantTurn
 from orchestra.tools.python_exec import TOOL_NAME as RUN_PYTHON_TOOL
 from scenarios import LINEAR
 
-SUMMARY = "Revenue grew in each of the last three quarters."
 # From the scenario rather than spelled out, so a renamed step fails on the name and not
 # on a stale literal.
 FIRST_STEP = LINEAR.draft().subtasks[0].id
 FIRST_POINTER = f"{ARTIFACT_PREFIX}{FIRST_STEP}.txt"
+# What the real retrieval worker writes, as opposed to `EchoWorker`'s `.txt`.
+RETRIEVED_DATASET = f"{FIRST_STEP}.json"
 ANALYSIS_STEP = next(
     subtask.id for subtask in LINEAR.draft().subtasks if subtask.role is AgentRole.ANALYTICS
 )
@@ -77,11 +82,6 @@ ANALYSIS_POINTER = f"{ARTIFACT_PREFIX}{ANALYSIS_STEP}.json"
 CHART_STEP = next(
     subtask.id for subtask in LINEAR.draft().subtasks if subtask.role is AgentRole.VISUALIZATION
 )
-# One category of `_chart_draft`'s spec, so the assertion tracks the fixture.
-CHART_CATEGORY = "2025Q3"
-# What `_turns` asks for and `_ANALYSIS_CODE` counts, so the fixture figure is one the run
-# computes rather than one invented here.
-QUARTERS_ANALYSED = 3
 
 
 def _responses(
@@ -90,42 +90,16 @@ def _responses(
     """The answers a run consumes, in order: the plan, the chart draft when the real
     Visualization worker is wired in, then the report draft."""
     figures = (
-        [FigureDraft(label="Quarters analysed", value=str(QUARTERS_ANALYSED), source=figure_source)]
+        [FigureDraft(label="Quarters analysed", value=str(QUARTERS), source=figure_source)]
         if figure_source is not None
         else []
     )
-    drafts = [_chart_draft()] if chart else []
+    drafts = [chart_draft()] if chart else []
     return [
         LINEAR.draft(),
         *drafts,
-        ReportDraft(executive_summary=SUMMARY, key_figures=figures),
+        ReportDraft(executive_summary=REPORT_SUMMARY, key_figures=figures),
     ]
-
-
-def _chart_draft() -> ChartDraft:
-    """A drawable chart for the plan's visualization step — two points, so the step
-    completes rather than degrading."""
-    return ChartDraft(
-        summary="Revenue rose in each quarter.",
-        spec=ChartSpec(
-            title="Quarterly revenue",
-            kind=ChartKind.LINE,
-            x_label="Quarter",
-            y_label="Revenue",
-            categories=[CHART_CATEGORY, "2025Q4"],
-            series=[ChartSeries(name="Revenue", values=[6_340_000.0, 7_015_000.0])],
-        ),
-    )
-
-
-# Run for real in a subprocess. Stdlib only: this proves the retrieval step's pointer
-# resolves inside the executor, and a pandas import would cost a second to prove no more.
-_ANALYSIS_CODE = """\
-import json
-data = json.load(open("fetch_quarterly_financials.json"))
-rows = [row for table in data["datasets"] for row in table["csv"].splitlines()[1:] if row]
-print("quarters analysed:", len(rows))
-"""
 
 
 def _turns() -> list[AssistantTurn | BaseException]:
@@ -135,13 +109,13 @@ def _turns() -> list[AssistantTurn | BaseException]:
     that one worker's pointer reaches the next one's subprocess.
     """
     return [
-        tool_turn(QUERY_CSV_TOOL, call_id="c1", last_n=QUARTERS_ANALYSED),
+        tool_turn(QUERY_CSV_TOOL, call_id="c1", last_n=QUARTERS),
         answer_turn("Retrieved the last three quarters."),
         tool_turn(
             RUN_PYTHON_TOOL,
             call_id="c2",
-            code=_ANALYSIS_CODE,
-            inputs=["artifact:fetch_quarterly_financials.json"],
+            code=count_rows_script(RETRIEVED_DATASET),
+            inputs=[f"{ARTIFACT_PREFIX}{RETRIEVED_DATASET}"],
         ),
         answer_turn("Revenue rose in each quarter."),
     ]
@@ -200,7 +174,7 @@ async def test_run_task_plans_executes_and_returns_a_ledger_of_pointers(
     assert state.events[-1].kind is EventKind.RUN_FINISHED
     # The run hands back an answer, not just a ledger.
     assert state.final_result is not None
-    assert state.final_result.executive_summary == SUMMARY
+    assert state.final_result.executive_summary == REPORT_SUMMARY
     assert [figure.source for figure in state.final_result.key_figures] == [FIRST_POINTER]
 
 
@@ -576,7 +550,7 @@ async def test_run_once_reports_a_computed_figure_and_its_chart_in_both_output_s
     # Survived the aggregator's backing filter, citing a pointer this run actually minted.
     (figure,) = report.key_figures
     assert figure.source == state.artifacts[ANALYSIS_STEP]
-    assert f"quarters analysed: {figure.value}" in store.get_text(figure.source)
+    assert f"{ROWS_COUNTED} {figure.value}" in store.get_text(figure.source)
     assert report.chart is not None
     # `artifact_path`, not `store.path_for`: the store raises on a missing file, so that
     # assertion could only ever raise, never fail.

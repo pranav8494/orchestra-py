@@ -21,7 +21,9 @@ from pydantic import BaseModel, SecretStr
 from orchestra import app as app_module
 from orchestra.agents.planner import Planner
 from orchestra.agents.workers.base import Worker
+from orchestra.agents.workers.visualization import ChartDraft
 from orchestra.artifacts import ArtifactStore
+from orchestra.charts import ChartKind, ChartSeries, ChartSpec
 from orchestra.cli.console import err_console
 from orchestra.core.errors import TaskFailure
 from orchestra.core.interrupt import Chat
@@ -56,6 +58,25 @@ _COLOUR_ENV_VARS = ("CLICOLOR", "CLICOLOR_FORCE", "FORCE_COLOR", "NO_COLOR")
 # this helper.
 _WAIT_INTERVAL = 0.001
 _WAIT_POLLS = 1000
+
+# ------------------------------------------------------------------------------------
+# The scripted run's fixture values. Shared because every module that drives a whole run
+# asserts on them, and a per-module copy drifts from the script that produced it.
+# ------------------------------------------------------------------------------------
+
+# The executive summary a scripted `ReportDraft` carries.
+REPORT_SUMMARY = "Revenue grew in each of the last three quarters."
+
+# How many rows a scripted `query_csv` call asks for — and so what `count_rows_script`
+# counts and what the report's figure states.
+QUARTERS = 3
+
+# What `count_rows_script` labels its number, so an assertion on the output tracks the
+# script rather than a literal of its own.
+ROWS_COUNTED = "quarters analysed:"
+
+# One category of `chart_draft`'s spec, for the same reason.
+CHART_CATEGORY = "2025Q3"
 
 
 @pytest.fixture(autouse=True)
@@ -103,11 +124,56 @@ def answer_turn(text: str, *, tokens: int = 50) -> AssistantTurn:
     return AssistantTurn(text=text, usage_tokens=tokens)
 
 
+def chart_draft() -> ChartDraft:
+    """A drawable chart for a plan's visualization step — two points, so the step completes
+    rather than degrading on thin data."""
+    return ChartDraft(
+        summary="Revenue rose in each quarter.",
+        spec=ChartSpec(
+            title="Quarterly revenue",
+            kind=ChartKind.LINE,
+            x_label="Quarter",
+            y_label="Revenue",
+            categories=[CHART_CATEGORY, "2025Q4"],
+            series=[ChartSeries(name="Revenue", values=[6_340_000.0, 7_015_000.0])],
+        ),
+    )
+
+
+def count_rows_script(dataset: str) -> str:
+    """A script printing how many rows one retrieval artifact holds.
+
+    Run for real in a subprocess, so it is what proves a worker's pointer resolves inside
+    the next one's executor. Stdlib only: a pandas import would cost a second and prove no
+    more. `dataset` is the artifact's filename, which is how the executor stages it.
+    """
+    return (
+        "import json\n"
+        f'data = json.load(open("{dataset}"))\n'
+        'rows = [row for table in data["datasets"] for row in table["csv"].splitlines()[1:] if row]\n'
+        f'print("{ROWS_COUNTED}", len(rows))\n'
+    )
+
+
+def force_terminal(monkeypatch: pytest.MonkeyPatch, *, value: bool) -> None:
+    """Pretend stderr is (or is not) a tty; `CliRunner` always reports a pipe, leaving the
+    `LIVE` arm of `cli/app._render_mode` unreachable.
+
+    Patched on the *instance*: doing it on the class flips stdout's tty-ness too, and a
+    test would then pass against code reading the wrong stream.
+    """
+    monkeypatch.setattr(err_console, "_force_terminal", value, raising=False)
+
+
 @contextmanager
 def fake_terminal(monkeypatch: pytest.MonkeyPatch) -> Iterator[int]:
     """A pty standing in for stdin and stderr, yielding the end a "user" types into.
 
     Never the developer's terminal, and closed on the way out (§12).
+
+    `is_terminal` is patched on the *class*, unlike `force_terminal`'s instance patch, so
+    stdout reads as a terminal too. Wanted here — the pty stands in for the whole terminal
+    — but it means a caller cannot also assert on stdout's piped shape.
     """
     primary, secondary = pty.openpty()
     try:
@@ -220,14 +286,20 @@ class FakeProvider:
     ) -> list[AssistantTurn | BaseException]:
         """Which queue answers this conversation: the first topic named in it, else `turns`.
 
-        Substring over the joined content rather than the first message alone: the
-        transcript grows a turn per lap, and the branch is identified by the same phrase
-        throughout.
+        Matched over the whole transcript, not the first message: it grows a turn per lap
+        and the branch is named the same way throughout.
         """
         content = "\n".join(message.content for message in messages)
         for topic, queue in self.turns_by_topic.items():
             if topic in content:
                 return queue
+        if self.turns_by_topic and not self.turns:
+            # A mistyped topic would otherwise fall through to an empty `turns` and be
+            # reported as a branch that ran long, sending the reader to the wrong script.
+            raise AssertionError(
+                f"FakeProvider has no queue for this conversation: none of "
+                f"{sorted(self.turns_by_topic)} appear in it.\n{content}"
+            )
         return self.turns
 
     async def aclose(self) -> None:
