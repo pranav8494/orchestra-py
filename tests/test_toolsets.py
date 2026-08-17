@@ -19,7 +19,20 @@ from orchestra.agents.toolsets import (
 from orchestra.artifacts import ArtifactStore
 from orchestra.config import default_data_dir
 
-EXPENSES_CSV = "expense_breakdown.csv"
+# The committed catalogue: every file `data/` ships bar the corpus, each with the shape
+# the startup probe reports for it. Both the roster test and the "the demo still has its
+# data" test read this, so a file added to `data/` is added here once.
+BUNDLED_DATASETS = {
+    "Q4 Board Pack (final).csv": "CSV with columns metric, value, unit, notes & source",
+    "expense_breakdown.csv": "CSV with columns quarter, category, amount",
+    "product_lines.json": "an object with keys quarter, product_line, revenue",
+    "project_timeline.md": "beginning '# Project timeline 2024-2025'",
+    "quarterly_financials.csv": "CSV with columns quarter, revenue, costs, profit",
+    "yearly_performance.csv": (
+        "CSV with columns year, revenue, costs, profit, headcount_year_end, "
+        "customers_year_end, net_revenue_retention_pct"
+    ),
+}
 
 
 def test_data_retrieval_tools_advertise_the_names_the_worker_branches_on(
@@ -44,9 +57,11 @@ def test_retrievable_data_lists_what_each_tool_supplies(store: ArtifactStore) ->
     roster = retrievable_data(data_retrieval_tools(default_data_dir(), store))
 
     assert roster.count("- ") == 2
-    # Both bundled datasets and their columns, from the tool that holds them.
-    assert "quarter, revenue, costs, profit" in roster
-    assert "quarter, category, amount" in roster
+    # Every bundled dataset, named and shaped, from the tool that holds them: the planner
+    # can only plan a step against a file it was told the columns of.
+    for filename, shape in BUNDLED_DATASETS.items():
+        assert Path(filename).stem in roster
+        assert shape in roster
     # And the boundary that made a stock-price run plan three steps and produce nothing.
     assert "nothing beyond those files" in roster
 
@@ -60,8 +75,9 @@ def test_data_retrieval_tools_read_the_committed_datasets() -> None:
     """The bundled files are the offline guarantee — a missing one is a broken demo."""
     data_dir = default_data_dir()
 
-    assert (data_dir / FINANCIALS_CSV).is_file()
-    assert (data_dir / EXPENSES_CSV).is_file()
+    assert FINANCIALS_CSV in BUNDLED_DATASETS  # the one the fixtures fetch by name
+    for filename in BUNDLED_DATASETS:
+        assert (data_dir / filename).is_file()
     assert (data_dir / SEARCH_CORPUS).is_file()
 
 

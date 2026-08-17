@@ -147,6 +147,11 @@ def test_fetch_data_info_names_every_bundled_dataset(bundled: FetchDataTool) -> 
 
     assert "quarterly_financials" in description and "expense_breakdown" in description
     assert "quarter, revenue, costs, profit" in description
+    # Not only the CSVs: the JSON and Markdown probes have to reach the model too, or the
+    # files are fetchable by a name it was never shown.
+    assert "quarter, product_line, revenue" in description
+    assert "# Project timeline" in description
+    assert "Q4 Board Pack (final)" in description  # named as the operator named it
     # A two-tool agent only stays a two-tool agent if each prompt names the other.
     assert "search" in description
 
@@ -219,6 +224,49 @@ async def test_fetch_data_second_bundled_dataset_reconciles_with_the_first(
     for quarter, _category, amount in breakdown:
         totals[quarter] = totals.get(quarter, 0) + int(amount)
     assert totals == costs
+
+
+@pytest.mark.asyncio
+async def test_fetch_data_bundled_rollups_reconcile_with_the_quarters(
+    bundled: FetchDataTool,
+) -> None:
+    """Six datasets is only a catalogue if they agree: a cross-file question has to have
+    one answer. The yearly roll-up sums the quarters, and each quarter's product lines sum
+    to its revenue, so a plan that joins any two of them lands on the same figure."""
+    financials = await bundled.run(tool_call("fetch_data", name="quarterly_financials"))
+    yearly = await bundled.run(tool_call("fetch_data", name="yearly_performance"))
+    products = await bundled.run(tool_call("fetch_data", name="product_lines"))
+
+    quarters = rows(financials.content)[1:]
+    for column, index in (("revenue", 1), ("costs", 2), ("profit", 3)):
+        by_year: dict[str, int] = {}
+        for row in quarters:
+            by_year[row[0][:4]] = by_year.get(row[0][:4], 0) + int(row[index])
+        header, *annual = rows(yearly.content)
+        assert {row[0]: int(row[header.index(column)]) for row in annual} == by_year
+
+    lines: dict[str, int] = {}
+    for entry in json.loads(products.content):
+        lines[entry["quarter"]] = lines.get(entry["quarter"], 0) + int(entry["revenue"])
+    assert lines == {row[0]: int(row[1]) for row in quarters}
+
+
+@pytest.mark.asyncio
+async def test_fetch_data_bundled_board_pack_is_stored_under_a_repaired_name(
+    bundled: FetchDataTool,
+) -> None:
+    """The committed catalogue exercises the repair path, not only a `tmp_path` fixture:
+    `ARTIFACT_NAME_PATTERN` admits no parenthesis, so this file is advertised under the
+    operator's name and stored under a name every later call and `run_python` accept."""
+    response = await bundled.run(tool_call("fetch_data", name="Q4 Board Pack (final)"))
+
+    assert not response.is_error
+    assert response.metadata[POINTER_KEY] == "artifact:Q4 Board Pack _final_.csv"
+    assert response.metadata[INLINED_KEY] == "true"
+    # Agrees with the quarter it summarises, and carries the `&` column through untouched.
+    header, *board = rows(response.content)
+    assert header == ["metric", "value", "unit", "notes & source"]
+    assert {row[0]: row[1] for row in board}["revenue"] == "7015000"
 
 
 @pytest.mark.asyncio
