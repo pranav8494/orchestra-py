@@ -174,7 +174,10 @@ class SubtaskContext(BaseModel):
 
 
 class KeyFigure(BaseModel):
-    """One number, and the artifact it was read from.
+    """One number, and the upstream artifact the step that computed it was given.
+
+    Not the file the script read — a step may open data staged beside its input, and what
+    a figure cites has to be a pointer some step produced or `backed_figures` drops it.
 
     `source` is a pointer, not free text: it lets the aggregator drop a figure this run
     never produced. One type for both ends — a worker records the number as it computed it,

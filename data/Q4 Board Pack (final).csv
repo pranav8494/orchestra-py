@@ -1,0 +1,10 @@
+metric,value,unit,notes & source
+revenue,7015000,USD,quarterly_financials 2025Q4
+costs,4880000,USD,quarterly_financials 2025Q4
+profit,2135000,USD,quarterly_financials 2025Q4
+profit margin,30.4,percent,profit / revenue for 2025Q4
+salaries spend,3026000,USD,expense_breakdown 2025Q4
+marketing spend,878000,USD,expense_breakdown 2025Q4
+headcount (year end),186,people,yearly_performance 2025
+customers (year end),402,count,yearly_performance 2025
+largest product line revenue,3760000,USD,product_lines Core Platform 2025Q4

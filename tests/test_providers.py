@@ -218,7 +218,7 @@ async def test_send_translates_tool_specs_into_the_sdk_shape(
 ) -> None:
     provider, stub = _provider(StubMessage([]), monkeypatch)
     spec = ToolSpec(
-        name="query_csv",
+        name="fetch_data",
         description="Run one SQL-ish query over the sales table.",
         input_schema={"type": "object", "properties": {"query": {"type": "string"}}},
     )
@@ -227,7 +227,7 @@ async def test_send_translates_tool_specs_into_the_sdk_shape(
 
     assert stub.kwargs["tools"] == [
         {
-            "name": "query_csv",
+            "name": "fetch_data",
             "description": "Run one SQL-ish query over the sales table.",
             "input_schema": {"type": "object", "properties": {"query": {"type": "string"}}},
         }
@@ -244,7 +244,7 @@ async def test_send_decodes_tool_use_blocks_into_tool_calls(
             StubBlock(type="thinking", thinking="ignored"),
             StubBlock(type="text", text="looking that up"),
             StubBlock(
-                type="tool_use", id="toolu_01", name="query_csv", input={"query": "SELECT 1"}
+                type="tool_use", id="toolu_01", name="fetch_data", input={"query": "SELECT 1"}
             ),
             StubBlock(type="tool_use", id="toolu_02", name="search", input={"q": "margin"}),
         ],
@@ -257,7 +257,7 @@ async def test_send_decodes_tool_use_blocks_into_tool_calls(
 
     assert turn.text == "looking that up"
     assert turn.tool_calls == (
-        ToolCall(id="toolu_01", name="query_csv", arguments={"query": "SELECT 1"}),
+        ToolCall(id="toolu_01", name="fetch_data", arguments={"query": "SELECT 1"}),
         ToolCall(id="toolu_02", name="search", arguments={"q": "margin"}),
     )
     assert turn.usage_tokens == 3
@@ -278,7 +278,7 @@ async def test_send_replays_an_assistant_turn_as_text_and_tool_use_blocks(
                 role=MessageRole.ASSISTANT,
                 content="looking that up",
                 tool_calls=(
-                    ToolCall(id="toolu_01", name="query_csv", arguments={"query": "SELECT 1"}),
+                    ToolCall(id="toolu_01", name="fetch_data", arguments={"query": "SELECT 1"}),
                 ),
             ),
         ],
@@ -293,7 +293,7 @@ async def test_send_replays_an_assistant_turn_as_text_and_tool_use_blocks(
                 {
                     "type": "tool_use",
                     "id": "toolu_01",
-                    "name": "query_csv",
+                    "name": "fetch_data",
                     "input": {"query": "SELECT 1"},
                 },
             ],
@@ -479,7 +479,7 @@ async def test_send_replays_raw_content_instead_of_rebuilding_the_turn(
             ProviderMessage(
                 role=MessageRole.ASSISTANT,
                 content="this text must not be what is sent",
-                tool_calls=(ToolCall(id="toolu_01", name="query_csv", arguments={}),),
+                tool_calls=(ToolCall(id="toolu_01", name="fetch_data", arguments={}),),
                 raw_content=blocks,
             )
         ],

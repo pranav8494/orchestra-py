@@ -14,6 +14,7 @@ shape: these are the *workers'* conversations, and they change whenever a tool's
 
 import asyncio
 import json
+from pathlib import Path
 from typing import cast
 
 import pytest
@@ -22,6 +23,7 @@ from typer.testing import CliRunner
 import orchestra.cli.app as cli_app
 from conftest import (
     CHART_CATEGORY,
+    FETCHED_DATASET,
     QUARTERS,
     REPORT_SUMMARY,
     ROWS_COUNTED,
@@ -40,7 +42,7 @@ from orchestra.agents.aggregator import FigureDraft, ReportDraft
 from orchestra.agents.interrupt import InterruptAction, InterruptDraft
 from orchestra.agents.planner import PlannerAction, PlannerDraft, SubtaskDraft
 from orchestra.agents.structured import DEFAULT_MAX_RETRIES
-from orchestra.agents.toolsets import QUERY_CSV_TOOL, SEARCH_CORPUS, SEARCH_TOOL
+from orchestra.agents.toolsets import FETCH_DATA_TOOL, SEARCH_CORPUS, SEARCH_TOOL
 from orchestra.app import run_once
 from orchestra.artifacts import ArtifactStore
 from orchestra.cli.app import app
@@ -51,10 +53,12 @@ from orchestra.core.state import (
     ARTIFACT_PREFIX,
     AgentRole,
     EventKind,
+    KeyFigure,
     SubtaskStatus,
     artifact_path,
 )
 from orchestra.providers.base import AssistantTurn
+from orchestra.tools.fetch_data import INLINE_MAX_BYTES
 from orchestra.tools.python_exec import TOOL_NAME as RUN_PYTHON_TOOL
 from orchestra.tools.python_exec import RunPythonTool
 from scenarios import (
@@ -133,7 +137,7 @@ def _compare_script(ours: str, theirs: str) -> str:
 def _csv_turns() -> list[AssistantTurn | BaseException]:
     """A retrieval agent reading the company's own figures, then closing."""
     return [
-        tool_turn(QUERY_CSV_TOOL, last_n=QUARTERS),
+        tool_turn(FETCH_DATA_TOOL, name=FETCHED_DATASET),
         answer_turn("Retrieved the last three quarters."),
     ]
 
@@ -149,7 +153,8 @@ def _search_turns() -> list[AssistantTurn | BaseException]:
 def _python_turns(code: str, inputs: list[str]) -> list[AssistantTurn | BaseException]:
     """An analytics agent running one script over `inputs`, then closing.
 
-    `inputs[0]` becomes the figure's source, so the pointer order is load-bearing.
+    The first `inputs` entry an earlier step produced becomes the figure's source, so
+    which pointers are named is load-bearing even though their order is not.
     """
     return [
         tool_turn(RUN_PYTHON_TOOL, code=code, inputs=inputs),
@@ -340,6 +345,94 @@ async def test_role_omission_reports_no_chart_and_writes_no_html(
     assert [path.name for path in state.artifact_dir.iterdir() if path.suffix == ".html"] == []
     assert provider.responses == []
     assert provider.turns == []
+
+
+# --------------------------------------------------------------------------
+# Criterion 1, continued — a dataset too large to inline still reaches the report.
+# --------------------------------------------------------------------------
+
+# Past `INLINE_MAX_BYTES`, so `fetch_data` answers with a pointer instead of rows. Written
+# to a `tmp_path` rather than committed to `data/`: the demo data is small on purpose.
+_BIG_ROWS = 2_000
+_BIG_DATASET = "big_dataset"
+
+
+def _big_data_dir(root: Path) -> Path:
+    """A data directory holding one file over the inline threshold."""
+    data_dir = root / "bigdata"
+    data_dir.mkdir()
+    (data_dir / f"{_BIG_DATASET}.csv").write_text(
+        "quarter,revenue\n" + "2025Q1,1\n" * _BIG_ROWS, encoding="utf-8"
+    )
+    assert (data_dir / f"{_BIG_DATASET}.csv").stat().st_size > INLINE_MAX_BYTES
+    return data_dir
+
+
+def _staged_file_script(filename: str) -> str:
+    """A script reading the raw data file the executor staged, not the retrieval JSON.
+
+    Stdlib only, like `count_rows_script`: what is proved here is that the pointer
+    resolved and the file arrived beside the script.
+    """
+    return (
+        f'rows = [line for line in open("{filename}").read().splitlines()[1:] if line]\n'
+        f'print("{ROWS_COUNTED}", len(rows))\n'
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_dataset_too_large_to_inline_still_produces_a_backed_figure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, offline_run: OfflineRun
+) -> None:
+    """Regression (#40's pointer path): retrieval hands the file on by pointer, so the
+    analysis script stages two inputs — the retrieval artifact and the raw data file.
+
+    The raw file is a `put_file` registration, not a subtask's output, so a figure sourced
+    to it is dropped by `TaskState.backed_figures` and the report silently loses every
+    number. Both bundled files are under the threshold, which is why the other scenarios
+    never see this.
+    """
+    monkeypatch.setenv("DATA_DIR", str(_big_data_dir(tmp_path)))
+    provider = FakeProvider(
+        responses=[LINEAR.draft(), chart_draft(), _report_draft(_pointer(LINEAR_ANALYSIS))],
+        turns=[
+            tool_turn(FETCH_DATA_TOOL, name=_BIG_DATASET),
+            answer_turn("The file is large, so it comes on by pointer."),
+            # The data file first, which is the order a model reaches for when it is the
+            # file it wants to read. The prompt now asks for the other order, but a prompt
+            # is guidance and the figure's provenance may not depend on the model taking it.
+            tool_turn(
+                RUN_PYTHON_TOOL,
+                code=_staged_file_script(f"{_BIG_DATASET}.csv"),
+                inputs=[f"{ARTIFACT_PREFIX}{_BIG_DATASET}.csv", _pointer(LINEAR_FETCH)],
+            ),
+            answer_turn("Counted every row in the large file."),
+        ],
+    )
+    offline_run(provider)
+
+    async with asyncio.timeout(BOUND_SECONDS):
+        state = await run_once(LINEAR.prompt)
+
+    assert not state.failed
+    assert state.artifact_dir is not None
+    store = ArtifactStore(state.artifact_dir)
+
+    # The pointer path really ran: rows out of the transcript, the file named instead.
+    retrieved = json.loads(store.get_text(state.artifacts[LINEAR_FETCH.id]))
+    assert retrieved["datasets"][0]["csv"] == ""
+    assert retrieved["datasets"][0]["pointer"] == f"{ARTIFACT_PREFIX}{_BIG_DATASET}.csv"
+
+    # The script read the staged file, and its number cites an artifact the run produced —
+    # the assertion that fails when the figure is sourced to the raw data file instead.
+    analysis = json.loads(store.get_text(state.artifacts[LINEAR_ANALYSIS.id]))
+    figures = [KeyFigure.model_validate(figure) for figure in analysis["figures"]]
+    assert [figure.value for figure in figures] == [f"{ROWS_COUNTED} {_BIG_ROWS}\n"]
+    assert state.backed_figures(figures) == figures
+
+    report = state.final_result
+    assert report is not None
+    assert len(report.key_figures) == 1
 
 
 # --------------------------------------------------------------------------

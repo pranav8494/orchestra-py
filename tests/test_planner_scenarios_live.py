@@ -13,13 +13,16 @@ this run has no data sources, which is not the configuration any of these assert
 about.
 """
 
+import tempfile
 from collections.abc import AsyncIterator
 from contextlib import aclosing, asynccontextmanager
+from pathlib import Path
 
 import pytest
 
 from orchestra.agents.planner import Planner
 from orchestra.agents.toolsets import data_retrieval_tools, retrievable_data
+from orchestra.artifacts import ArtifactStore
 from orchestra.config import Config, load_config
 from orchestra.core.errors import ConfigError
 from orchestra.core.question import MAX_QUESTIONS, Question
@@ -78,13 +81,18 @@ async def _planner(asker: AnswersAnything | None = None) -> AsyncIterator[Planne
         model=CONFIG.anthropic_model,
         max_tokens=CONFIG.anthropic_max_tokens,
     )
-    tools = data_retrieval_tools(CONFIG.data_dir, search_api_key=CONFIG.tavily_api_key)
-    async with aclosing(provider):
-        yield Planner(
-            provider,
-            ask_tool=None if asker is None else AskUserTool(asker),
-            retrievable_data=retrievable_data(tools),
+    # A throwaway store: the planner reads the roster only, and nothing here fetches a
+    # file, but the toolset is wired exactly as `build_orchestra` wires it.
+    with tempfile.TemporaryDirectory(prefix="orchestra-live-roster-") as scratch:
+        tools = data_retrieval_tools(
+            CONFIG.data_dir, ArtifactStore(Path(scratch)), search_api_key=CONFIG.tavily_api_key
         )
+        async with aclosing(provider):
+            yield Planner(
+                provider,
+                ask_tool=None if asker is None else AskUserTool(asker),
+                retrievable_data=retrievable_data(tools),
+            )
 
 
 @pytest.mark.asyncio
