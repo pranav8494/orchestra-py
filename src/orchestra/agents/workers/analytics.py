@@ -16,6 +16,7 @@ The aggregator sees a *preview*, so field order is a budget — see `AnalysisRes
 """
 
 import asyncio
+from collections.abc import Collection
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -110,10 +111,14 @@ class AnalyticsWorker:
         # No split by tool name, unlike retrieval's two: one tool, so everything kept is a
         # script that ran and printed.
         computations = [_computation(outcome.call, outcome.response) for outcome in result.kept]
+        # What an earlier step produced, which is the only thing a figure may cite. A
+        # script may stage more than that — a raw data file `fetch_data` registered — and
+        # those pointers are no step's output.
+        upstream = frozenset(context.inputs.values())
         figures = [
             figure
             for outcome in result.kept
-            if (figure := _figure(outcome.call, outcome.response)) is not None
+            if (figure := _figure(outcome.call, outcome.response, upstream)) is not None
         ]
 
         if not computations:
@@ -146,14 +151,21 @@ def _computation(call: ToolCall, response: ToolResponse) -> Computation:
     return Computation(stdout=response.content, code=str(call.arguments.get("code", "")))
 
 
-def _figure(call: ToolCall, response: ToolResponse) -> KeyFigure | None:
-    """Pair a script's output with the artifact it read — the first pointer in `inputs`.
+def _figure(call: ToolCall, response: ToolResponse, upstream: Collection[str]) -> KeyFigure | None:
+    """Pair a script's output with the upstream artifact its step was given — the first
+    of them the call named.
 
-    `None` when the call named no readable one: a number whose provenance is missing is
-    dropped rather than sourced to a guess, which is what #9 exists to stop.
+    Not "the artifact it read", which is what the script's own code decides and this
+    cannot know, and not `inputs[0]`: since #40 a script may also stage the raw data file
+    `fetch_data` registered, and that pointer is no subtask's output, so
+    `TaskState.backed_figures` drops a figure citing it and the report loses the number.
+
+    `None` when the call named no upstream pointer: a number the plan cannot trace to a
+    step is dropped rather than sourced to a guess, which is what #9 exists to stop.
     """
     inputs = call.arguments.get("inputs")
-    first: object = inputs[0] if isinstance(inputs, list) and inputs else None
+    named = [item for item in inputs if item in upstream] if isinstance(inputs, list) else []
+    first: object = named[0] if named else None
     try:
         # Validated, not trusted: `call.arguments` is model output, so the pointer's shape
         # is checked here even though the tool accepted the call (§7).

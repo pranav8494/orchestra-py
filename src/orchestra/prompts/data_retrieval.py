@@ -19,6 +19,9 @@ How to work:
 
 - Choose the tool that fits the question, and use more than one only when the subtask \
 genuinely needs both.
+- You fetch a data file by name, whole. A small one comes back as its contents; a large \
+one comes back as a summary and an artifact pointer, which is passed on to the analysis \
+step for you - that is the answer, not a partial one, so do not ask again for the rows.
 - A tool that reports an error has told you how to call it correctly. Read the message \
 and try again; do not repeat the call unchanged.
 - Never state a figure a tool did not return. If the data is not there, say plainly \

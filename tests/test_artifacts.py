@@ -41,6 +41,18 @@ def test_put_file_copies_an_existing_file_into_the_store(
     assert store.path_for(pointer).parent == store.root
 
 
+def test_put_file_stores_under_the_name_it_is_given(store: ArtifactStore, tmp_path: Path) -> None:
+    """What `fetch_data` needs: an operator's filename the allow-list refuses is stored
+    under a repaired one, rather than costing the run a dataset it advertised."""
+    source = tmp_path / "Q3 P&L.csv"
+    source.write_text("quarter,profit\n", encoding="utf-8")
+
+    pointer = store.put_file(source, name="Q3 P_L.csv")
+
+    assert pointer == "artifact:Q3 P_L.csv"
+    assert store.get_text(pointer) == "quarter,profit\n"
+
+
 def test_put_same_name_twice_does_not_clobber_the_first(store: ArtifactStore) -> None:
     """Two subtasks both naming their output `chart.png` must both survive."""
     first = store.put_text("chart.png", "first")

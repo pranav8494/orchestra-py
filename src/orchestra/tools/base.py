@@ -9,7 +9,7 @@
 """
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 
 from pydantic import ValidationError
@@ -60,6 +60,14 @@ class ToolResponse:
     # Succeeded, but not as intended — a backend fell back, an output degraded. Structured
     # rather than grepped out of `content`, which stops working when the wording changes.
     warning: str = ""
+    # Detail for the *worker*, not the model: `fetch_data` puts the artifact pointer here
+    # so the worker records it without parsing prose written for a reader (§6). Strings
+    # both sides, so it stays as serialisable as `content`.
+    #
+    # A mapping field makes `ToolResponse` unhashable and its freeze shallow. Deliberate:
+    # responses are compared and read, never used as keys or set members — a hash would
+    # be over a value the sender can still mutate.
+    metadata: Mapping[str, str] = field(default_factory=dict)
 
 
 class BaseTool(Protocol):
