@@ -4,7 +4,7 @@ Asserts what a worker built on `ToolLoop` may assume: a summary and the calls wo
 keeping, tool failures fed back to the model rather than raised, both bounds enforced with
 the caller's label, and cancellation propagated.
 
-This file never names a real tool — a loop that only worked for `query_csv` would still
+This file never names a real tool — a loop that only worked for `fetch_data` would still
 pass `test_data_retrieval.py`.
 """
 

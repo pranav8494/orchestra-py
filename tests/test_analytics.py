@@ -16,8 +16,8 @@ from collections.abc import Sequence
 
 import pytest
 
-from conftest import FakeProvider, FakeTool, tool_call
-from orchestra.agents.toolsets import FINANCIALS_CSV, analytics_tools
+from conftest import FINANCIALS_CSV, FakeProvider, FakeTool, tool_call
+from orchestra.agents.toolsets import analytics_tools
 from orchestra.agents.workers.analytics import AnalysisResult, AnalyticsWorker
 from orchestra.agents.workers.data_retrieval import RetrievedDataset, RetrievedTable
 from orchestra.artifacts import DEFAULT_PREVIEW_LIMIT, ArtifactStore
@@ -32,6 +32,7 @@ from orchestra.core.state import (
     TaskEvent,
     TaskState,
 )
+from orchestra.prompts import ANALYTICS_SYSTEM_PROMPT
 from orchestra.providers.base import AssistantTurn
 from orchestra.tools.base import BaseTool, ToolCall, ToolResponse
 from orchestra.tools.python_exec import TOOL_NAME as RUN_PYTHON_TOOL
@@ -128,7 +129,7 @@ def _seed_upstream(store: ArtifactStore, csv_text: str) -> str:
     dataset = RetrievedDataset(
         instruction="Load the quarterly financials",
         summary="Eight quarters of revenue, costs and profit.",
-        datasets=[RetrievedTable(query='{"last_n": 8}', csv=csv_text)],
+        datasets=[RetrievedTable(query='{"name": "quarterly_financials"}', csv=csv_text)],
     )
     return store.put_text(f"{UPSTREAM}.json", dataset.model_dump_json(indent=2))
 
@@ -162,11 +163,11 @@ async def test_worker_stores_the_analysis_and_returns_its_pointer(store: Artifac
 
 
 @pytest.mark.asyncio
-async def test_worker_sources_each_figure_to_the_artifact_its_script_read(
+async def test_worker_sources_each_figure_to_the_upstream_artifact_it_was_given(
     store: ArtifactStore,
 ) -> None:
-    """#9's pairing: the figure cites the pointer the call read, and carries no label — the
-    report's wording is the aggregator's to write."""
+    """#9's pairing: the figure cites the upstream pointer the call named, and carries no
+    label — the report's wording is the aggregator's to write."""
     provider = FakeProvider(
         turns=[
             AssistantTurn(
@@ -186,6 +187,100 @@ async def test_worker_sources_each_figure_to_the_artifact_its_script_read(
     assert _stored(store, pointer).figures == [
         KeyFigure(value="2025Q4 growth: 10.65%", source=UPSTREAM_POINTER)
     ]
+
+
+@pytest.mark.asyncio
+async def test_worker_sources_a_figure_to_the_upstream_artifact_not_a_staged_data_file(
+    store: ArtifactStore,
+) -> None:
+    """Regression: past `INLINE_MAX_BYTES` retrieval hands the file on by pointer, so the
+    script stages two inputs — the step's artifact and the raw data file `fetch_data`
+    registered. Only the first is a subtask output, so sourcing the number to the data
+    file has `TaskState.backed_figures` drop it and the report loses the figure."""
+    raw = "artifact:big_dataset.csv"  # a `put_file` registration, no step's output
+    provider = FakeProvider(
+        turns=[
+            AssistantTurn(
+                text="",
+                tool_calls=(_call("print('total: 42')", inputs=[raw, UPSTREAM_POINTER]),),
+                usage_tokens=20,
+            ),
+            AssistantTurn(text="Totals computed.", usage_tokens=20),
+        ]
+    )
+    tool = FakeTool(RUN_PYTHON_TOOL, [ToolResponse(content="total: 42")])
+    state = TaskState(user_request=REQUEST)
+    state.artifacts[UPSTREAM] = UPSTREAM_POINTER
+
+    pointer = await _worker(provider, store, [tool]).run(
+        _context(inputs={UPSTREAM: UPSTREAM_POINTER})
+    )
+
+    figures = _stored(store, pointer).figures
+    assert [figure.source for figure in figures] == [UPSTREAM_POINTER]
+    # The rule the report applies, asserted here rather than trusted: a figure sourced to
+    # `raw` survives this worker and is silently dropped two steps later.
+    assert state.backed_figures(figures) == figures
+
+
+@pytest.mark.asyncio
+async def test_worker_sources_a_figure_to_the_first_upstream_pointer_of_several(
+    store: ArtifactStore,
+) -> None:
+    """A fan-in names two upstream artifacts. The first of them is the citation — chosen
+    over the second deliberately, so which one a number cites does not vary with how the
+    model happened to order a list."""
+    second = "artifact:fetch_benchmarks.json"
+    provider = FakeProvider(
+        turns=[
+            AssistantTurn(
+                text="",
+                tool_calls=(_call("print('compared')", inputs=[UPSTREAM_POINTER, second]),),
+                usage_tokens=20,
+            ),
+            AssistantTurn(text="Compared both.", usage_tokens=20),
+        ]
+    )
+    tool = FakeTool(RUN_PYTHON_TOOL, [ToolResponse(content="ours is 4pp ahead")])
+
+    pointer = await _worker(provider, store, [tool]).run(
+        _context(inputs={UPSTREAM: UPSTREAM_POINTER, "fetch_benchmarks": second})
+    )
+
+    assert [figure.source for figure in _stored(store, pointer).figures] == [UPSTREAM_POINTER]
+
+
+@pytest.mark.asyncio
+async def test_worker_drops_every_figure_when_its_step_declares_no_inputs(
+    store: ArtifactStore,
+) -> None:
+    """A step given nothing can cite nothing, whatever its script staged: the number is
+    dropped and the computation kept, so the step completes without inventing provenance."""
+    provider = FakeProvider(
+        turns=[
+            AssistantTurn(
+                text="",
+                tool_calls=(_call("print('42')", inputs=["artifact:big_dataset.csv"]),),
+                usage_tokens=20,
+            ),
+            AssistantTurn(text="Counted.", usage_tokens=20),
+        ]
+    )
+    tool = FakeTool(RUN_PYTHON_TOOL, [ToolResponse(content="42")])
+
+    pointer = await _worker(provider, store, [tool]).run(_context())
+
+    analysis = _stored(store, pointer)
+    assert analysis.figures == []
+    assert [item.stdout for item in analysis.computations] == ["42"]
+
+
+def test_analytics_prompt_asks_for_the_given_pointer_among_the_inputs() -> None:
+    """The rule the worker implements, stated to the model: *naming* the step's own
+    artifact is what a figure can cite. Order is deliberately not claimed to matter —
+    `_figure` picks the first upstream pointer wherever it appears, so a prompt promising
+    otherwise would be a rule the code does not keep."""
+    assert "name the pointer you were given in inputs" in ANALYTICS_SYSTEM_PROMPT
 
 
 @pytest.mark.parametrize(

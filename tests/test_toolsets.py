@@ -7,9 +7,9 @@ here, in the order the worker sees them.
 
 from pathlib import Path
 
+from conftest import FINANCIALS_CSV
 from orchestra.agents.toolsets import (
-    FINANCIALS_CSV,
-    QUERY_CSV_TOOL,
+    FETCH_DATA_TOOL,
     SEARCH_CORPUS,
     SEARCH_TOOL,
     analytics_tools,
@@ -19,31 +19,36 @@ from orchestra.agents.toolsets import (
 from orchestra.artifacts import ArtifactStore
 from orchestra.config import default_data_dir
 
-
-def test_data_retrieval_tools_advertise_the_names_the_worker_branches_on() -> None:
-    tools = data_retrieval_tools(default_data_dir())
-
-    assert [tool.info().name for tool in tools] == [QUERY_CSV_TOOL, SEARCH_TOOL]
+EXPENSES_CSV = "expense_breakdown.csv"
 
 
-def test_data_retrieval_tools_describe_themselves_for_the_model() -> None:
+def test_data_retrieval_tools_advertise_the_names_the_worker_branches_on(
+    store: ArtifactStore,
+) -> None:
+    tools = data_retrieval_tools(default_data_dir(), store)
+
+    assert [tool.info().name for tool in tools] == [FETCH_DATA_TOOL, SEARCH_TOOL]
+
+
+def test_data_retrieval_tools_describe_themselves_for_the_model(store: ArtifactStore) -> None:
     """§6: `info()`'s description is a prompt. An empty one leaves the model guessing."""
-    for tool in data_retrieval_tools(default_data_dir()):
+    for tool in data_retrieval_tools(default_data_dir(), store):
         spec = tool.info()
         assert spec.description.strip()
         assert spec.input_schema.get("type") == "object"
 
 
-def test_retrievable_data_lists_what_each_tool_supplies() -> None:
+def test_retrievable_data_lists_what_each_tool_supplies(store: ArtifactStore) -> None:
     """The planner plans against this: one bullet per source, naming what is on file and
     what is not, so it stops offering data nothing can fetch (#10)."""
-    roster = retrievable_data(data_retrieval_tools(default_data_dir()))
+    roster = retrievable_data(data_retrieval_tools(default_data_dir(), store))
 
     assert roster.count("- ") == 2
-    # The bundled dataset's own subject and range, from the tool that holds it.
-    assert "revenue" in roster and "2025Q4" in roster
+    # Both bundled datasets and their columns, from the tool that holds them.
+    assert "quarter, revenue, costs, profit" in roster
+    assert "quarter, category, amount" in roster
     # And the boundary that made a stock-price run plan three steps and produce nothing.
-    assert "no share price" in roster
+    assert "nothing beyond those files" in roster
 
 
 def test_retrievable_data_skips_a_tool_that_supplies_none(tmp_path: Path) -> None:
@@ -51,16 +56,30 @@ def test_retrievable_data_skips_a_tool_that_supplies_none(tmp_path: Path) -> Non
     assert retrievable_data(analytics_tools(ArtifactStore(tmp_path))) == ""
 
 
-def test_data_retrieval_tools_read_the_committed_dataset() -> None:
+def test_data_retrieval_tools_read_the_committed_datasets() -> None:
     """The bundled files are the offline guarantee — a missing one is a broken demo."""
     data_dir = default_data_dir()
 
     assert (data_dir / FINANCIALS_CSV).is_file()
+    assert (data_dir / EXPENSES_CSV).is_file()
     assert (data_dir / SEARCH_CORPUS).is_file()
 
 
-def test_data_retrieval_tools_take_the_directory_they_are_given(tmp_path: Path) -> None:
+def test_data_retrieval_tools_keep_the_search_corpus_out_of_the_catalogue(
+    store: ArtifactStore,
+) -> None:
+    """One file under two tools would tell the planner there are two sources where there
+    is one, and would let retrieval hand over the corpus without `search`'s disclaimer."""
+    provides = data_retrieval_tools(default_data_dir(), store)[0].info().provides
+
+    assert Path(SEARCH_CORPUS).stem not in provides
+
+
+def test_data_retrieval_tools_take_the_directory_they_are_given(
+    tmp_path: Path, store: ArtifactStore
+) -> None:
     """Injected, not read from config or the environment inside the tools (§6, §9)."""
-    tools = data_retrieval_tools(tmp_path)
+    tools = data_retrieval_tools(tmp_path, store)
 
     assert len(tools) == 2  # constructing against an empty directory must not raise
+    assert tools[0].info().provides == ""  # and the planner is told there is no data

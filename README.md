@@ -48,10 +48,12 @@ it does not get four minutes in before noticing.
 
 ## Example prompts
 
-The agents read `data/`: one CSV of this company's quarterly revenue, costs and profit for
-2024Q1–2025Q4, and a corpus of industry notes the `search` tool falls back to offline. That is the
-whole world they can retrieve, and the planner is given that roster up front, so it plans against
-what the team can actually obtain.
+The agents read `data/`: two CSVs of this company's own figures — quarterly revenue, costs and
+profit, and the same quarters' costs broken down by category, both 2024Q1–2025Q4 — plus a corpus of
+industry notes the `search` tool falls back to offline. `fetch_data` catalogues whatever files are
+in that directory, probing each one's columns at startup, so dropping another file in adds a
+dataset without a code change. That is the whole world they can retrieve, and the planner is given
+that roster up front, so it plans against what the team can actually obtain.
 
 ### 1. Linear — retrieval → analytics → visualization
 
@@ -68,7 +70,7 @@ and `Chart:` names an HTML file you can open.
 uv run orchestra run "Compare our last 3 quarters of revenue growth against industry benchmarks and chart the trend"
 ```
 
-4–5 steps. Two retrievals — our CSV and web search — with no dependency edge between them, so the
+4–5 steps. Two retrievals — our own files and web search — with no dependency edge between them, so the
 dashboard shows both agents spinning together, then the comparison, then the chart.
 
 ### 3. Ambiguous — the clarification flow
@@ -187,8 +189,8 @@ Each run writes into its own timestamped subdirectory of `ARTIFACT_DIR`
 (`~/.orchestra/artifacts/2026-08-17T07-29-39Z/`), so runs a second or more apart never interleave —
 the name is second-granular, so two starting in the same second share one. State carries
 `artifact:<name>` pointers, never blobs — the ledger is serialised into prompts, so payloads stay on
-disk. Datasets and analyses land as `.json`, charts as a standalone `.html` that links Plotly from a
-CDN, so viewing one needs a network connection.
+disk. Datasets and analyses land as `.json`, a fetched data file under its own name, charts as a
+standalone `.html` that links Plotly from a CDN, so viewing one needs a network connection.
 
 ### Exit codes
 
@@ -278,7 +280,7 @@ Every `AgentRole` appears in that block, asserted by a test.
 | Role | Does | Tools | Prompt |
 |---|---|---|---|
 | **Orchestrator** (planner) | Decomposes the request into a DAG, or asks a clarifying question. Also replans mid-run. | `ask_user` — called by the planner, not offered to the model | `prompts/planner.py`, `prompts/interrupt.py` |
-| **data_retrieval** | Finds and loads raw data. The only role that may obtain data the team does not already have. | `query_csv`, `search` | `prompts/data_retrieval.py` |
+| **data_retrieval** | Finds and loads raw data. The only role that may obtain data the team does not already have. | `fetch_data`, `search` | `prompts/data_retrieval.py` |
 | **analytics** | Computes over data an earlier step retrieved — aggregations, trends, comparisons — by writing Python and running it. | `run_python` | `prompts/analytics.py` |
 | **visualization** | Turns computed figures into a Plotly chart plus an ASCII fallback. One structured call, no tool loop. | — | `prompts/visualization.py` |
 | **Aggregator** | Synthesises the finished artifacts into the final report. | — | `prompts/aggregator.py` |
@@ -334,10 +336,10 @@ retry. An exception would unwind the agent loop and deny it that.
 | **CLI** (Typer + Rich) | web UI (FastAPI + React + WebSockets) | Roughly 70% of the budget goes to orchestration and prompts rather than 40%; a terminal dashboard buys live progress at a fraction of the effort, and WebSocket debugging was the biggest risk item. |
 | **Single-process `asyncio.TaskGroup`** | distributed queue or blackboard | Concurrency here is a handful of I/O-bound agents. A queue would add Redis, a worker lifecycle and non-deterministic ordering, and buy nothing at this scale. |
 | **Centralized orchestrator** | peer-to-peer handoffs | One place to enforce retry caps, step budgets and the clarification round. P2P makes A→B→A loops easy and top-level progress hard to show. |
-| **Bundled mock CSV + offline search corpus** | live data sources | The whole suite runs offline and the demo is reproducible. Live web search is opt-in via `TAVILY_API_KEY`. |
+| **Bundled mock CSVs + offline search corpus** | live data sources | The whole suite runs offline and the demo is reproducible. Live web search is opt-in via `TAVILY_API_KEY`. |
 | **Plotly HTML + ASCII fallback** | PNG rendering | PNG needs `kaleido`, a ~100 MB dependency, for an artifact the terminal cannot show anyway. The ASCII chart goes in the report; the HTML opens in a browser. |
 | **Pointer-based artifacts** | blobs in state | The ledger is serialised into prompts. Pointers keep context small and make every figure traceable. |
-| **Mock data, real tools** | mocked tools | The CSV is fixture data, but `query_csv`, `search` and `run_python` are the real implementations — the failure modes exercised are the real ones. |
+| **Mock data, real tools** | mocked tools | The CSVs are fixture data, but `fetch_data`, `search` and `run_python` are the real implementations — the failure modes exercised are the real ones. |
 
 Actual build time exceeded the research doc's 8–10 h estimate. That estimate was the compressed
 path — thinner tests, no separate QA pass. What was spent instead bought the offline end-to-end
@@ -358,7 +360,7 @@ substituted.
 | [#31](https://github.com/pranav8494/orchestra-py/issues/31) | On a non-UTF-8 stdout (`PYTHONIOENCODING=ascii`), the ASCII chart's `█` bars raise `UnicodeEncodeError`; the report is discarded and the run exits 1. |
 | [#33](https://github.com/pranav8494/orchestra-py/issues/33) | Visualization can drop interior categories — a three-quarter request once charted Q2 and Q4 with the title still claiming Q2–Q4. Values correct, middle point absent. |
 | [#36](https://github.com/pranav8494/orchestra-py/issues/36) | The global step cap, the `run_python` wall clock and the provider's timeout never reach `Config`, so an operator cannot raise them. |
-| [#40](https://github.com/pranav8494/orchestra-py/issues/40) | `query_csv` and `search` output is stored and re-sent whole; only `run_python` is character-capped. The token budget catches it after it has been paid for once. |
+| [#40](https://github.com/pranav8494/orchestra-py/issues/40) | Tool output is stored and re-sent whole each turn; only `run_python` is character-capped. `fetch_data` now hands anything over 16 kB, or not text at all, to the analysis step as a pointer instead of rows, which bounds the worst case but does not close it — a bundled file under that size, and every `search` result, is still replayed in full. |
 
 ---
 

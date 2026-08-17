@@ -14,7 +14,7 @@ from collections.abc import Sequence
 import pytest
 
 from conftest import FakeProvider, FakeTool, tool_call
-from orchestra.agents.toolsets import QUERY_CSV_TOOL, SEARCH_TOOL
+from orchestra.agents.toolsets import FETCH_DATA_TOOL, SEARCH_TOOL
 from orchestra.agents.workers.data_retrieval import (
     DataRetrievalWorker,
     RetrievedDataset,
@@ -25,9 +25,26 @@ from orchestra.core.events import Broker
 from orchestra.core.state import AgentRole, EventKind, Subtask, SubtaskContext, TaskEvent, TaskState
 from orchestra.providers.base import AssistantTurn
 from orchestra.tools.base import BaseTool, ToolResponse
+from orchestra.tools.fetch_data import INLINED_KEY, POINTER_KEY
 
 REQUEST = "Summarize the last 3 quarters' financial trends"
 CSV = "quarter,revenue,costs,profit\n2025Q2,1200,700,500\n"
+POINTER = "artifact:quarterly_financials.csv"
+
+
+def _fetched(csv: str = CSV) -> ToolResponse:
+    """What `fetch_data` returns for a file small enough to inline: the text, plus the
+    pointer and the inline flag the worker reads out of `metadata` rather than the prose.
+    """
+    return ToolResponse(content=csv, metadata={POINTER_KEY: POINTER, INLINED_KEY: "true"})
+
+
+def _fetched_by_pointer() -> ToolResponse:
+    """What it returns for a file too large to inline: a summary and the pointer."""
+    return ToolResponse(
+        content=f"quarterly_financials: CSV with columns quarter, revenue. Stored as {POINTER}.",
+        metadata={POINTER_KEY: POINTER, INLINED_KEY: "false"},
+    )
 
 
 def _context(**overrides: object) -> SubtaskContext:
@@ -65,19 +82,21 @@ def _stored(store: ArtifactStore, pointer: str) -> RetrievedDataset:
 
 
 @pytest.mark.asyncio
-async def test_worker_stores_the_filtered_dataset_and_returns_its_pointer(
+async def test_worker_stores_the_fetched_dataset_and_returns_its_pointer(
     store: ArtifactStore,
 ) -> None:
-    """One query, one summary, one artifact (#5)."""
+    """One fetch, one summary, one artifact (#5)."""
     provider = FakeProvider(
         turns=[
             AssistantTurn(
-                text="", tool_calls=(tool_call(QUERY_CSV_TOOL, last_n=3),), usage_tokens=120
+                text="",
+                tool_calls=(tool_call(FETCH_DATA_TOOL, name="quarterly_financials"),),
+                usage_tokens=120,
             ),
             AssistantTurn(text="Retrieved three quarters of revenue and costs.", usage_tokens=80),
         ]
     )
-    csv_tool = FakeTool(QUERY_CSV_TOOL, [ToolResponse(content=CSV)])
+    csv_tool = FakeTool(FETCH_DATA_TOOL, [_fetched()])
 
     pointer = await _worker(provider, store, [csv_tool]).run(_context())
 
@@ -86,7 +105,7 @@ async def test_worker_stores_the_filtered_dataset_and_returns_its_pointer(
     assert [table.csv for table in dataset.datasets] == [CSV]
     assert dataset.summary == "Retrieved three quarters of revenue and costs."
     assert dataset.instruction == "Fetch the last 3 quarters of financials"
-    assert csv_tool.calls[0].arguments == {"last_n": 3}
+    assert csv_tool.calls[0].arguments == {"name": "quarterly_financials"}
 
 
 @pytest.mark.asyncio
@@ -96,19 +115,19 @@ async def test_worker_offers_every_tool_and_keeps_the_request_out_of_the_system_
     """Both tools are on the table each turn, and untrusted text stays a user turn (§11)."""
     provider = FakeProvider(
         turns=[
-            AssistantTurn(text="", tool_calls=(tool_call(QUERY_CSV_TOOL),), usage_tokens=10),
+            AssistantTurn(text="", tool_calls=(tool_call(FETCH_DATA_TOOL),), usage_tokens=10),
             AssistantTurn(text="Done.", usage_tokens=10),
         ]
     )
     tools = [
-        FakeTool(QUERY_CSV_TOOL, [ToolResponse(content=CSV)]),
+        FakeTool(FETCH_DATA_TOOL, [_fetched()]),
         FakeTool(SEARCH_TOOL, []),
     ]
 
     await _worker(provider, store, tools).run(_context())
 
     offered = {spec.name for spec in provider.send_calls[0].tools}
-    assert offered == {QUERY_CSV_TOOL, SEARCH_TOOL}
+    assert offered == {FETCH_DATA_TOOL, SEARCH_TOOL}
     assert REQUEST not in provider.send_calls[0].system
     assert REQUEST in provider.send_calls[0].messages[0].content
 
@@ -121,7 +140,7 @@ async def test_worker_records_search_results_as_sources(store: ArtifactStore) ->
             AssistantTurn(
                 text="",
                 tool_calls=(
-                    tool_call(QUERY_CSV_TOOL, "c1", last_n=3),
+                    tool_call(FETCH_DATA_TOOL, "c1", name="quarterly_financials"),
                     tool_call(SEARCH_TOOL, "c2", query="saas margin benchmark"),
                 ),
                 usage_tokens=200,
@@ -130,7 +149,7 @@ async def test_worker_records_search_results_as_sources(store: ArtifactStore) ->
         ]
     )
     tools = [
-        FakeTool(QUERY_CSV_TOOL, [ToolResponse(content=CSV)]),
+        FakeTool(FETCH_DATA_TOOL, [_fetched()]),
         FakeTool(SEARCH_TOOL, [ToolResponse(content="Sector margins run 70-80%.")]),
     ]
 
@@ -151,20 +170,22 @@ async def test_worker_feeds_a_tool_failure_back_to_the_model_instead_of_raising(
         turns=[
             AssistantTurn(
                 text="",
-                tool_calls=(tool_call(QUERY_CSV_TOOL, columns=["margin"]),),
+                tool_calls=(tool_call(FETCH_DATA_TOOL, name="headcount"),),
                 usage_tokens=30,
             ),
             AssistantTurn(
-                text="", tool_calls=(tool_call(QUERY_CSV_TOOL, "c2", last_n=3),), usage_tokens=30
+                text="",
+                tool_calls=(tool_call(FETCH_DATA_TOOL, "c2", name="quarterly_financials"),),
+                usage_tokens=30,
             ),
-            AssistantTurn(text="Recovered after a bad column.", usage_tokens=30),
+            AssistantTurn(text="Recovered after a bad dataset name.", usage_tokens=30),
         ]
     )
     csv_tool = FakeTool(
-        QUERY_CSV_TOOL,
+        FETCH_DATA_TOOL,
         [
-            ToolResponse(content="No column 'margin'. Columns: quarter, revenue.", is_error=True),
-            ToolResponse(content=CSV),
+            ToolResponse(content="There is no dataset named 'headcount'.", is_error=True),
+            _fetched(),
         ],
     )
 
@@ -185,18 +206,20 @@ async def test_worker_answers_an_unknown_tool_name_without_ending_the_subtask(
         turns=[
             AssistantTurn(text="", tool_calls=(tool_call("fetch_from_sql"),), usage_tokens=20),
             AssistantTurn(
-                text="", tool_calls=(tool_call(QUERY_CSV_TOOL, "c2", last_n=3),), usage_tokens=20
+                text="",
+                tool_calls=(tool_call(FETCH_DATA_TOOL, "c2", name="quarterly_financials"),),
+                usage_tokens=20,
             ),
             AssistantTurn(text="Used the right tool.", usage_tokens=20),
         ]
     )
-    csv_tool = FakeTool(QUERY_CSV_TOOL, [ToolResponse(content=CSV)])
+    csv_tool = FakeTool(FETCH_DATA_TOOL, [_fetched()])
 
     await _worker(provider, store, [csv_tool]).run(_context())
 
     answer = provider.send_calls[1].messages[-1].tool_results[0]
     assert answer.is_error is True
-    assert QUERY_CSV_TOOL in answer.content
+    assert FETCH_DATA_TOOL in answer.content
 
 
 @pytest.mark.asyncio
@@ -204,11 +227,11 @@ async def test_worker_that_retrieved_nothing_fails_the_subtask(store: ArtifactSt
     """A summary with no data behind it is an invented answer."""
     provider = FakeProvider(
         turns=[
-            AssistantTurn(text="", tool_calls=(tool_call(QUERY_CSV_TOOL),), usage_tokens=20),
+            AssistantTurn(text="", tool_calls=(tool_call(FETCH_DATA_TOOL),), usage_tokens=20),
             AssistantTurn(text="I could not find the data.", usage_tokens=20),
         ]
     )
-    csv_tool = FakeTool(QUERY_CSV_TOOL, [ToolResponse(content="no such file", is_error=True)])
+    csv_tool = FakeTool(FETCH_DATA_TOOL, [ToolResponse(content="no such file", is_error=True)])
 
     with pytest.raises(TaskFailure, match="without retrieving anything"):
         await _worker(provider, store, [csv_tool]).run(_context())
@@ -221,11 +244,11 @@ async def test_worker_still_calling_tools_at_the_turn_cap_fails_the_subtask(
     """§10: the loop is bounded, and exceeding the bound is a failure, not a retry."""
     provider = FakeProvider(
         turns=[
-            AssistantTurn(text="", tool_calls=(tool_call(QUERY_CSV_TOOL),), usage_tokens=10)
+            AssistantTurn(text="", tool_calls=(tool_call(FETCH_DATA_TOOL),), usage_tokens=10)
             for _ in range(2)
         ]
     )
-    csv_tool = FakeTool(QUERY_CSV_TOOL, [ToolResponse(content=CSV) for _ in range(2)])
+    csv_tool = FakeTool(FETCH_DATA_TOOL, [_fetched() for _ in range(2)])
 
     with pytest.raises(TaskFailure, match="after 2 turns"):
         await _worker(provider, store, [csv_tool], max_turns=2).run(_context())
@@ -236,11 +259,11 @@ async def test_worker_over_its_token_budget_fails_the_subtask(store: ArtifactSto
     """The second bound: turns alone will not catch a model making expensive calls."""
     provider = FakeProvider(
         turns=[
-            AssistantTurn(text="", tool_calls=(tool_call(QUERY_CSV_TOOL),), usage_tokens=5_000),
+            AssistantTurn(text="", tool_calls=(tool_call(FETCH_DATA_TOOL),), usage_tokens=5_000),
             AssistantTurn(text="never reached", usage_tokens=10),
         ]
     )
-    csv_tool = FakeTool(QUERY_CSV_TOOL, [ToolResponse(content=CSV)])
+    csv_tool = FakeTool(FETCH_DATA_TOOL, [_fetched()])
 
     with pytest.raises(TaskFailure, match="budget before finishing"):
         await _worker(provider, store, [csv_tool], token_budget=100).run(_context())
@@ -250,7 +273,7 @@ async def test_worker_over_its_token_budget_fails_the_subtask(store: ArtifactSto
 async def test_worker_propagates_cancellation(store: ArtifactStore) -> None:
     """§10: a cancelled run unwinds through the worker, never swallowed."""
     provider = FakeProvider(turns=[AssistantTurn(text="unreached")], blocker=asyncio.Event())
-    csv_tool = FakeTool(QUERY_CSV_TOOL, [])
+    csv_tool = FakeTool(FETCH_DATA_TOOL, [])
     worker = _worker(provider, store, [csv_tool])
 
     task = asyncio.create_task(worker.run(_context()))
@@ -285,14 +308,14 @@ async def test_worker_replays_the_providers_own_turn_verbatim(store: ArtifactSto
         turns=[
             AssistantTurn(
                 text="",
-                tool_calls=(tool_call(QUERY_CSV_TOOL, last_n=3),),
+                tool_calls=(tool_call(FETCH_DATA_TOOL, name="quarterly_financials"),),
                 usage_tokens=10,
                 raw_content=blocks,
             ),
             AssistantTurn(text="Done.", usage_tokens=10),
         ]
     )
-    csv_tool = FakeTool(QUERY_CSV_TOOL, [ToolResponse(content=CSV)])
+    csv_tool = FakeTool(FETCH_DATA_TOOL, [_fetched()])
 
     await _worker(provider, store, [csv_tool]).run(_context())
 
@@ -301,36 +324,59 @@ async def test_worker_replays_the_providers_own_turn_verbatim(store: ArtifactSto
 
 
 @pytest.mark.asyncio
-async def test_worker_keeps_every_successful_query_not_just_the_last(store: ArtifactStore) -> None:
-    """Regression: the tool advertises a `columns` filter, so splitting a request across
-    two calls is invited. Keeping only the last stored half the data under a summary
-    describing all of it."""
+async def test_worker_keeps_every_successful_fetch_not_just_the_last(store: ArtifactStore) -> None:
+    """Regression: a step may need two of the bundled files. Keeping only the last stored
+    half the data under a summary describing all of it."""
     provider = FakeProvider(
         turns=[
             AssistantTurn(
                 text="",
-                tool_calls=(tool_call(QUERY_CSV_TOOL, "c1", columns=["revenue"]),),
+                tool_calls=(tool_call(FETCH_DATA_TOOL, "c1", name="quarterly_financials"),),
                 usage_tokens=10,
             ),
             AssistantTurn(
                 text="",
-                tool_calls=(tool_call(QUERY_CSV_TOOL, "c2", columns=["costs"]),),
+                tool_calls=(tool_call(FETCH_DATA_TOOL, "c2", name="expense_breakdown"),),
                 usage_tokens=10,
             ),
             AssistantTurn(text="Revenue and costs.", usage_tokens=10),
         ]
     )
     revenue, costs = "quarter,revenue\n2025Q2,1200\n", "quarter,costs\n2025Q2,700\n"
-    csv_tool = FakeTool(
-        QUERY_CSV_TOOL, [ToolResponse(content=revenue), ToolResponse(content=costs)]
-    )
+    csv_tool = FakeTool(FETCH_DATA_TOOL, [_fetched(revenue), _fetched(costs)])
 
     pointer = await _worker(provider, store, [csv_tool]).run(_context())
 
     dataset = _stored(store, pointer)
     assert [table.csv for table in dataset.datasets] == [revenue, costs]
-    # The arguments ride along, so a reader can tell which table answered what.
-    assert "revenue" in dataset.datasets[0].query
+    # The arguments ride along, so a reader can tell which file answered what.
+    assert "quarterly_financials" in dataset.datasets[0].query
+
+
+@pytest.mark.asyncio
+async def test_worker_records_a_pointer_when_the_file_was_too_large_to_inline(
+    store: ArtifactStore,
+) -> None:
+    """#40: the rows stay out of the transcript, so the artifact carries the pointer and
+    an empty `csv` — the analysis step opens the file itself."""
+    provider = FakeProvider(
+        turns=[
+            AssistantTurn(
+                text="",
+                tool_calls=(tool_call(FETCH_DATA_TOOL, name="quarterly_financials"),),
+                usage_tokens=10,
+            ),
+            AssistantTurn(text="The file is large; passing it on by pointer.", usage_tokens=10),
+        ]
+    )
+    csv_tool = FakeTool(FETCH_DATA_TOOL, [_fetched_by_pointer()])
+
+    pointer = await _worker(provider, store, [csv_tool]).run(_context())
+
+    (table,) = _stored(store, pointer).datasets
+    assert table.pointer == POINTER
+    # Not the summary: storing prose as `csv` is what would reach pd.read_csv.
+    assert table.csv == ""
 
 
 @pytest.mark.asyncio
@@ -341,19 +387,21 @@ async def test_worker_keeps_an_earlier_success_when_a_later_call_fails(
     provider = FakeProvider(
         turns=[
             AssistantTurn(
-                text="", tool_calls=(tool_call(QUERY_CSV_TOOL, "c1", last_n=3),), usage_tokens=10
+                text="",
+                tool_calls=(tool_call(FETCH_DATA_TOOL, "c1", name="quarterly_financials"),),
+                usage_tokens=10,
             ),
             AssistantTurn(
                 text="",
-                tool_calls=(tool_call(QUERY_CSV_TOOL, "c2", columns=["margin"]),),
+                tool_calls=(tool_call(FETCH_DATA_TOOL, "c2", name="headcount"),),
                 usage_tokens=10,
             ),
             AssistantTurn(text="One worked, one did not.", usage_tokens=10),
         ]
     )
     csv_tool = FakeTool(
-        QUERY_CSV_TOOL,
-        [ToolResponse(content=CSV), ToolResponse(content="No column named margin.", is_error=True)],
+        FETCH_DATA_TOOL,
+        [_fetched(), ToolResponse(content="There is no dataset named 'headcount'.", is_error=True)],
     )
 
     pointer = await _worker(provider, store, [csv_tool]).run(_context())
@@ -392,7 +440,7 @@ async def test_worker_treats_a_truncated_reply_as_a_failure_not_a_finished_turn(
     provider = FakeProvider(
         turns=[AssistantTurn(text="I was about to sa", usage_tokens=10, stop_reason="max_tokens")]
     )
-    csv_tool = FakeTool(QUERY_CSV_TOOL, [])
+    csv_tool = FakeTool(FETCH_DATA_TOOL, [])
 
     with pytest.raises(TaskFailure, match="cut off by the model's output limit"):
         await _worker(provider, store, [csv_tool]).run(_context())
@@ -403,13 +451,13 @@ async def test_worker_bound_failure_names_what_was_lost(store: ArtifactStore) ->
     """§8: the message has to distinguish "raise the cap" from "debug the agent"."""
     provider = FakeProvider(
         turns=[
-            AssistantTurn(text="", tool_calls=(tool_call(QUERY_CSV_TOOL),), usage_tokens=10)
+            AssistantTurn(text="", tool_calls=(tool_call(FETCH_DATA_TOOL),), usage_tokens=10)
             for _ in range(2)
         ]
     )
-    csv_tool = FakeTool(QUERY_CSV_TOOL, [ToolResponse(content=CSV) for _ in range(2)])
+    csv_tool = FakeTool(FETCH_DATA_TOOL, [_fetched() for _ in range(2)])
 
-    with pytest.raises(TaskFailure, match=r"kept results from query_csv x2, which are lost"):
+    with pytest.raises(TaskFailure, match=r"kept results from fetch_data x2, which are lost"):
         await _worker(provider, store, [csv_tool], max_turns=2).run(_context())
 
 
@@ -420,13 +468,13 @@ async def test_worker_replays_narration_that_accompanied_a_tool_call(store: Arti
         turns=[
             AssistantTurn(
                 text="Let me check the last three quarters.",
-                tool_calls=(tool_call(QUERY_CSV_TOOL, last_n=3),),
+                tool_calls=(tool_call(FETCH_DATA_TOOL, name="quarterly_financials"),),
                 usage_tokens=10,
             ),
             AssistantTurn(text="The real summary.", usage_tokens=10),
         ]
     )
-    csv_tool = FakeTool(QUERY_CSV_TOOL, [ToolResponse(content=CSV)])
+    csv_tool = FakeTool(FETCH_DATA_TOOL, [_fetched()])
 
     pointer = await _worker(provider, store, [csv_tool]).run(_context())
 
@@ -441,11 +489,11 @@ async def test_worker_with_no_usage_reported_is_still_bounded_by_its_turn_cap(
     """A provider reporting zero tokens leaves the budget inert — turns are the backstop."""
     provider = FakeProvider(
         turns=[
-            AssistantTurn(text="", tool_calls=(tool_call(QUERY_CSV_TOOL),), usage_tokens=0)
+            AssistantTurn(text="", tool_calls=(tool_call(FETCH_DATA_TOOL),), usage_tokens=0)
             for _ in range(3)
         ]
     )
-    csv_tool = FakeTool(QUERY_CSV_TOOL, [ToolResponse(content=CSV) for _ in range(3)])
+    csv_tool = FakeTool(FETCH_DATA_TOOL, [_fetched() for _ in range(3)])
 
     with pytest.raises(TaskFailure, match="after 3 turns"):
         await _worker(provider, store, [csv_tool], max_turns=3).run(_context())
@@ -488,11 +536,11 @@ async def test_worker_publishes_nothing_when_no_tool_degraded(store: ArtifactSto
     """The quiet path stays quiet — a warning per call would train the eye to ignore it."""
     provider = FakeProvider(
         turns=[
-            AssistantTurn(text="", tool_calls=(tool_call(QUERY_CSV_TOOL),), usage_tokens=10),
+            AssistantTurn(text="", tool_calls=(tool_call(FETCH_DATA_TOOL),), usage_tokens=10),
             AssistantTurn(text="Done.", usage_tokens=10),
         ]
     )
-    csv_tool = FakeTool(QUERY_CSV_TOOL, [ToolResponse(content=CSV)])
+    csv_tool = FakeTool(FETCH_DATA_TOOL, [_fetched()])
     broker: Broker[TaskEvent] = Broker()
 
     async with broker.subscribe() as queue:

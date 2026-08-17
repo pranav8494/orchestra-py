@@ -62,9 +62,15 @@ class ArtifactStore:
         # Explicit encoding: `write_text` defaults to the locale's.
         return self.put_bytes(name, text.encode("utf-8"))
 
-    def put_file(self, path: Path) -> str:
-        """Copy a file another tool already wrote — a Plotly chart — into the store."""
-        target = self._reserve(path.name)
+    def put_file(self, path: Path, *, name: str = "") -> str:
+        """Copy a file this run did not write — a rendered chart, a bundled dataset.
+
+        Args:
+            name: what to store it as. Defaults to `path.name`, which a caller holding an
+                operator's filename must override: the allow-list admits no `&` or `(`,
+                and rejecting the copy is worse than storing it under a repaired name.
+        """
+        target = self._reserve(name or path.name)
         with _as_task_failure(f"copy {path}"):
             shutil.copyfile(path, target)
         return ARTIFACT_PREFIX + target.name

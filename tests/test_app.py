@@ -26,6 +26,7 @@ from pydantic import BaseModel, SecretStr
 
 from conftest import (
     CHART_CATEGORY,
+    FETCHED_DATASET,
     QUARTERS,
     REPORT_SUMMARY,
     ROWS_COUNTED,
@@ -44,7 +45,7 @@ from orchestra.agents.aggregator import Aggregator, FigureDraft, ReportDraft
 from orchestra.agents.engine import DEFAULT_STEP_CAP, ExecutionEngine
 from orchestra.agents.interrupt import InterruptHandler
 from orchestra.agents.planner import Planner, PlannerAction, PlannerDraft
-from orchestra.agents.toolsets import QUERY_CSV_TOOL
+from orchestra.agents.toolsets import FETCH_DATA_TOOL
 from orchestra.agents.workers.analytics import AnalyticsWorker
 from orchestra.agents.workers.base import Worker
 from orchestra.agents.workers.data_retrieval import DataRetrievalWorker
@@ -109,7 +110,7 @@ def _turns() -> list[AssistantTurn | BaseException]:
     that one worker's pointer reaches the next one's subprocess.
     """
     return [
-        tool_turn(QUERY_CSV_TOOL, call_id="c1", last_n=QUARTERS),
+        tool_turn(FETCH_DATA_TOOL, call_id="c1", name=FETCHED_DATASET),
         answer_turn("Retrieved the last three quarters."),
         tool_turn(
             RUN_PYTHON_TOOL,
@@ -249,7 +250,7 @@ async def test_build_orchestra_tells_the_planner_what_the_retrieval_agent_can_ob
     orchestra = build_orchestra(_config(tmp_path))
     try:
         system = orchestra._planner._system
-        assert "revenue" in system and "no share price" in system
+        assert "revenue" in system and "nothing beyond those files" in system
         assert "no data sources at all" not in system
     finally:
         await orchestra.aclose()
