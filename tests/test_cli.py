@@ -248,6 +248,28 @@ def test_run_quiet_omits_the_step_lines_and_keeps_the_report(
     assert result.stderr == ""
 
 
+def test_run_does_not_frame_the_report_when_a_forced_terminal_meets_a_pipe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#49: `FORCE_COLOR`/`CLICOLOR_FORCE` in the shell make Rich report a forced terminal
+    even when stdout is redirected, so `console.is_terminal` is `True` down a pipe. Framing
+    must gate on the real `stdout.isatty()` instead — a `Panel`'s box characters in a
+    redirect break the first `json.loads` that meets them (§5)."""
+    # What `FORCE_COLOR=3` does at construction: the stdout console is forced to a terminal,
+    # so `console.is_terminal` is `True` though `CliRunner` supplies a pipe.
+    monkeypatch.setattr(cli_app.console, "_force_terminal", True, raising=False)
+    assert cli_app.console.is_terminal is True  # precondition: the forced-terminal state
+    _stub_run_once(monkeypatch, _finished_state(SubtaskStatus.DONE, SubtaskStatus.DONE))
+
+    result = runner.invoke(app, ["run", PROMPT], prog_name=PROG)
+
+    assert result.exit_code == ExitCode.SUCCESS
+    assert SUMMARY in result.stdout
+    # No `Panel` box-drawing glyphs: redirected stdout must stay pipeable (§5).
+    assert not any(glyph in result.stdout for glyph in "─│╭╮╰╯"), result.stdout
+    assert result.stderr == ""
+
+
 # --------------------------------------------------------------------------
 # Which dashboard the flags ask for (#11). The command builds the observer and
 # hands it to `run_once`; what it draws is `test_render.py`'s subject, so these

@@ -107,9 +107,9 @@ def run(
             # Diagnostic, so stderr even under `-o json` and `--quiet` (§5, §8): which
             # stream says what must not depend on the format or the noise level.
             err_console.print(state.failure_reason, markup=False, highlight=False)
-        # `is_terminal` is read here and passed down so framing stays in `render.py`.
+        # Framing gates on the real sink, not `console.is_terminal` (`_stdout_is_a_terminal`).
         console.print(
-            result_renderable(state, output=output, quiet=quiet, terminal=console.is_terminal)
+            result_renderable(state, output=output, quiet=quiet, terminal=_stdout_is_a_terminal())
         )
         # A run that fell short still prints its report; only the code says it failed.
         raise typer.Exit(ExitCode.TASK_FAILURE if state.failed else ExitCode.SUCCESS)
@@ -156,3 +156,19 @@ def _render_mode(*, quiet: bool, output: OutputFormat) -> RenderMode:
     if output is OutputFormat.JSON or not err_console.is_terminal:
         return RenderMode.PLAIN
     return RenderMode.LIVE
+
+
+def _stdout_is_a_terminal() -> bool:
+    """Whether the report's real sink is a terminal, so it may be framed in a `Panel`.
+
+    `console.print` writes to `console.file` — the live `sys.stdout` at call time. Frame on
+    *that* stream's `isatty`, never `console.is_terminal`: Rich forces the latter `True`
+    under `FORCE_COLOR`/`CLICOLOR_FORCE` even down a pipe (#49), which would send a `Panel`'s
+    box characters into a redirect and break the first `json.loads` that met them (§5).
+    Colour still honours those vars — the console's business, not the frame's.
+    """
+    isatty = getattr(console.file, "isatty", None)
+    try:
+        return bool(isatty and isatty())
+    except ValueError:  # a closed stream is not a terminal.
+        return False

@@ -2,7 +2,9 @@
 
 Two objects rather than one with a `stderr=` argument, so a forgotten keyword cannot
 put a progress line on stdout. Rich already handles `NO_COLOR`, `TERM=dumb` and
-non-tty streams; call sites still gate *layout* on `console.is_terminal`.
+non-tty streams; call sites still gate progress *layout* on `is_terminal`, but the stdout
+report gates its *framing* on the real `console.file.isatty()` — `is_terminal` is forced
+`True` under `FORCE_COLOR` even down a pipe (#49, §5).
 """
 
 from rich.console import Console
