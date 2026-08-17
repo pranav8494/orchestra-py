@@ -117,28 +117,41 @@ uv run pytest -m live tests/test_planner_scenarios_live.py   # the same shapes a
 
 ### Text (default)
 
-The shape, with the linear plan's step ids:
+Abridged from a real run of the linear prompt. At a terminal this is framed in a `Report` panel;
+piped, it is the bare text:
 
 ```
-<executive summary>
+Over the last three quarters (2025Q2-2025Q4), the company's financial performance improved
+steadily and at an accelerating pace. Revenue grew from $5.76M to $7.015M (up 21.8%
+cumulatively), while costs rose more slowly, from $4.41M to $4.88M (up 10.7%). [...]
 
 Key figures:
-  <label>  <value>  artifact:analyse_trends
+  2025Q4 Revenue / Costs / Profit  $7.015M / $4.88M / $2.135M  artifact:fetch_financials.json
+  Cumulative revenue growth (Q2→Q4)  +21.8%  artifact:analyze_trends.json
+  Cumulative profit growth (Q2→Q4)  +58.2%  artifact:analyze_trends.json
 
-<ASCII chart>
+Quarterly Revenue, Costs, and Profit (2025Q2-2025Q4)
+x: Quarter    y: Amount ($M)
 
-Chart: /Users/you/.orchestra/artifacts/2026-08-17T09-14-02Z/chart_trends.html
+Revenue:
+  2025Q2  █████████████████████████████████         5.76
+  2025Q3  ████████████████████████████████████      6.34
+  2025Q4  ████████████████████████████████████████  7.01
+[...]
 
-Artifacts: /Users/you/.orchestra/artifacts/2026-08-17T09-14-02Z
+Chart: /Users/you/.orchestra/artifacts/2026-08-17T07-29-39Z/chart_trends.html
+
+Artifacts: /Users/you/.orchestra/artifacts/2026-08-17T07-29-39Z
 Steps:
-done     fetch_quarterly_financials  artifact:fetch_quarterly_financials
-done     analyse_trends              artifact:analyse_trends
-done     chart_trends                artifact:chart_trends
+done     fetch_financials  artifact:fetch_financials.json
+done     analyze_trends  artifact:analyze_trends.json
+done     chart_trends  artifact:chart_trends.json
 ```
 
-Every figure carries the pointer to the artifact it came from. `Chart:` is the absolute path, not the
-pointer, so it opens. `--quiet` drops the `Artifacts:`/`Steps:` block — that is progress. The report
-always prints.
+Every figure carries the pointer to the artifact it came from. `Chart:` is the absolute path, not
+the pointer, so it opens — and it resolves to the `.html`, while the visualization step's own
+pointer names its `.json` receipt. `--quiet` drops the `Artifacts:`/`Steps:` block — that is
+progress. The report always prints.
 
 ### `--output json`
 
