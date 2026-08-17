@@ -2,8 +2,9 @@
 
 > Recorded at #45. The checklist was rewritten for #46's `fetch_data` and re-run on 2026-08-17:
 > see [that pass](#pass-2026-08-17--fetch_data-and-the-six-file-catalogue) for the evidence behind
-> every tick, the boxes a non-TTY shell cannot reach, and two defects it found. The offline suite
-> reports **651 passed, 6 deselected**; `pytest -m live` is **red** on those two.
+> every tick, the boxes a non-TTY shell cannot reach, and the defects it found. The offline suite
+> reports **653 passed, 6 deselected**; `pytest -m live` is now **green — 6 passed** on the rerun at
+> #49, which cleared D2 and did not reproduce #48.
 
 Automated suite (offline, the four gates):
 
@@ -28,7 +29,7 @@ G the four gates, N the offline checks, R1–R6 the six live model runs.
 - [x] `uv run orchestra run "Summarize the last 3 quarters financial trends and create a chart"` → 3 steps, sequential: retrieval → analytics → visualization; exit 0 — **R2, exit 0**: `fetch_quarterly_financials` (data_retrieval) → `analyze_financial_trends` (analytics) → `chart_financial_trends` (visualization); no dashboard frame of the 830 drawn ever held two `running` cells
 - [x] `uv run orchestra run "Compare our last 3 quarters of revenue growth against industry benchmarks and chart the trend"` → 4–5 steps, two retrievals with no edge between them, then analytics, then visualization; exit 0 — **R3, exit 0**: 4 steps, `fetch_revenue` + `fetch_benchmarks` both started before either finished, then `compute_growth_comparison`, then `chart_growth_trend`
 - [ ] `uv run orchestra run "Summarize the revenue trend in one paragraph"` → 2 steps, **no** visualization step; exit 0 — **not run**: the 6-run budget went to the #46 criteria. R1 proves the *plan* shape live (`test_the_planner_shapes_a_real_plan_to_the_request[role_omission]` PASSED); the CLI run end to end was not made
-- [ ] `uv run pytest -m live` → live planner and aggregation tests pass — **R1, exit 1: FAILED**, 2 failed / 4 passed. See defects D1 and D2 below
+- [x] `uv run pytest -m live` → live planner and aggregation tests pass — **R7, exit 0: 6 passed, 653 deselected in 82.63s**. Was R1's 2 failed / 4 passed; D2 is fixed at `cb1dc87` and D1/[#48](https://github.com/pranav8494/orchestra-py/issues/48) did not reproduce this time
 
 ### The catalogue and `fetch_data` (#46)
 
@@ -75,7 +76,7 @@ G the four gates, N the offline checks, R1–R6 the six live model runs.
 
 - [x] `uv run orchestra run "<fan-out prompt>" -o json | python -c "import json,sys; json.load(sys.stdin)"` → parses; exactly one document; no progress text on stdout; keys match `cli/format.py` — **R3, exit 0**: `json.load` exit 0, `raw_decode` left only a trailing newline, and the key sets equal `ResultDocument`/`ReportView`/`FigureView`/`SubtaskView`'s fields in order. Progress went to stderr's plain sink
 - [x] `uv run orchestra run "<prompt>" -q` → no progress lines; the report still prints on stdout — **R6, exit 0**: stderr **0 bytes**, report on stdout, and no `Artifacts:`/`Steps:` block
-- [x] `uv run orchestra run "<linear prompt>" > /tmp/out.txt` → progress still drawn on stderr, report lands in the file — **R2, exit 0**: the report is in the file and the progress in the stderr capture. Caveat: this shell has `FORCE_COLOR=3`, so Rich called the redirect a terminal and framed the report in a `Panel` — see O1
+- [x] `uv run orchestra run "<linear prompt>" > /tmp/out.txt` → progress still drawn on stderr, report lands in the file — **R2, exit 0**: the report is in the file and the progress in the stderr capture. Caveat, since fixed: this shell has `FORCE_COLOR=3`, so Rich called the redirect a terminal and framed the report in a `Panel`. Filed as [#49](https://github.com/pranav8494/orchestra-py/issues/49), fixed in this commit — see O1 for the before/after evidence
 
 ### Artifacts
 
@@ -155,9 +156,26 @@ painted frame, and a chart rendered in a browser. No pty was used, so nothing ab
 simulated terminal. The role-omission CLI run was not made either — the budget went to the #46
 criteria, and R1 covers its plan shape live.
 
+### Rerun the same day, at #49
+
+**Gates after the #49 fix.** `uv run ruff check .` exit 0, "All checks passed!"; `uv run ruff format
+--check .` exit 0, "86 files already formatted"; `uv run mypy` exit 0, "Success: no issues found in
+86 source files"; `uv run pytest` exit 0, **653 passed, 6 deselected in 4.36s** — 651 plus #49's two
+regression arms.
+
+**R7 — `uv run pytest -m live`, exit 0, 6 passed, 653 deselected in 82.63s.** All six green, the
+first time in this record: `test_the_report_cites_this_run_s_own_numbers_and_chart`,
+`test_the_planner_shapes_a_real_plan_to_the_request[linear|fan_out|role_omission]`,
+`test_the_planner_asks_only_about_data_the_team_holds`,
+`test_the_planner_asks_nothing_it_could_answer_itself`. So D2 is cleared live, and #48 did not
+reproduce on this run — it stays open on R1's single observation. One billed run; an earlier attempt
+died 6/6 on a `401 … "API key is invalid."` before the key was replaced and produced no model
+output, so it is evidence of nothing.
+
 ### Defects
 
-**D1 — a key figure can cite an artifact that holds only some of its numbers.** Severity: medium;
+**D1 — a key figure can cite an artifact that holds only some of its numbers.** Filed as
+[#48](https://github.com/pranav8494/orchestra-py/issues/48). Severity: medium;
 it is the traceability claim the README leads with.
 
 ```bash
@@ -170,10 +188,11 @@ to `artifact:fetch_financials.json`. The three revenues are in that retrieval ar
 the pointer names an artifact this run produced, not that the artifact contains the number, so a
 compound figure mixing retrieved and computed values gets one pointer and it is wrong for part of
 it. Model-output dependent: R2 wrote the same figures citing `analyze_financial_trends.json` and
-would have passed. Not filed, not fixed — reported for triage.
+would have passed. Filed as #48, not fixed. **R7 did not reproduce it**: the same test passed, so
+the rate stands at one occurrence in two live runs of that test.
 
 **D2 — the live planner test's `UNAVAILABLE` fixture is stale against #46.** Severity: low, but it
-makes `pytest -m live` red.
+made `pytest -m live` red.
 
 ```bash
 uv run pytest -m live -k asks_only_about_data     # exit 1
@@ -182,7 +201,8 @@ uv run pytest -m live -k asks_only_about_data     # exit 1
 `tests/test_planner_scenarios_live.py::UNAVAILABLE` still lists `"headcount"` as a measure no tool
 supplies. #46 added `yearly_performance.csv`, whose columns include `headcount_year_end`, so the
 planner offering headcount is now correct and the assertion is wrong. The product behaved as
-intended; the fixture did not follow the data. Not fixed here — this pass changes no code.
+intended; the fixture did not follow the data. Fixed at `cb1dc87`, which drops `"headcount"` from
+the list, and confirmed by R7: that test now passes against the live planner.
 
 ### Observations
 
@@ -193,6 +213,20 @@ cause as [#38](https://github.com/pranav8494/orchestra-py/issues/38), whose titl
 tests are affected; the runtime symptom is wider. `-o json` is unaffected — JSON is never framed,
 and R3's stdout parsed clean.
 
+Filed as [#49](https://github.com/pranav8494/orchestra-py/issues/49) and **fixed in this commit**:
+framing reads `console.stdout_is_tty()`, colour still reads `FORCE_COLOR`. Reproduced first in a
+real process with a real `> file` redirect and only the model stubbed — the file opened
+`╭─ Report ─…`; after the fix the same command writes the bare report, zero box characters.
+Regression test `test_cli.py::test_run_frames_the_report_only_on_a_real_tty_even_with_colour_forced`
+sets `FORCE_COLOR` itself and fails on the piped arm against the old code.
+
+**O2 — the same variable makes a redirected stderr look interactive.** Outside #49, which is about
+stdout, and in different lines: `cli/app._render_mode` and `_interactive()` read
+`err_console.is_terminal`. With `FORCE_COLOR=3` and `2>log`, `_render_mode` returns `LIVE`, so a
+`Live` region is redrawn into the file; with a tty stdin, `_interactive()` returns `True`, so the
+`i` hint and any clarifying question go to the log where nobody can answer them. Both observed
+directly on the two functions. Not filed, not fixed — reported for triage.
+
 ## Known issues
 
 | Issue | Summary | Status |
@@ -200,4 +234,5 @@ and R3's stdout parsed clean.
 | [#31](https://github.com/pranav8494/orchestra-py/issues/31) | Non-ASCII on a non-UTF-8 stdout (`PYTHONIOENCODING=ascii`) raises `UnicodeEncodeError`; the whole report is discarded and the run exits 1. The ASCII chart's `█` bars make it deterministic on such a terminal. | Pre-existing, filed, unscheduled |
 | [#33](https://github.com/pranav8494/orchestra-py/issues/33) | Visualization can drop an interior category: a three-quarter request charted Q2 and Q4 with the title still claiming Q2–Q4. Values correct, middle point absent. | Filed, unscheduled |
 | [#36](https://github.com/pranav8494/orchestra-py/issues/36) | The executor's wall clock never reaches `Config`, so an operator cannot raise it for a legitimately slow analysis. Confirmed while testing the timeout: the only seam is the class reference in `agents/toolsets.py`. | Filed, unscheduled |
+| [#48](https://github.com/pranav8494/orchestra-py/issues/48) | A key figure can cite an artifact holding only part of it: a compound "retrieved → computed" figure gets one pointer (D1). Model-output dependent — seen once in two live runs of the test. | Filed, unscheduled |
 | [#40](https://github.com/pranav8494/orchestra-py/issues/40) | Tool output is stored and re-sent whole each turn. `fetch_data` now hands anything over 16 kB, or not text, to the analysis step as a pointer, which bounds the worst case; an inlined file and every `search` result are still replayed in full. | Reduced by #46, not closed |
